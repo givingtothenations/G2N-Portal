@@ -1,0 +1,644 @@
+<!--
+  ProductPortalWeb.html
+  Product Entry Portal for G2N Request Management System
+  Displays product list for a specific record ID + Request Date.
+  Edit mode: shows existing DR/PF_Products records for qty updates.
+  New mode: shows full LU_Products catalog for initial entry.
+  Receives recordId and requestDate via server-side template parameters.
+  CRUD via ProductService.gs
+  v1.0
+  v1.1 - Fixed returnToStaffPortal(): navigates via returnUrl instead of
+         window.close() which doesn't work in GAS web apps.
+  v1.2 - Archive-aware: getProductsForRecord() may return archived:true when
+         the ID is not in AM. PP shows a read-only banner and hides Submit
+         button for archived records. archiveSource is displayed in the banner.
+  v1.3 - Desktop-first layout: container widened to 960px. Responsive breakpoints
+         at 900px and 600px.
+  v1.4 - buildProductTable(): stores source, dbId, applicantId in row dataset so
+         submitProducts() can pass them to updateProductRecords() for MySQL path.
+         UpdateProductRecordsAsync needs source+applicantId to route to correct table;
+         without them all edit-mode saves were silently skipped.
+         submitProducts(): productsToSubmit now includes source, id, applicantId.
+  v1.5 - returnToStaffPortal(): PP is now always opened via window.open() from SV,
+         so window.close() is used after save/cancel to close PP and return to the
+         SV tab. Falls back to returnUrl navigation if not opened as child tab.
+  v1.6 - returnToStaffPortal(): removed all GAS URL fallback navigation which
+         caused blank screen / "You need access" auth errors. window.close()
+         always tried first; if blocked shows "Please close this window" message.
+         Success state restyled to match AI staff exit: success-container with
+         checkmark icon, heading, and close-window instruction.
+  v1.7 - DOMContentLoaded: reads recordId/requestDate from URL params as fallback
+         when server template vars are empty. Handles GAS session caching where
+         a cached response body is served without going through doGet() template
+         injection — URL params are always present in the sandbox query string.
+-->
+
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>G2N Product Entry</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            font-size: 14px;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+
+            .header img {
+                max-height: 60px;
+            }
+
+        h1 {
+            color: #1a73e8;
+            margin: 0 0 20px 0;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #1a73e8;
+            font-size: 24px;
+            text-align: center;
+        }
+
+        h3 {
+            color: #333;
+            margin: 20px 0 15px 0;
+            font-size: 16px;
+            background: #e8f0fe;
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .section {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .info-bar {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border: 1px solid #dadce0;
+        }
+
+            .info-bar .info-item {
+                display: flex;
+                gap: 6px;
+                align-items: center;
+            }
+
+            .info-bar .info-label {
+                font-weight: 600;
+                color: #555;
+            }
+
+            .info-bar .info-value {
+                color: #1a73e8;
+                font-weight: 500;
+            }
+
+        .mode-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .mode-edit {
+            background: #e6f4ea;
+            color: #137333;
+        }
+
+        .mode-new {
+            background: #fef7e0;
+            color: #b06000;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        thead th {
+            background: #4a86e8;
+            color: white;
+            padding: 10px 8px;
+            text-align: left;
+            font-size: 13px;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+        }
+
+        tbody td {
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+            font-size: 13px;
+        }
+
+        tbody tr:hover {
+            background: #f0f6ff;
+        }
+
+        .product-id-col {
+            width: 60px;
+            text-align: center;
+            color: #666;
+        }
+
+        .product-name-col {
+            min-width: 200px;
+        }
+
+        .qty-input {
+            width: 80px;
+            padding: 6px 8px;
+            border: 1px solid #dadce0;
+            border-radius: 4px;
+            font-size: 13px;
+            text-align: center;
+        }
+
+            .qty-input:focus {
+                outline: none;
+                border-color: #1a73e8;
+                box-shadow: 0 0 0 2px rgba(26,115,232,0.2);
+            }
+
+        .table-wrapper {
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #1a73e8;
+            color: white;
+        }
+
+            .btn-primary:hover {
+                background: #1557b0;
+                transform: translateY(-1px);
+            }
+
+        .btn-secondary {
+            background: #f1f3f4;
+            color: #333;
+        }
+
+            .btn-secondary:hover {
+                background: #e8eaed;
+            }
+
+        .btn-success {
+            background: #34a853;
+            color: white;
+        }
+
+            .btn-success:hover {
+                background: #2d8f47;
+                transform: translateY(-1px);
+            }
+
+        .btn-block {
+            width: 100%;
+            margin-top: 12px;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 15px;
+        }
+
+            .btn-row button {
+                flex: 1;
+            }
+
+        /* v1.6: Success state styled to match AI staff exit */
+        .success-container {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .success-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .success-container h2 {
+            color: #137333;
+            margin-bottom: 10px;
+        }
+
+        .success-container p {
+            color: #666;
+            margin-top: 10px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .alert {
+            padding: 12px 15px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .alert-info {
+            background: #e8f0fe;
+            color: #1a73e8;
+            border: 1px solid #1a73e8;
+        }
+
+        .alert-success {
+            background: #e6f4ea;
+            color: #137333;
+            border: 1px solid #34a853;
+        }
+
+        .alert-error {
+            background: #fce8e6;
+            color: #c5221f;
+            border: 1px solid #ea4335;
+        }
+
+        .spinner {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+            .spinner::after {
+                content: '';
+                display: inline-block;
+                width: 30px;
+                height: 30px;
+                border: 3px solid #dadce0;
+                border-top-color: #1a73e8;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+                margin-bottom: 10px;
+                vertical-align: middle;
+                margin-right: 10px;
+            }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+        }
+
+        /* v1.3: Responsive breakpoints */
+        @media (max-width: 600px) {
+            body { padding: 10px; }
+            .container { padding: 0; }
+            button { padding: 10px 16px; }
+            .info-bar { flex-direction: column; gap: 8px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>G2N Product Entry</h1>
+
+        <!-- Loading -->
+        <div id="loadingSection" class="section">
+            <div class="spinner">Loading products...</div>
+        </div>
+
+        <!-- Error State -->
+        <div id="errorSection" class="section hidden">
+            <div id="errorMessage" class="alert alert-error"></div>
+            <button class="btn-secondary btn-block" onclick="returnToStaffPortal()">Return to Staff Portal</button>
+        </div>
+
+        <!-- Product Entry Section -->
+        <div id="productSection" class="section hidden">
+            <div class="info-bar">
+                <div class="info-item">
+                    <span class="info-label">Record ID:</span>
+                    <span class="info-value" id="displayRecordId"></span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Request Date:</span>
+                    <span class="info-value" id="displayRequestDate"></span>
+                </div>
+                <div class="info-item">
+                    <span id="modeBadge" class="mode-badge"></span>
+                </div>
+            </div>
+
+            <h3>Products</h3>
+
+            <div id="productTableWrapper" class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="product-id-col">ID</th>
+                            <th class="product-name-col">Product Name</th>
+                            <th>Qty Requested</th>
+                            <th>Qty Received</th>
+                        </tr>
+                    </thead>
+                    <tbody id="productTableBody">
+                    </tbody>
+                </table>
+            </div>
+
+            <div id="submitMessage" class="alert hidden"></div>
+
+            <!-- v1.2: Archive read-only banner -->
+            <div id="archiveBanner" class="alert alert-info hidden" style="background:#fef3cd;border-left:4px solid #e67e22;color:#7d4e00;"></div>
+
+            <div class="btn-row">
+                <button id="submitBtn" class="btn-success" onclick="submitProducts()">Submit</button>
+                <button class="btn-secondary" onclick="returnToStaffPortal()">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Success State (v1.6: styled to match AI staff exit) -->
+        <div id="successSection" class="section hidden">
+            <div class="success-container">
+                <div class="success-icon">✅</div>
+                <h2>Products Saved!</h2>
+                <p id="successMessage"></p>
+                <p style="margin-top: 20px; color: #666;">Please close this window to return to the Staff Portal.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        var productData = null;   // Response from getProductsForRecord
+        var recordId = '';
+        var requestDate = '';
+        var returnUrl = '';
+
+        document.addEventListener('DOMContentLoaded', function () {
+            // Parameters injected server-side by Code.gs doGet()
+            recordId    = '<?= serverRecordId ?>'    || '';
+            requestDate = '<?= serverRequestDate ?>' || '';
+            returnUrl   = '<?= serverReturnUrl ?>'   || '';
+
+            // v1.7: Fallback — read params from URL when template vars are empty.
+            // This handles the case where GAS serves a cached response (e.g. SV HTML)
+            // that didn't go through doGet(), so template vars were never injected.
+            // window.location.href inside GAS iframe is the sandbox URL which contains
+            // the query string forwarded by GAS.
+            if (!recordId || !requestDate) {
+                try {
+                    var urlParams = new URLSearchParams(window.location.search);
+                    recordId    = urlParams.get('recordId')    || recordId;
+                    requestDate = urlParams.get('requestDate') || requestDate;
+                    returnUrl   = urlParams.get('returnUrl')   || returnUrl;
+                } catch (e) { /* URLSearchParams not available */ }
+            }
+
+            if (!recordId || !requestDate) {
+                showError('Missing required parameters. Record ID and Request Date are required.');
+                return;
+            }
+            loadProducts();
+        });
+
+        function loadProducts() {
+            document.getElementById('loadingSection').classList.remove('hidden');
+            document.getElementById('productSection').classList.add('hidden');
+            document.getElementById('errorSection').classList.add('hidden');
+
+            google.script.run
+                .withSuccessHandler(handleProductsLoaded)
+                .withFailureHandler(function (e) {
+                    showError('Failed to load products: ' + e.message);
+                })
+                .getProductsForRecord(recordId, requestDate);
+        }
+
+        function handleProductsLoaded(result) {
+            document.getElementById('loadingSection').classList.add('hidden');
+
+            if (!result.success) {
+                showError(result.error || 'Failed to load products');
+                return;
+            }
+
+            productData = result;
+
+            // Display info
+            document.getElementById('displayRecordId').textContent = result.recordId || recordId;
+            document.getElementById('displayRequestDate').textContent = result.requestDate || requestDate;
+
+            var badge = document.getElementById('modeBadge');
+            // v1.2: Handle archived records
+            if (result.archived) {
+                badge.textContent = 'Archived (Read-Only)';
+                badge.className = 'mode-badge mode-edit';
+                badge.style.background = '#e67e22';
+                var archiveBanner = document.getElementById('archiveBanner');
+                if (archiveBanner) {
+                    archiveBanner.textContent = 'These records are archived (' + (result.archiveSource || 'Archive') + ') and cannot be edited.';
+                    archiveBanner.classList.remove('hidden');
+                }
+                document.getElementById('submitBtn').classList.add('hidden');
+            } else if (result.mode === 'edit') {
+                badge.textContent = 'Editing Existing';
+                badge.className = 'mode-badge mode-edit';
+            } else {
+                badge.textContent = 'New Entry';
+                badge.className = 'mode-badge mode-new';
+            }
+
+            // Build product table
+            buildProductTable(result.products);
+
+            document.getElementById('productSection').classList.remove('hidden');
+        }
+
+        function buildProductTable(products) {
+            var tbody = document.getElementById('productTableBody');
+            tbody.innerHTML = '';
+
+            if (!products || products.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No products available</td></tr>';
+                return;
+            }
+
+            for (var i = 0; i < products.length; i++) {
+                var p = products[i];
+                var tr = document.createElement('tr');
+                tr.dataset.index = i;
+                tr.dataset.sheetRow = p.sheetRow || '';
+                tr.dataset.productId = p.productId || '';
+                tr.dataset.productName = p.productName || '';
+                // v1.4: store MySQL routing fields so updateProductRecords() can route correctly
+                tr.dataset.source = p.source || '';
+                tr.dataset.dbId = p.id != null ? p.id : '';
+                tr.dataset.applicantId = p.applicantId != null ? p.applicantId : '';
+
+                tr.innerHTML =
+                    '<td class="product-id-col">' + escapeHtml(p.productId || '') + '</td>' +
+                    '<td class="product-name-col">' + escapeHtml(p.productName || '') + '</td>' +
+                    '<td><input type="number" class="qty-input qty-requested" min="0" value="' + escapeAttr(p.qtyRequested) + '" data-index="' + i + '"></td>' +
+                    '<td><input type="number" class="qty-input qty-received" min="0" value="' + escapeAttr(p.qtyReceived) + '" data-index="' + i + '"></td>';
+
+                tbody.appendChild(tr);
+            }
+        }
+
+        function submitProducts() {
+            if (!productData) {
+                showSubmitMessage('No product data loaded', 'error');
+                return;
+            }
+
+            // Collect current values from table
+            var rows = document.querySelectorAll('#productTableBody tr');
+            var productsToSubmit = [];
+
+            rows.forEach(function (row) {
+                var idx = row.dataset.index;
+                if (idx === undefined) return;
+
+                var qtyReqInput = row.querySelector('.qty-requested');
+                var qtyRecInput = row.querySelector('.qty-received');
+
+                productsToSubmit.push({
+                    sheetRow: row.dataset.sheetRow || '',
+                    productId: row.dataset.productId || '',
+                    productName: row.dataset.productName || '',
+                    qtyRequested: qtyReqInput ? qtyReqInput.value : '',
+                    qtyReceived: qtyRecInput ? qtyRecInput.value : '',
+                    // v1.4: MySQL routing fields for updateProductRecords()
+                    source: row.dataset.source || '',
+                    id: row.dataset.dbId !== '' ? parseInt(row.dataset.dbId) || null : null,
+                    applicantId: row.dataset.applicantId !== '' ? parseInt(row.dataset.applicantId) || null : null
+                });
+            });
+
+            showSubmitMessage('Saving...', 'info');
+
+            if (productData.mode === 'edit') {
+                // Update existing records
+                google.script.run
+                    .withSuccessHandler(handleSubmitResult)
+                    .withFailureHandler(function (e) {
+                        showSubmitMessage('Error: ' + e.message, 'error');
+                    })
+                    .updateProductRecords(productsToSubmit);
+            } else {
+                // Add new records
+                google.script.run
+                    .withSuccessHandler(handleSubmitResult)
+                    .withFailureHandler(function (e) {
+                        showSubmitMessage('Error: ' + e.message, 'error');
+                    })
+                    .addProductRecords(
+                        productData.recordId || recordId,
+                        productData.requestDate || requestDate,
+                        productsToSubmit
+                    );
+            }
+        }
+
+        function handleSubmitResult(result) {
+            if (result.success) {
+                // 3a: Auto-return to Staff/Volunteer Portal after save
+                returnToStaffPortal();
+            } else {
+                showSubmitMessage('Error: ' + (result.error || 'Unknown error'), 'error');
+            }
+        }
+
+        /**
+         * Returns to the Staff Portal after save or cancel.
+         * v1.5 - PP opened via window.open() from SV; window.close() returns to SV tab.
+         * v1.6 - Removed all GAS URL fallback navigation (returnUrl, getWebAppUrl) which
+         *        caused blank screen / "You need access" auth errors when the URL reloaded
+         *        SV in PP's tab. window.close() tried first; if blocked (e.g. URL-launched
+         *        SV where PP has no valid opener), shows "Please close this window" message.
+         */
+        function returnToStaffPortal() {
+            window.close();
+            setTimeout(function () {
+                if (!window.closed) {
+                    // window.close() was blocked — show friendly message, never navigate
+                    document.getElementById('productSection').classList.add('hidden');
+                    document.getElementById('successSection').classList.remove('hidden');
+                    document.getElementById('successMessage').textContent =
+                        'Done! Please close this window to return to the Staff Portal.';
+                }
+            }, 300);
+        }
+
+        function showError(msg) {
+            document.getElementById('loadingSection').classList.add('hidden');
+            document.getElementById('productSection').classList.add('hidden');
+            document.getElementById('errorMessage').textContent = msg;
+            document.getElementById('errorSection').classList.remove('hidden');
+        }
+
+        function showSubmitMessage(msg, type) {
+            var el = document.getElementById('submitMessage');
+            el.textContent = msg;
+            el.className = 'alert alert-' + type;
+            el.classList.remove('hidden');
+        }
+
+        function escapeHtml(str) {
+            var div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function escapeAttr(val) {
+            if (val === null || val === undefined || val === '') return '';
+            return String(val).replace(/"/g, '&quot;');
+        }
+    </script>
+</body>
+</html>

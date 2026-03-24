@@ -1,0 +1,1694 @@
+﻿<!--
+  StaffVolunteerPortalWeb.html
+  Staff/Volunteer Portal for G2N Request Management System (consolidated single file)
+  Provides: login authentication, record search (by ID/FormID/Name+Date),
+  record viewing/editing, new request creation, status filtering,
+  distribution code filtering, and navigation to Product Portal.
+  Authenticates via AuthService.gs; CRUD via RequestService.gs/SearchService.gs
+  v3.2 - Changed the openIntakeForm function, Funding Source Sync, fixed the Product Portal spinning
+    Sync Last Date Served with Final Service Date
+  v3.3 - Added spinner overlay on Done for Today button click
+  v3.4 - Admin users no longer logged out on Done for Today; just redirects to AP
+  v3.5 - Changed Scheduled Distribution Code from dropdown to text input.
+         Auto-lookup of start date/interval/funding still triggers on blur.
+  v3.6 - Added 'Admin Notes' editable textarea to Information section.
+         Added textarea CSS. Added fld_AdminNotes to FIELD_MAP.
+  v3.7 - Migrated hardcoded FIELD_MAP and populateDropdowns() to LU_FieldMap
+         sheet-driven sources. loadLookups() replaced by loadPortalData() which
+         calls getPortalData() — populates FIELD_MAP, dropdownFields, and lookups
+         in one server round-trip. populateDropdowns() now data-driven with
+         serviceHow→requestTypes fallback preserved.
+  v3.8 - Save Changes: spinner shown during save, hidden on success/failure.
+         Spinner text is context-aware (Saving.../Logging out...).
+         After successful save (non-PP path), auto-returns to search after 2s.
+         After returning from PP tab (visibilitychange), resets to search with message.
+  v3.9 - Desktop-first layout: container widened to 960px. Responsive breakpoints
+         at 900px and 600px.
+  v4.0 - Reverted form layout to single column. Added Scheduled Box Code 3
+         (same options as 1 & 2) and Received Product Code 3 (same options
+         as 1 & 2). Updated DR/PF launch check to include all 3 Received
+         Product Code fields and all 3 Scheduled Box Code fields.
+         Fixed openIntakeForm() bug: error now shown in notFoundSection;
+         on-demand URL fetch when intakeFormUrl is empty.
+  v4.1 - Received Product Code 1/2/3: selecting a PF or DR value immediately
+         opens PP in a new tab (via checkReceivedProductCode onchange handler).
+  v4.2 - Save handler: DR/PF check for PP launch now checks only the 3 Received
+         Product Code fields; Scheduled Box Code fields no longer trigger PP.
+  v4.3 - ppOpenedMidEdit flag: when PP opened via ReceivedProductCode onchange,
+         visibilitychange stays in edit mode instead of resetting to search.
+  v4.4 - Removed PP launch from saveRecord() success handler. PP is now launched
+         only via checkReceivedProductCode onchange. Save always returns to search.
+  v4.5 - Phone number displayed as (XXX) XXX-XXXX via formatPhone() helper.
+         Standard for all portal phone displays.
+  v4.6 - Scheduled Box Code 3: added onchange handler checkScheduledBoxCode3().
+         Selecting a DR or PF value launches Product Portal in a new tab,
+         matching the behaviour of Received Product Code 1/2/3.
+  v4.7 - Fixed null crash in saveRecord(), onSchedDisbCodeChange(), and openRecord():
+         fld_FundingSourceScheduling element no longer exists in the form;
+         all three references replaced with fld_FundingSource (the single
+         Funding Source field). Removed stale syncFundingSource onchange.
+  v4.9 - saveRecord(): rowIndex validation and updateRequest() call now accept
+         G2N-NNNNN format (USE_MYSQL=true path). parseInt() was converting
+         "G2N-05216" to NaN, blocking saves entirely.
+         getFundingDescription(): fixed to use lookups.fundingSourcesData (was
+         lookups.fundingSourceDetails) and handles both Sheets (Code/Description)
+         and MySQL (funding_code/funding_source) key formats.
+         saveRecord(): funding source description now always saved — removed
+         the if(schedCode) gate that was silently skipping it.
+  v4.10- saveRecord(): box_code derivation corrected. received_prod_code1 overrides
+         sched_box_code1 for box_code on both MySQL and Sheets paths. Previously
+         only sched_box_code1 was used and only when non-empty.
+  v4.11- Approvals section: added fld_ApprovedBy (select) and fld_ApprovalDate
+         (date input) HTML elements. Previously missing so approved_by and
+         approval_date were never collected by the FIELD_MAP loop and never saved.
+  v4.12- Search results: added Final Service Date to each result card.
+         Admin Notes field: wrapped in adminNotesGroup div; shown only when isAdmin.
+  v4.13- openIntakeForm(): opens AI in a new tab via window.open() so SV stays
+         open. Listens for postMessage {type:'newRecord', recordId, requestDate}
+         from AI on submit; shows product prompt with the new ID without navigating.
+         goToProductPortal(): opens PP in a new tab via window.open() so SV stays
+         open; product prompt is dismissed after launch.
+         exitPortal() admin path: window.close() instead of redirect — closes the
+         SV tab and returns admin to the AP tab already open behind it.
+  v4.14- Popup-blocker fix for all window.open() calls: when URL already cached,
+         window.open() is called synchronously from the click handler (allowed by
+         browsers). When URL must be fetched async, a blank window is opened first
+         synchronously, then navigated in the callback. Applies to openIntakeForm(),
+         goToProductPortal(), and launchProductPortal().
+         exitPortal() admin path: window.close() when opened by AP (has opener);
+         falls back to AP URL navigation when SV was launched directly via URL.
+  v4.15- exitPortal() admin fallback: removed GAS URL navigation (?page=admin)
+         which caused "You need access" auth error. Now tries window.close(); if
+         blocked shows "Please close this window" message in thankYouOverlay.
+  v4.16- openIntakeForm(): passes staffCode in URL query param so AI can write
+         the staff member's code to the Entered By column instead of "Applicant".
+  v4.17- checkReceivedProductCode() / checkScheduledBoxCode3(): PF values now
+         trigger an immediate saveRecord() + return to search instead of launching
+         PP. DR values continue to open PP in a new tab as before.
+  v4.18- Search falls through to archive workbooks (SearchService v2.5).
+         Archive results shown with (Archived: source) label in result cards.
+         archiveBanner div added to editSection; svSaveBtn id added to Save button.
+  v4.19- Fixed: adminNotesGroup wrapper div was missing from HTML, causing
+         document.getElementById('adminNotesGroup') to return null in openRecord()
+         and silently abort field population for every record. Added the wrapper.
+         All archive/adminNotes element lookups in openRecord() now null-guarded.
+  v4.20- displayResults: added archive label + Final Service Date to result cards.
+         openRecord FIELD_MAP loop: select elements reset to selectedIndex=0 when
+         value is blank (prevents previous record's selection persisting).
+         val now uses strict undefined/null check instead of || '' to preserve
+         falsy non-empty values (e.g. "0").
+         SearchService v2.6: nameDate archive search now only runs when AM returns
+         zero matches — prevents duplicate results for persons in both AM and archive.
+  v4.21- checkReceivedProductCode() / checkScheduledBoxCode3(): v4.17 was only
+         applied to the version comment, not the function bodies. Correctly applied.
+         launchProductPortal(): removed returnUrl parameter.
+  v4.22- Pre-cache Product Portal URL at login. Reverted v4.17: DR and PF launch PP.
+  v4.25- webAppUrl from server-injected template. All portal launches use webAppUrl.
+  v4.26- webAppUrl pre-fetched via getWebAppUrlForPortal() — matches AP pattern.
+  v4.27- noopener,noreferrer attempted and reverted — GAS requires opener auth session.
+         PP v1.7 fix: reads recordId/requestDate from URL params as fallback.
+  v4.28- webAppUrl safety guard removed — template tag in comments caused GAS
+         template engine to throw SyntaxError at evaluate(). Simplified back to
+         direct serverWebAppUrl injection. getWebAppUrlForPortal() called as
+         async fallback at login if webAppUrl is still empty after injection.
+         Code.gs v5.9: createTemplateFromFile restored for 'staff' doGet case.
+-->
+
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>G2N Staff Portal</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            font-size: 14px;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+
+            .header img {
+                max-height: 60px;
+            }
+
+        h1 {
+            color: #1a73e8;
+            margin: 0 0 20px 0;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #1a73e8;
+            font-size: 24px;
+            text-align: center;
+        }
+
+        h3 {
+            color: #333;
+            margin: 20px 0 15px 0;
+            font-size: 16px;
+            background: #e8f0fe;
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .section {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: #333;
+            font-size: 14px;
+        }
+
+        input[type="text"],
+        input[type="date"],
+        input[type="number"],
+        input[type="password"],
+        textarea,
+        select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+            font-family: inherit;
+        }
+
+            textarea.admin-notes {
+                border-color: #f4a820;
+                background: #fffbf2;
+            }
+
+        input[type="text"]:focus,
+        input[type="date"]:focus,
+        input[type="number"]:focus,
+        input[type="password"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 3px rgba(26,115,232,0.2);
+        }
+
+        input[readonly] {
+            background: #f8f9fa;
+            color: #555;
+        }
+
+        .radio-group {
+            display: flex;
+            gap: 20px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+
+            .radio-group label {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-weight: normal;
+                cursor: pointer;
+            }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #1a73e8;
+            color: white;
+        }
+
+            .btn-primary:hover {
+                background: #1557b0;
+                transform: translateY(-1px);
+            }
+
+        .btn-secondary {
+            background: #f1f3f4;
+            color: #333;
+        }
+
+            .btn-secondary:hover {
+                background: #e8eaed;
+            }
+
+        .btn-success {
+            background: #34a853;
+            color: white;
+        }
+
+            .btn-success:hover {
+                background: #2d8f47;
+                transform: translateY(-1px);
+            }
+
+        .btn-warning {
+            background: #ea8600;
+            color: white;
+        }
+
+            .btn-warning:hover {
+                background: #c77200;
+                transform: translateY(-1px);
+            }
+
+        .btn-danger {
+            background: #ea4335;
+            color: white;
+        }
+
+            .btn-danger:hover {
+                background: #c5221f;
+                transform: translateY(-1px);
+            }
+
+        .btn-block {
+            width: 100%;
+            margin-top: 12px;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+            .btn-row button {
+                flex: 1;
+            }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .results-list {
+            max-height: 350px;
+            overflow-y: auto;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+        }
+
+        .result-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+            .result-item:hover {
+                background: #e8f0fe;
+            }
+
+            .result-item:last-child {
+                border-bottom: none;
+            }
+
+            .result-item strong {
+                color: #1a73e8;
+                font-size: 15px;
+            }
+
+            .result-item small {
+                color: #666;
+                display: block;
+                margin-top: 5px;
+            }
+
+        .alert {
+            padding: 12px 15px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .alert-info {
+            background: #e8f0fe;
+            color: #1a73e8;
+            border: 1px solid #1a73e8;
+        }
+
+        .alert-success {
+            background: #e6f4ea;
+            color: #137333;
+            border: 1px solid #34a853;
+        }
+
+        .alert-error {
+            background: #fce8e6;
+            color: #c5221f;
+            border: 1px solid #ea4335;
+        }
+
+        .alert-warning {
+            background: #fef7e0;
+            color: #b06000;
+            border: 1px solid #ea8600;
+        }
+
+        .user-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #e8f0fe;
+            padding: 10px 16px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: #1a73e8;
+            font-weight: 500;
+        }
+
+        .thank-you-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .thank-you-box {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            max-width: 400px;
+        }
+
+            .thank-you-box h2 {
+                color: #34a853;
+                margin: 0 0 15px 0;
+                font-size: 22px;
+            }
+
+            .thank-you-box p {
+                color: #555;
+                margin: 0;
+                font-size: 16px;
+            }
+
+        /* v3.3: Spinner overlay for Done for Today */
+        .spinner-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+            .spinner-overlay .spinner {
+                width: 48px;
+                height: 48px;
+                border: 5px solid rgba(255,255,255,0.3);
+                border-top: 5px solid #fff;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+
+            .spinner-overlay p {
+                color: #fff;
+                margin-top: 16px;
+                font-size: 16px;
+                font-weight: 500;
+            }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* v3.9: Responsive breakpoints */
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+
+            .container {
+                padding: 0;
+            }
+
+            button {
+                padding: 10px 16px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>G2N Staff/Volunteer Portal</h1>
+
+        <!-- Login Section -->
+        <div id="loginSection" class="section">
+            <h3>Staff/Volunteer Login</h3>
+            <div class="form-group">
+                <label>Staff Code:</label>
+                <input type="password" id="staffCode" placeholder="Enter your staff code" style="text-transform: uppercase" oninput="this.value=this.value.toUpperCase()" onkeypress="if(event.key==='Enter')login()">
+            </div>
+            <button class="btn-primary btn-block" onclick="login()">Login</button>
+            <div id="loginMessage" class="alert hidden"></div>
+        </div>
+
+        <!-- Main Portal (hidden until authenticated) -->
+        <div id="mainPortal" class="hidden">
+
+            <div class="user-info">
+                <span>Logged in as: <span id="userName"></span></span>
+                <button class="btn-danger" onclick="exitPortal()" style="padding:8px 16px;">Done for Today</button>
+            </div>
+
+            <!-- Search Section -->
+            <div id="searchSection" class="section">
+                <h3>Search Applicant</h3>
+
+                <div class="form-group">
+                    <label>Search By:</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="searchType" value="id" checked> Record ID</label>
+                        <label><input type="radio" name="searchType" value="formId"> Original Form ID</label>
+                        <label><input type="radio" name="searchType" value="nameDate"> Name + Request Date</label>
+                    </div>
+                </div>
+
+                <div id="idSearch" class="form-group">
+                    <label>Record ID:</label>
+                    <input type="number" id="searchId" placeholder="Enter record ID (Column A)">
+                </div>
+
+                <div id="formIdSearch" class="form-group hidden">
+                    <label>Original Form ID:</label>
+                    <input type="text" id="searchFormId" placeholder="Enter original form ID">
+                </div>
+
+                <div id="nameDateSearch" class="hidden">
+                    <div class="form-group">
+                        <label>First Name:</label>
+                        <input type="text" id="searchFirstName" placeholder="First name">
+                    </div>
+                    <div class="form-group">
+                        <label>Last Name:</label>
+                        <input type="text" id="searchLastName" placeholder="Last name">
+                    </div>
+                    <div class="form-group">
+                        <label>Request Date (optional):</label>
+                        <input type="date" id="searchDate">
+                    </div>
+                </div>
+
+                <button class="btn-primary btn-block" onclick="performSearch()">Search</button>
+
+                <div id="searchMessage" class="alert hidden"></div>
+
+                <div id="searchResults" class="hidden">
+                    <h3>Search Results (<span id="resultCount">0</span> found)</h3>
+                    <div id="resultsList" class="results-list"></div>
+                </div>
+            </div>
+
+            <!-- Product Prompt (shown after AI return) -->
+            <div id="productPromptSection" class="section hidden">
+                <div class="alert alert-success">
+                    <strong>Applicant record created successfully!</strong><br>
+                    Record ID: <span id="newRecordIdDisplay"></span>
+                </div>
+                <p style="margin: 15px 0; color: #333;">Would you like to add Product data to this request?</p>
+                <div class="btn-row">
+                    <button class="btn-success" onclick="goToProductPortal()">Yes, Add Products</button>
+                    <button class="btn-secondary" onclick="dismissProductPrompt()">No, Back to Search</button>
+                </div>
+            </div>
+
+            <!-- Not Found -->
+            <div id="notFoundSection" class="section hidden">
+                <div class="alert alert-info">
+                    <strong>Applicant not found in database.</strong><br>
+                    Would you like to create a new applicant?
+                    <span id="notFoundMessage" style="display:block;margin-top:6px;font-style:italic;color:#555;"></span>
+                </div>
+                <button class="btn-success btn-block" onclick="openIntakeForm()">Open Applicant Intake Form</button>
+                <button class="btn-secondary btn-block" onclick="resetSearch()">Back to Search</button>
+            </div>
+
+            <!-- Edit Form -->
+            <div id="editSection" class="section hidden">
+                <!-- v4.18: Archive banner — shown only for archived records (read-only) -->
+                <div id="archiveBanner" class="alert hidden" style="background:#fff3cd; border:1px solid #ffc107; color:#856404; margin-bottom:12px;">
+                    <strong>📦 Archived Record</strong> — Source: <span id="archiveSourceLabel"></span><br>
+                    <small>This record is in the archive and cannot be edited. Displayed for reference only.</small>
+                </div>
+                <form id="requestForm">
+                    <input type="hidden" id="rowIndex" value="">
+                    <input type="hidden" id="recordId" value="">
+
+                    <!-- Information Section (Read-Only) -->
+                    <h3>Information</h3>
+                    <div class="form-group">
+                        <label>ID:</label>
+                        <input type="text" id="info_ID" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Name:</label>
+                        <input type="text" id="info_Name" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Address:</label>
+                        <input type="text" id="info_Address" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Phone:</label>
+                        <input type="text" id="info_Phone" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Email:</label>
+                        <input type="text" id="info_Email" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Take Baby Box:</label>
+                        <input type="text" id="info_TakeBabyBox" readonly>
+                    </div>
+                    <div class="form-group" id="adminNotesGroup" style="display:none;">
+                        <label>Admin Notes:</label>
+                        <textarea id="fld_AdminNotes" class="admin-notes" placeholder="Internal admin notes about this applicant..."></textarea>
+                    </div>
+
+                    <!-- Staff Entry Section -->
+                    <h3>Staff Entry</h3>
+                    <div class="form-group">
+                        <label>Original Form ID:</label>
+                        <input type="text" id="fld_OriginalFormID">
+                    </div>
+                    <div class="form-group">
+                        <label>Request Date:</label>
+                        <input type="date" id="fld_RequestDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Request Type:</label>
+                        <select id="fld_RequestType"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Last Date Served:</label>
+                        <input type="date" id="fld_LastDateServed" onchange="document.getElementById('fld_FinalServiceContactDate').value=this.value">
+                    </div>
+                    <div class="form-group">
+                        <label>Next Service Availability Date:</label>
+                        <input type="date" id="fld_NextServiceAvailabilityDate">
+                    </div>
+
+                    <!-- Distribution Scheduling Section -->
+                    <h3>Distribution Scheduling</h3>
+                    <div class="form-group">
+                        <label>Scheduled Distribution Code:</label>
+                        <input type="text" id="fld_ScheduledDistributionCode" onblur="onSchedDisbCodeChange()" placeholder="Enter distribution code">
+                    </div>
+                    <div class="form-group">
+                        <label>Scheduled Box Code 1:</label>
+                        <select id="fld_ScheduledBoxCode1"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Scheduled Box Code 2:</label>
+                        <select id="fld_ScheduledBoxCode2"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Scheduled Box Code 3:</label>
+                        <select id="fld_ScheduledBoxCode3" onchange="checkScheduledBoxCode3(this)"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Generic Distribution Code:</label>
+                        <select id="fld_GenericDistributionCode"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Distribution Start Date:</label>
+                        <input type="date" id="fld_DistributionStartDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Distribution Interval:</label>
+                        <input type="text" id="fld_DistributionInterval">
+                    </div>
+
+                    <!-- Distribution Completion Section -->
+                    <h3>Distribution Completion</h3>
+                    <div class="form-group">
+                        <label>First Service Contact Date:</label>
+                        <input type="date" id="fld_FirstServiceContactDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Final Service Contact Date:</label>
+                        <input type="date" id="fld_FinalServiceContactDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Service Status:</label>
+                        <select id="fld_ServiceStatus"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Received Product Code 1:</label>
+                        <select id="fld_ReceivedProductCode1" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Received Product Code 2:</label>
+                        <select id="fld_ReceivedProductCode2" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Received Product Code 3:</label>
+                        <select id="fld_ReceivedProductCode3" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Funding Source:</label>
+                        <select id="fld_FundingSource"><option value="">-- Select --</option></select>
+                    </div>
+
+                    <!-- Approvals Section -->
+                    <h3>Approvals</h3>
+                    <div class="form-group">
+                        <label>Approved By:</label>
+                        <select id="fld_ApprovedBy"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Approval Date:</label>
+                        <input type="date" id="fld_ApprovalDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Processed By:</label>
+                        <select id="fld_ProcessedBy"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Entered By:</label>
+                        <select id="fld_EnteredBy"><option value="">-- Select --</option></select>
+                    </div>
+
+                    <button type="button" id="svSaveBtn" class="btn-success btn-block" onclick="saveRecord()">Save Changes</button>
+                    <button type="button" class="btn-secondary btn-block" onclick="resetSearch()">Back to Search</button>
+                </form>
+
+                <div id="saveMessage" class="alert hidden"></div>
+            </div>
+
+        </div><!-- end mainPortal -->
+    </div>
+
+    <!-- Thank You Overlay (shown on exit for Staff/Volunteer) -->
+    <div id="thankYouOverlay" class="thank-you-overlay hidden">
+        <div class="thank-you-box">
+            <h2>Thank You for your work today!!!</h2>
+            <p>Your dedication makes a difference.</p>
+        </div>
+    </div>
+
+    <!-- v3.3/v3.8: Spinner shown while logging out / redirecting / saving -->
+    <div id="spinnerOverlay" class="spinner-overlay hidden">
+        <div class="spinner"></div>
+        <p id="spinnerText">Working...</p>
+    </div>
+
+    <script>
+        var lookups = {};
+        var currentRecord = null;
+        var currentRowIndex = null;
+        var intakeFormUrl = '';
+        var productPortalUrl = '';
+        // v4.28: webAppUrl injected by Code.gs doGet via createTemplateFromFile.
+        // Falls back to empty string if not injected; getWebAppUrlForPortal() then
+        // fetches it asynchronously via google.script.run on login.
+        var webAppUrl = '<?= serverWebAppUrl ?>';
+        var currentUser = null;
+        var newRecordId = '';
+        var newRecordRequestDate = '';
+        var ppOpenedMidEdit = false; // v4.3: true when PP opened via ReceivedProductCode onchange (mid-edit)
+
+        /**
+         * Formats a 10-digit phone number as (XXX) XXX-XXXX.
+         * Returns the raw value unchanged for any other length.
+         * v4.4 - Standard phone formatter used for all portal phone displays.
+         * @param {string|number} raw
+         * @returns {string}
+         */
+        function formatPhone(raw) {
+            var digits = (raw || '').toString().replace(/\D/g, '');
+            if (digits.length === 10) {
+                return '(' + digits.substring(0, 3) + ') ' + digits.substring(3, 6) + '-' + digits.substring(6);
+            }
+            return (raw || '').toString().trim();
+        }
+
+        // Field mapping: element ID -> actual sheet column name
+        // Populated from LU_FieldMap via getPortalData() on portal load (v3.7)
+        var FIELD_MAP = {};
+
+        document.addEventListener('DOMContentLoaded', function () {
+            checkSession();
+        });
+
+        // ============ AUTH ============
+
+        function checkSession() {
+            google.script.run
+                .withSuccessHandler(function (user) {
+                    if (user && user.code) {
+                        // Existing session found - go straight to portal
+                        currentUser = user;
+                        showMainPortal();
+                    } else {
+                        // No session - show login
+                        document.getElementById('loginSection').classList.remove('hidden');
+                        document.getElementById('mainPortal').classList.add('hidden');
+                    }
+                })
+                .withFailureHandler(function (e) {
+                    console.error('Session check failed:', e);
+                    document.getElementById('loginSection').classList.remove('hidden');
+                    document.getElementById('mainPortal').classList.add('hidden');
+                })
+                .getCurrentUser();
+        }
+
+        function login() {
+            var code = document.getElementById('staffCode').value.trim();
+            if (!code) {
+                showMessage('loginMessage', 'Please enter your staff code', 'error');
+                return;
+            }
+
+            showMessage('loginMessage', 'Authenticating...', 'info');
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        currentUser = result.user;
+                        showMainPortal();
+                    } else {
+                        showMessage('loginMessage', result.error, 'error');
+                    }
+                })
+                .withFailureHandler(function (e) {
+                    showMessage('loginMessage', 'Login failed: ' + e.message, 'error');
+                })
+                .authenticateUser(code);
+        }
+
+        function showMainPortal() {
+            document.getElementById('loginSection').classList.add('hidden');
+            document.getElementById('mainPortal').classList.remove('hidden');
+            document.getElementById('userName').textContent = currentUser.name || currentUser.code;
+
+            // Load portal data (lookups + field map) and other init
+            loadPortalData();
+            setupSearchTypeToggle();
+            getIntakeFormUrl();
+            getProductPortalUrlCache();
+            if (!webAppUrl) getWebAppUrlForPortal(); // v4.28: fallback if template not evaluated
+            checkReturnParams();
+        }
+
+        // v3.8: Helper to set spinner message text
+        function setSpinnerText(text) {
+            var el = document.getElementById('spinnerText');
+            if (el) el.textContent = text;
+        }
+
+        // Auto-refresh when tab regains focus (e.g. after PP tab closes)
+        // v3.8: After PP closes, reset to search with a brief message
+        // v4.3: If PP was opened mid-edit (via ReceivedProductCode onchange), stay in edit mode
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden && currentUser) {
+                var editSection = document.getElementById('editSection');
+                if (editSection && !editSection.classList.contains('hidden')) {
+                    if (ppOpenedMidEdit) {
+                        ppOpenedMidEdit = false;
+                        showMessage('saveMessage', 'Returned from Product Portal. You may continue editing.', 'info');
+                    } else {
+                        showMessage('saveMessage', 'Returned from Product Portal. Returning to search...', 'success');
+                        setTimeout(function () { resetSearch(); }, 2000);
+                    }
+                }
+            }
+        });
+
+        // ============ EXIT / DONE FOR TODAY ============
+
+        function exitPortal() {
+            // v3.3: Show spinner immediately
+            setSpinnerText('Logging out...');
+            document.getElementById('spinnerOverlay').classList.remove('hidden');
+
+            var isAdmin = currentUser && currentUser.isAdmin;
+
+            if (isAdmin) {
+                // v4.15: Try window.close() — works when SV was opened by AP via window.open().
+                // If blocked (URL-launched SV), show thankYouOverlay with an admin-specific message
+                // rather than navigating to a GAS URL which triggers "You need access".
+                document.getElementById('spinnerOverlay').classList.add('hidden');
+                window.close();
+                setTimeout(function () {
+                    if (!window.closed) {
+                        // Close was blocked — show message and hide portal
+                        var box = document.querySelector('#thankYouOverlay .thank-you-box');
+                        if (box) {
+                            box.innerHTML = '<h2>Session Ended</h2>' +
+                                '<p>Please close this window to return to the Admin Portal.</p>';
+                        }
+                        document.getElementById('mainPortal').classList.add('hidden');
+                        document.getElementById('thankYouOverlay').classList.remove('hidden');
+                    }
+                }, 300);
+            } else {
+                // Staff/Volunteer - log out and show thank you
+                google.script.run
+                    .withSuccessHandler(function () {
+                        currentUser = null;
+                        document.getElementById('spinnerOverlay').classList.add('hidden');
+                        document.getElementById('mainPortal').classList.add('hidden');
+                        document.getElementById('thankYouOverlay').classList.remove('hidden');
+                    })
+                    .withFailureHandler(function (e) {
+                        console.error('Logout error:', e);
+                        currentUser = null;
+                        document.getElementById('spinnerOverlay').classList.add('hidden');
+                        document.getElementById('mainPortal').classList.add('hidden');
+                        document.getElementById('thankYouOverlay').classList.remove('hidden');
+                    })
+                    .logoutUser();
+            }
+        }
+
+        // ============ RETURN FROM INTAKE (Product Prompt) ============
+
+        /**
+         * Listens for postMessage from AI (staff mode) after a new intake record is saved.
+         * AI sends { type:'newRecord', recordId, requestDate } then calls window.close().
+         * SV stays open and shows the product prompt with the returned record ID.
+         * v4.13 - Replaces URL-param checkReturnParams() for the window.open() AI flow.
+         */
+        window.addEventListener('message', function (event) {
+            if (!event.data || event.data.type !== 'newRecord') return;
+            var nrId = event.data.recordId || '';
+            var nrDate = event.data.requestDate || '';
+            if (!nrId) return;
+
+            newRecordId = nrId;
+            newRecordRequestDate = nrDate;
+
+            document.getElementById('searchSection').classList.add('hidden');
+            document.getElementById('notFoundSection').classList.add('hidden');
+            document.getElementById('productPromptSection').classList.remove('hidden');
+            document.getElementById('newRecordIdDisplay').textContent = nrId;
+        });
+
+        /**
+         * Kept for URL-param return path (legacy / direct URL navigation).
+         * Reads newRecordId from query string when SV is navigated to after AI submit.
+         */
+        function checkReturnParams() {
+            try {
+                var params = new URLSearchParams(window.location.search);
+                var nrId = params.get('newRecordId');
+                var nrDate = params.get('requestDate');
+
+                if (nrId) {
+                    newRecordId = nrId;
+                    newRecordRequestDate = nrDate || '';
+
+                    // Show product prompt
+                    document.getElementById('searchSection').classList.add('hidden');
+                    document.getElementById('productPromptSection').classList.remove('hidden');
+                    document.getElementById('newRecordIdDisplay').textContent = nrId;
+                }
+            } catch (e) {
+                console.log('URL params not available (expected in iframe):', e);
+            }
+        }
+
+        // ============ PRODUCT PORTAL ============
+
+        /**
+         * Opens PP in a new tab from the product prompt (after new intake via AI).
+         * v4.13 - Changed from window.location.href to window.open() so SV stays open.
+         * v4.14 - Popup-blocker fix: blank window opened synchronously first, then
+         *         navigated in the async callback.
+         */
+        /**
+         * Opens PP from the product prompt (after new intake via AI).
+         * v4.13 - Changed to window.open so SV stays open.
+         * v4.25 - Derive URL from window.location.href — always available, no server call.
+         */
+        function goToProductPortal() {
+            if (!newRecordId) {
+                showMessage('searchMessage', 'No record ID available for products.', 'error');
+                return;
+            }
+            var ppUrl = webAppUrl + '?page=product'
+                + '&recordId=' + encodeURIComponent(newRecordId)
+                + '&requestDate=' + encodeURIComponent(newRecordRequestDate)
+                + '&t=' + Date.now();
+            window.open(ppUrl, '_blank');
+            dismissProductPrompt();
+        }
+
+        function dismissProductPrompt() {
+            document.getElementById('productPromptSection').classList.add('hidden');
+            document.getElementById('searchSection').classList.remove('hidden');
+            newRecordId = '';
+            newRecordRequestDate = '';
+        }
+
+        /**
+         * Opens PP in a new tab for editing product data on an existing record.
+         * v4.25 - Use server-injected webAppUrl (correct exec/dev URL).
+         * @param {string} recId   - Record ID
+         * @param {string} reqDate - Request date
+         */
+        function launchProductPortal(recId, reqDate) {
+            var ppUrl = webAppUrl + '?page=product'
+                + '&recordId=' + encodeURIComponent(recId)
+                + '&requestDate=' + encodeURIComponent(reqDate)
+                + '&t=' + Date.now();
+            window.open(ppUrl, '_blank');
+        }
+
+        /**
+         * Opens PP in a new tab when DR or PF is selected in any Received Product Code field.
+         * v4.1 - New function
+         * v4.3 - Sets ppOpenedMidEdit=true so visibilitychange stays in edit mode
+         * v4.22- Reverted v4.17: PF should also launch PP (PP searches DR/PF_Products
+         *        by record ID and presents existing rows or LU_Products list).
+         * @param {HTMLSelectElement} sel - The changed select element
+         */
+        function checkReceivedProductCode(sel) {
+            var val = sel.value;
+            if (!val) return;
+            if (val.indexOf('DR') !== 0 && val.indexOf('PF') !== 0) return;
+            var recId = document.getElementById('recordId').value;
+            var reqDate = document.getElementById('fld_RequestDate').value;
+            if (recId && reqDate) {
+                ppOpenedMidEdit = true;
+                launchProductPortal(recId, reqDate);
+            }
+        }
+
+        /**
+         * Opens PP in a new tab when DR or PF is selected in Scheduled Box Code 3.
+         * v4.6 - New function; mirrors checkReceivedProductCode logic
+         * v4.22- Reverted v4.17: PF also launches PP.
+         * @param {HTMLSelectElement} sel - The changed select element
+         */
+        function checkScheduledBoxCode3(sel) {
+            var val = sel.value;
+            if (!val) return;
+            if (val.indexOf('DR') !== 0 && val.indexOf('PF') !== 0) return;
+            var recId = document.getElementById('recordId').value;
+            var reqDate = document.getElementById('fld_RequestDate').value;
+            if (recId && reqDate) {
+                ppOpenedMidEdit = true;
+                launchProductPortal(recId, reqDate);
+            }
+        }
+
+        // ============ INTAKE FORM ============
+
+        function getIntakeFormUrl() {
+            google.script.run
+                .withSuccessHandler(function (url) {
+                    intakeFormUrl = url;
+                })
+                .getWebAppUrl();
+        }
+
+        /**
+         * Pre-caches the Product Portal URL at login so launchProductPortal()
+         * can open PP synchronously from the user event (never blocked by popup blocker).
+         * v4.22 - Added
+         */
+        function getProductPortalUrlCache() {
+            google.script.run
+                .withSuccessHandler(function (url) { productPortalUrl = url; })
+                .withFailureHandler(function () { /* non-fatal */ })
+                .getProductPortalUrl();
+        }
+
+        /**
+         * Fallback: pre-fetches base web app URL when template injection was skipped.
+         * v4.28 - Mirrors AP's getWebAppUrlForPortal(). Only called when webAppUrl
+         *         is still '' after template evaluation check.
+         */
+        function getWebAppUrlForPortal() {
+            google.script.run
+                .withSuccessHandler(function (url) { webAppUrl = url; })
+                .withFailureHandler(function () { /* non-fatal */ })
+                .getWebAppUrl();
+        }
+
+        /**
+         * Navigates to the Applicant Intake form in staff mode.
+         * v4.0 - Fixed: error message shown in notFoundSection (not hidden searchSection).
+         *        On-demand URL fetch when intakeFormUrl is empty (handles async timing
+         *        or getWebAppUrl() failure on login).
+         */
+        /**
+         * Opens the Applicant Intake Form in a new tab so SV stays open.
+         * v4.13 - Changed from window.location.href to window.open().
+         * v4.14 - Popup-blocker fix: URL cached → synchronous window.open() (allowed).
+         *         URL not cached → blank window opened first synchronously, then
+         *         navigated in the async callback (avoids popup blocker).
+         * v4.16 - Passes staffCode in URL so AI can set Entered By to the staff member's code.
+         */
+        /**
+         * Opens AI in a new tab so SV stays open.
+         * v4.13 - Changed to window.open.
+         * v4.16 - Passes staffCode URL param.
+         * v4.25 - Derive URL from window.location.href — always available, no server call.
+         */
+        /**
+         * Opens AI in a new tab so SV stays open.
+         * v4.25 - Use server-injected webAppUrl (correct exec/dev URL).
+         */
+        function openIntakeForm() {
+            var returnPage = (currentUser && currentUser.isAdmin) ? 'admin' : 'staff';
+            var staffCode = (currentUser && currentUser.code) ? currentUser.code : '';
+            var aiUrl = webAppUrl + '?mode=staff&returnPage=' + returnPage
+                + (staffCode ? '&staffCode=' + encodeURIComponent(staffCode) : '')
+                + '&t=' + Date.now();
+            window.open(aiUrl, '_blank');
+        }
+
+        // ============ LOOKUPS ============
+
+        /**
+         * Loads all portal initialization data in one server round-trip.
+         * Populates FIELD_MAP from LU_FieldMap via getPortalData(), then drives
+         * populateDropdowns() with server-provided dropdownFields map.
+         * Replaces separate getAllLookups() + hardcoded FIELD_MAP (v3.7).
+         */
+        function loadPortalData() {
+            google.script.run
+                .withSuccessHandler(function (data) {
+                    lookups = data.lookups;
+
+                    // Populate FIELD_MAP from LU_FieldMap sheet-driven source
+                    if (data.fieldMap && Object.keys(data.fieldMap).length > 0) {
+                        FIELD_MAP = data.fieldMap;
+                    } else {
+                        console.warn('getPortalData returned empty fieldMap — LU_FieldMap may be missing Editable/Form Section columns');
+                    }
+
+                    // Update static <label> text from Display Labels in LU_FieldMap.
+                    // Sections data contains { svFieldId, label (=Display Label) } for each field.
+                    // This makes LU_FieldMap the single point of truth for SV field labels.
+                    if (data.sections && data.sections.length > 0) {
+                        updateFieldLabels(data.sections);
+                    }
+
+                    // Populate dropdowns using server-driven lookup source map
+                    populateDropdowns(data.dropdownFields || {});
+                })
+                .withFailureHandler(function (e) {
+                    console.error('Portal data load error:', e);
+                })
+                .getPortalData();
+        }
+
+        /**
+         * Updates static <label> text in the SV form from LU_FieldMap Display Labels.
+         * For each field with an svFieldId, finds its parent .form-group and updates
+         * the first <label> element's text. Falls back to the existing static label
+         * if the field element or label is not found.
+         * Called once on portal load from the getPortalData success handler.
+         * v4.8 - New function. Makes LU_FieldMap Display Label the point of truth for SV labels.
+         * @param {Array} sections - Array of section objects from getStaffPortalSections()
+         */
+        function updateFieldLabels(sections) {
+            for (var s = 0; s < sections.length; s++) {
+                var fields = sections[s].fields || [];
+                for (var f = 0; f < fields.length; f++) {
+                    var field = fields[f];
+                    if (!field.svFieldId || !field.label) continue;
+                    var el = document.getElementById(field.svFieldId);
+                    if (!el) continue;
+                    // Walk up to the parent .form-group
+                    var fg = el.closest('.form-group');
+                    if (!fg) continue;
+                    // Find the first <label> that does not contain an <input>
+                    // (to avoid overwriting radio/checkbox inline labels)
+                    var labels = fg.querySelectorAll('label');
+                    for (var l = 0; l < labels.length; l++) {
+                        if (!labels[l].querySelector('input')) {
+                            labels[l].textContent = field.label + ':';
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Populates all select elements using the server-provided dropdownFields map.
+         * dropdownFields: { formFieldId: lookupKey } from LU_FieldMap Lookup Source column.
+         * Translates uppercase LU_FieldMap keys (e.g. STATES, BOX_CODES) to the
+         * camelCase keys returned by getAllLookups() (e.g. states, boxCodes).
+         * Special case: lookupKey 'serviceHow' falls back to lookups.requestTypes if empty.
+         * @param {Object} dropdownFields - { formFieldId: lookupKey }
+         */
+        function populateDropdowns(dropdownFields) {
+            // Translate uppercase LU_FieldMap Lookup Source values → getAllLookups() keys
+            var keyMap = {
+                'STATES': 'states',
+                'BOX_CODES': 'boxCodes',
+                'DISTRIB_CODES': 'distribCodes',
+                'SERVICE_STATUS': 'serviceStatus',
+                'SERVICE_HOW': 'serviceHow',
+                'STAFF': 'staffList',
+                'SCHED_DISB_CODES': 'schedDisbCodes',
+                'FUNDING_SOURCES': 'fundingSources',
+                'LEARNED_HOW': 'learnedHow',
+                'PERSON_ORG_REFERRED': 'personOrgReferred',
+                'TITLE_REFERRED': 'titleReferred',
+                'MILITARY': 'military',
+                'RACE': 'race',
+                'ETHNICITY': 'ethnicity',
+                'INCOME_LEVELS': 'incomeLevels',
+                'INCOME_SOURCES': 'incomeSources',
+                'PHONE_TYPE': 'phoneType',
+                'ADDRESS_TYPE': 'addressType',
+                'PRODUCTS': 'products'
+            };
+
+            for (var fldId in dropdownFields) {
+                var src = dropdownFields[fldId];
+                var key = keyMap[src] || keyMap[src.toUpperCase()] || src;
+                var vals = lookups[key];
+                // serviceHow falls back to requestTypes if lookup is empty/missing
+                if ((!vals || !vals.length) && (src === 'serviceHow' || src === 'SERVICE_HOW')) {
+                    vals = lookups.requestTypes;
+                }
+                if (vals && vals.length) {
+                    populateSelect(fldId, vals);
+                }
+            }
+            // v4.0: Box Code 3 and Received Product Code 3 mirror options from 1 & 2.
+            // If LU_FieldMap already maps them, populateSelect is idempotent. If not,
+            // this cloneSelectOptions fallback ensures they are always populated.
+            cloneSelectOptions('fld_ScheduledBoxCode1', 'fld_ScheduledBoxCode3');
+            cloneSelectOptions('fld_ReceivedProductCode1', 'fld_ReceivedProductCode3');
+        }
+
+        /**
+         * Copies all <option> elements from srcId select to dstId select,
+         * preserving the blank first option. No-op if dst is already populated
+         * beyond the placeholder or if src does not exist.
+         * v4.0 - Used for Box Code 3 / Received Product Code 3 mirrors.
+         */
+        function cloneSelectOptions(srcId, dstId) {
+            var src = document.getElementById(srcId);
+            var dst = document.getElementById(dstId);
+            if (!src || !dst || src.options.length <= 1 || dst.options.length > 1) return;
+            // Keep existing blank first option, append rest from source
+            for (var i = 1; i < src.options.length; i++) {
+                var opt = document.createElement('option');
+                opt.value = src.options[i].value;
+                opt.textContent = src.options[i].textContent;
+                dst.appendChild(opt);
+            }
+        }
+
+        function populateSelect(id, values) {
+            var sel = document.getElementById(id);
+            if (!sel) {
+                return;
+            }
+            if (!values || !values.length) {
+                return;
+            }
+            var first = sel.options[0];
+            sel.innerHTML = '';
+            sel.appendChild(first);
+            values.forEach(function (v) {
+                if (v) {
+                    var opt = document.createElement('option');
+                    opt.value = v;
+                    opt.textContent = v;
+                    sel.appendChild(opt);
+                }
+            });
+        }
+
+        // ============ SCHED DISB CODE AUTO-POPULATE ============
+
+        function onSchedDisbCodeChange() {
+            var code = document.getElementById('fld_ScheduledDistributionCode').value;
+            if (!code) {
+                return;
+            }
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        // Populate Distribution Start Date
+                        if (result.startDate) {
+                            var dateStr = formatDateForInput(result.startDate);
+                            if (dateStr) {
+                                document.getElementById('fld_DistributionStartDate').value = dateStr;
+                            }
+                        }
+
+                        // Populate Distribution Interval
+                        if (result.interval !== undefined && result.interval !== '') {
+                            document.getElementById('fld_DistributionInterval').value = result.interval;
+                        }
+
+                        // Populate Funding Source
+                        // v4.7: fld_FundingSourceScheduling removed; fld_FundingSource is the single field
+                        if (result.fundingCode) {
+                            var completionSel = document.getElementById('fld_FundingSource');
+                            for (var j = 0; j < completionSel.options.length; j++) {
+                                if (completionSel.options[j].value === result.fundingCode) {
+                                    completionSel.selectedIndex = j;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                })
+                .withFailureHandler(function (e) {
+                    console.error('SchedDisbCode lookup error:', e);
+                })
+                .getSchedDisbCodeDetails(code);
+        }
+
+        /**
+         * Syncs Funding Source value between Scheduling and Completion sections
+         * @param {string} sourceId - Element ID that changed
+         * @param {string} targetId - Element ID to update
+         */
+        function syncFundingSource(sourceId, targetId) {
+            var val = document.getElementById(sourceId).value;
+            var target = document.getElementById(targetId);
+            if (target) {
+                target.value = val;
+            }
+        }
+
+        function formatDateForInput(dateStr) {
+            if (!dateStr) return '';
+            try {
+                var d = new Date(dateStr);
+                if (isNaN(d.getTime())) return '';
+                var year = d.getFullYear();
+                var month = ('0' + (d.getMonth() + 1)).slice(-2);
+                var day = ('0' + d.getDate()).slice(-2);
+                return year + '-' + month + '-' + day;
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function getFundingDescription(fundingCode) {
+            // v4.9: use fundingSourcesData (was fundingSourceDetails).
+            // Handle both Sheets path (Code/Description) and MySQL path (funding_code/funding_source).
+            var src = lookups.fundingSourcesData || lookups.fundingSourceDetails;
+            if (!src) return '';
+            for (var i = 0; i < src.length; i++) {
+                var code = src[i].funding_code || src[i].Code || '';
+                if (code === fundingCode) {
+                    return src[i].funding_source || src[i].Description || '';
+                }
+            }
+            return '';
+        }
+
+        // ============ SEARCH ============
+
+        function setupSearchTypeToggle() {
+            var radios = document.querySelectorAll('input[name="searchType"]');
+            radios.forEach(function (r) {
+                r.addEventListener('change', function () {
+                    document.getElementById('idSearch').classList.add('hidden');
+                    document.getElementById('formIdSearch').classList.add('hidden');
+                    document.getElementById('nameDateSearch').classList.add('hidden');
+                    switch (this.value) {
+                        case 'id':
+                            document.getElementById('idSearch').classList.remove('hidden');
+                            break;
+                        case 'formId':
+                            document.getElementById('formIdSearch').classList.remove('hidden');
+                            break;
+                        case 'nameDate':
+                            document.getElementById('nameDateSearch').classList.remove('hidden');
+                            break;
+                    }
+                });
+            });
+        }
+
+        function performSearch() {
+            var searchType = document.querySelector('input[name="searchType"]:checked').value;
+            var searchParams = {};
+
+            switch (searchType) {
+                case 'id':
+                    var id = document.getElementById('searchId').value;
+                    if (!id) {
+                        showMessage('searchMessage', 'Please enter a Record ID', 'error');
+                        return;
+                    }
+                    searchParams = { searchType: 'id', id: parseInt(id) };
+                    break;
+                case 'formId':
+                    var formId = document.getElementById('searchFormId').value.trim();
+                    if (!formId) {
+                        showMessage('searchMessage', 'Please enter an Original Form ID', 'error');
+                        return;
+                    }
+                    searchParams = { searchType: 'formId', formId: formId };
+                    break;
+                case 'nameDate':
+                    var first = document.getElementById('searchFirstName').value.trim();
+                    var last = document.getElementById('searchLastName').value.trim();
+                    if (!first && !last) {
+                        showMessage('searchMessage', 'Please enter at least a first or last name', 'error');
+                        return;
+                    }
+                    searchParams = {
+                        searchType: 'nameDate',
+                        firstName: first,
+                        lastName: last,
+                        date: document.getElementById('searchDate').value
+                    };
+                    break;
+            }
+
+            showMessage('searchMessage', 'Searching...', 'info');
+            document.getElementById('searchResults').classList.add('hidden');
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        if (result.results) {
+                            // Multiple results (nameDate search with 2+ matches)
+                            document.getElementById('searchMessage').classList.add('hidden');
+                            displayResults(result.results);
+                        } else if (result.record) {
+                            // Single result (id, formId, or nameDate with 1 match)
+                            document.getElementById('searchMessage').classList.add('hidden');
+                            openRecord(result.record, result.rowIndex);
+                        } else {
+                            showMessage('searchMessage', '', 'info');
+                            document.getElementById('searchSection').classList.add('hidden');
+                            document.getElementById('notFoundSection').classList.remove('hidden');
+                        }
+                    } else {
+                        if (result.notFound) {
+                            document.getElementById('searchSection').classList.add('hidden');
+                            document.getElementById('notFoundSection').classList.remove('hidden');
+                        } else {
+                            showMessage('searchMessage', result.error, 'error');
+                        }
+                    }
+                })
+                .withFailureHandler(function (e) {
+                    showMessage('searchMessage', 'Search error: ' + e.message, 'error');
+                })
+                .searchRecords(searchParams);
+        }
+
+        function displayResults(results) {
+            document.getElementById('resultCount').textContent = results.length;
+
+            var list = document.getElementById('resultsList');
+            list.innerHTML = '';
+
+            results.forEach(function (r) {
+                var div = document.createElement('div');
+                div.className = 'result-item';
+                var archiveLabel = r.record['_archived']
+                    ? ' <span style="color:#856404;font-size:0.8rem;font-weight:600;">(Archived: ' + (r.record['_archiveSource'] || '') + ')</span>'
+                    : '';
+                div.innerHTML = '<strong>ID: ' + r.record['ID'] + '</strong> - ' +
+                    (r.record['First Name'] || '') + ' ' + (r.record['Last Name'] || '') +
+                    archiveLabel +
+                    '<small>' + (r.record['City'] || '') + ', ' + (r.record['State'] || '') +
+                    ' | Request Date: ' + (r.record['Request Date'] || 'N/A') +
+                    ' | Final Service Date: ' + (r.record['Final Service Contact Date'] || 'N/A') +
+                    ' | Status: ' + (r.record['Service Status'] || 'N/A') + '</small>';
+                div.onclick = function () {
+                    openRecord(r.record, r.rowIndex);
+                };
+                list.appendChild(div);
+            });
+
+            document.getElementById('searchResults').classList.remove('hidden');
+        }
+
+        // ============ RECORD EDITING ============
+
+        function openRecord(rec, rowIdx) {
+            currentRecord = rec;
+            currentRowIndex = rowIdx;
+
+            // Show edit section
+            document.getElementById('searchSection').classList.add('hidden');
+            document.getElementById('searchResults').classList.add('hidden');
+            document.getElementById('notFoundSection').classList.add('hidden');
+            document.getElementById('editSection').classList.remove('hidden');
+
+            // Set hidden fields
+            document.getElementById('rowIndex').value = rowIdx;
+            document.getElementById('recordId').value = rec['ID'];
+
+            // Populate Request Date — not in FIELD_MAP (read-only display),
+            // keyed as 'Request Date' on Sheets path, 'signature_date' on MySQL fallback.
+            // Used by launchProductPortal() and checkReceivedProductCode().
+            var reqDateVal = rec['Request Date'] || rec['signature_date'] || '';
+            if (reqDateVal) {
+                var rdEl = document.getElementById('fld_RequestDate');
+                if (rdEl) {
+                    // Convert M/d/yyyy or MM/DD/YYYY to YYYY-MM-DD for date input
+                    if (typeof reqDateVal === 'string' && reqDateVal.indexOf('/') > -1) {
+                        var rp = reqDateVal.split('/');
+                        if (rp.length === 3) {
+                            var ry = rp[2].length === 2 ? '20' + rp[2] : rp[2];
+                            reqDateVal = ry + '-' + rp[0].padStart(2, '0') + '-' + rp[1].padStart(2, '0');
+                        }
+                    }
+                    rdEl.value = reqDateVal;
+                }
+            }
+
+            // Populate Information Section (read-only)
+            // v4.12/v4.18: archive banner, Admin Notes visibility, Save button — all null-guarded
+            var isArchived = !!(rec && rec['_archived']);
+            var archiveBannerEl = document.getElementById('archiveBanner');
+            if (archiveBannerEl) archiveBannerEl.classList.toggle('hidden', !isArchived);
+            var archiveSourceEl = document.getElementById('archiveSourceLabel');
+            if (archiveSourceEl) archiveSourceEl.textContent = (rec && rec['_archiveSource']) || '';
+            var svSaveBtnEl = document.getElementById('svSaveBtn');
+            if (svSaveBtnEl) svSaveBtnEl.style.display = isArchived ? 'none' : '';
+            var adminNotesGroupEl = document.getElementById('adminNotesGroup');
+            if (adminNotesGroupEl) {
+                adminNotesGroupEl.style.display = (currentUser && currentUser.isAdmin) ? '' : 'none';
+            }
+            document.getElementById('info_ID').value = rec['ID'] || '';
+            document.getElementById('info_Name').value = ((rec['First Name'] || '') + ' ' + (rec['Last Name'] || '')).trim();
+
+            var address = (rec['Street Address'] || '');
+            if (rec['Apartment #, Upper, Lower, or Lot #']) {
+                address += ' ' + rec['Apartment #, Upper, Lower, or Lot #'];
+            }
+            address += ', ' + (rec['City'] || '') + ', ' + (rec['State'] || '') + ' ' + (rec['Zip Code'] || '');
+            document.getElementById('info_Address').value = address;
+
+            document.getElementById('info_Phone').value = formatPhone(rec['Phone Number'] || '');
+            document.getElementById('info_Email').value = rec['Email'] || '';
+            document.getElementById('info_TakeBabyBox').value = rec['Take Baby Box?'] || '';
+
+            // Load editable field values from record
+            // v4.20: for select elements, if val is '' reset to index 0 to prevent
+            // the previous record's selection persisting when a field is blank.
+            for (var elId in FIELD_MAP) {
+                var colName = FIELD_MAP[elId];
+                var el = document.getElementById(elId);
+                if (el) {
+                    var val = (rec[colName] !== undefined && rec[colName] !== null) ? rec[colName].toString() : '';
+
+                    // Convert MM/DD/YYYY to YYYY-MM-DD for date inputs
+                    if (val && el.type === 'date' && val.indexOf('/') > -1) {
+                        var parts = val.split('/');
+                        if (parts.length === 3) {
+                            var year = parts[2].length === 2 ? '20' + parts[2] : parts[2];
+                            val = year + '-' + parts[0].padStart(2, '0') + '-' + parts[1].padStart(2, '0');
+                        }
+                    }
+
+                    if (el.tagName === 'SELECT' && val === '') {
+                        el.selectedIndex = 0;  // reset to placeholder option
+                    } else {
+                        el.value = val;
+                    }
+                }
+            }
+
+            // Auto-fill Entered By with the authenticated user's code
+            if (currentUser && currentUser.code) {
+                var enteredByEl = document.getElementById('fld_EnteredBy');
+                if (enteredByEl) {
+                    enteredByEl.value = currentUser.code;
+                }
+            }
+
+            // Load Funding Code into the single Funding Source field
+            // v4.7: fld_FundingSourceScheduling removed; use fld_FundingSource only
+            var fundingCodeVal = rec['Funding Code'] || '';
+            if (fundingCodeVal) {
+                var completionFundingSel = document.getElementById('fld_FundingSource');
+                if (completionFundingSel) completionFundingSel.value = fundingCodeVal;
+            }
+        }
+
+        // ============ SAVE ============
+
+        function saveRecord() {
+            var rowIdx = document.getElementById('rowIndex').value;
+
+            // Use currentRowIndex if hidden field is empty
+            if (!rowIdx && currentRowIndex) {
+                rowIdx = currentRowIndex;
+            }
+
+            // v4.9: accept G2N-NNNNN (MySQL path) as a valid rowIndex
+            var isG2N = typeof rowIdx === 'string' && rowIdx.startsWith('G2N-');
+            if (!rowIdx || (!isG2N && isNaN(parseInt(rowIdx)))) {
+                showMessage('saveMessage', 'Error: No record loaded. Row index is: ' + rowIdx, 'error');
+                return;
+            }
+
+            var data = {};
+
+            // Collect all form data using FIELD_MAP
+            for (var elId in FIELD_MAP) {
+                var colName = FIELD_MAP[elId];
+                var el = document.getElementById(elId);
+                if (el) {
+                    data[colName] = el.value;
+                }
+            }
+
+            // v4.10: box_code derivation — received_prod_code1 overrides sched_box_code1.
+            // Both Sheets and MySQL paths: if received_prod_code1 is set it wins;
+            // otherwise fall back to sched_box_code1.
+            var schedBoxCode1 = document.getElementById('fld_ScheduledBoxCode1').value;
+            var recvProdCode1 = document.getElementById('fld_ReceivedProductCode1') ?
+                document.getElementById('fld_ReceivedProductCode1').value : '';
+            var boxCode = recvProdCode1 || schedBoxCode1 || '';
+            if (boxCode) {
+                data['Box Code'] = boxCode;
+            }
+
+            // v4.9: Always save Funding Source description alongside Funding Code.
+            var fundingCode = document.getElementById('fld_FundingSource').value;
+            if (fundingCode) {
+                var desc = getFundingDescription(fundingCode);
+                if (desc) {
+                    data['Funding Source'] = desc;
+                }
+            }
+
+            // v3.8: Show spinner during save
+            setSpinnerText('Saving...');
+            document.getElementById('spinnerOverlay').classList.remove('hidden');
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    document.getElementById('spinnerOverlay').classList.add('hidden');
+                    if (result.success) {
+                        // v4.4: PP launched only via checkReceivedProductCode onchange.
+                        // Save always returns to search — no PP launch on submit.
+                        showMessage('saveMessage', result.message + ' (' + result.changesCount + ' fields updated) — Returning to search...', 'success');
+                        setTimeout(function () { resetSearch(); }, 2000);
+                    } else {
+                        showMessage('saveMessage', 'Error: ' + result.error, 'error');
+                    }
+                })
+                .withFailureHandler(function (e) {
+                    document.getElementById('spinnerOverlay').classList.add('hidden');
+                    console.error('Save failed:', e);
+                    showMessage('saveMessage', 'Error: ' + e.message, 'error');
+                })
+                .updateRequest(isG2N ? rowIdx : parseInt(rowIdx), data);
+        }
+
+        // ============ RESET / UTILITIES ============
+
+        function resetSearch() {
+            document.getElementById('searchSection').classList.remove('hidden');
+            document.getElementById('editSection').classList.add('hidden');
+            document.getElementById('notFoundSection').classList.add('hidden');
+            document.getElementById('searchResults').classList.add('hidden');
+            document.getElementById('searchMessage').classList.add('hidden');
+            document.getElementById('saveMessage').classList.add('hidden');
+            document.getElementById('productPromptSection').classList.add('hidden');
+            document.getElementById('searchId').value = '';
+            document.getElementById('searchFormId').value = '';
+            document.getElementById('searchFirstName').value = '';
+            document.getElementById('searchLastName').value = '';
+            document.getElementById('searchDate').value = '';
+            currentRecord = null;
+            currentRowIndex = null;
+        }
+
+        function showMessage(id, msg, type) {
+            var el = document.getElementById(id);
+            el.textContent = msg;
+            el.className = 'alert alert-' + type;
+            el.classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>

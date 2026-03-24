@@ -1,0 +1,1588 @@
+<!--
+  ApplicantIntake.html
+  Public-facing applicant intake form for G2N Request Management System
+  Collects personal info, address, demographics, age brackets, service preferences,
+  and testimonials. Supports Event Mode (auto-fills box code and funding source).
+  Validates required fields, phone/email/zip formats, and requires at least one adult.
+  Submits via google.script.run to IntakeService.gs → submitIntakeForm()
+  v3.3 - 1 - Detect authorized user context, 2 - Add Cancel button,
+        3 - Update Submit button behavior, 4 - Return-to-portal mechanism
+  v3.4 - Phase 2: Google Maps address verification integration
+        1 - Verify Address button calls AddressService.gs verifyAddress()
+        2 - On success: auto-populates Street, City, State, Zip, County from Google
+        3 - Gate form submission: must verify or fail 2 attempts before proceeding
+        4 - Staff/Event mode bypasses address verification requirement
+        5 - Address field edits reset verification status, requiring re-verify
+  v3.5 - Save address verification confidence to AM "Address Validity" column
+        1 - Tracks addrConfidence (HIGH/MEDIUM/LOW/ERROR) from verification result
+        2 - Adds addressValidity to formData on submit
+        3 - Staff/Event mode saves as STAFF_BYPASS
+        4 - Resets confidence when address fields are edited
+        5 - Logs intake session start (public/staff/event + user agent) to AuditLog
+        6 - Auto-triggers verification when user clicks any field after County
+  v3.6 - Phone number display formatting
+        1 - Input displays as (xxx) xxx-xxxx while typing
+        2 - Saved to AM as unformatted 10-digit string
+  v3.7 - Updated public confirmation message to reflect 2-3 week processing time
+         and reference 'Best Contact' field from Intake Form
+  v3.8 - Signature Date: public users see read-only field locked to today's date.
+         Staff/event mode users may freely edit the date (existing behaviour).
+  v3.9 - Staff mode post-submit: sends postMessage {type:'newRecord', recordId,
+         requestDate} to window.opener (SV) then calls window.close() so SV can
+         receive the new ID and show the product prompt without navigating away.
+         cancelForm(): calls window.close() instead of navigating back to portal.
+  v3.10- cancelForm() and post-submit staff fallback: removed GAS URL navigation
+         which caused "You need access" auth error. window.close() always tried
+         first; if blocked, shows "Please close this window" message inline.
+  v3.11- Staff mode: reads staffCode URL param (set by SV openIntakeForm()) and
+         passes it as formData.enteredBy so IntakeService writes the staff member's
+         code to the Entered By column instead of "Applicant".
+-->
+
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>G2N Applicant Intake Form</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: #1a73e8;
+            color: white;
+            padding: 25px 30px;
+            text-align: center;
+        }
+
+            .header h1 {
+                margin: 0 0 5px 0;
+                font-size: 1.8rem;
+            }
+
+            .header p {
+                margin: 0;
+                opacity: 0.9;
+                font-size: 0.95rem;
+            }
+
+        .form-body {
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            padding-bottom: 25px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+            .section:last-child {
+                border-bottom: none;
+                margin-bottom: 0;
+            }
+
+        .section-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #1a73e8;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e8f0fe;
+        }
+
+        .section-desc {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+            font-weight: bold;
+            font-style: italic;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: #333;
+            font-size: 0.9rem;
+        }
+
+            label .required {
+                color: #ea4335;
+                margin-left: 2px;
+            }
+
+        input[type="text"], input[type="email"], input[type="tel"], input[type="date"], input[type="number"], select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+            input:focus, select:focus, textarea:focus {
+                outline: none;
+                border-color: #1a73e8;
+                box-shadow: 0 0 0 3px rgba(26,115,232,0.15);
+            }
+
+            input.error, select.error, textarea.error {
+                border-color: #ea4335;
+                background: #fef7f7;
+            }
+
+        .error-message {
+            color: #ea4335;
+            font-size: 0.8rem;
+            margin-top: 4px;
+            display: none;
+        }
+
+            .error-message.show {
+                display: block;
+            }
+
+        textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+
+        .radio-group, .checkbox-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 8px;
+        }
+
+            .radio-group label, .checkbox-group label {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-weight: normal;
+                cursor: pointer;
+                margin-bottom: 0;
+            }
+
+        .checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+            .checkbox-grid label {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-weight: normal;
+                cursor: pointer;
+                font-size: 0.85rem;
+                margin-bottom: 0;
+            }
+
+        .age-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin-top: 10px;
+        }
+
+            .age-table th {
+                background: #1a73e8;
+                color: white;
+                padding: 10px 8px;
+                text-align: left;
+            }
+
+            .age-table td {
+                padding: 8px;
+                border-bottom: 1px solid #eee;
+            }
+
+            .age-table tr:hover {
+                background: #f8f9fa;
+            }
+
+            .age-table select {
+                width: 60px;
+                padding: 6px;
+                border: 1px solid #dadce0;
+                border-radius: 4px;
+            }
+
+        .btn {
+            padding: 14px 28px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #1a73e8;
+            color: white;
+            width: 100%;
+        }
+
+            .btn-primary:hover {
+                background: #1557b0;
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(26,115,232,0.3);
+            }
+
+            .btn-primary:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+                transform: none;
+                box-shadow: none;
+            }
+
+        .btn-secondary {
+            background: #f1f3f4;
+            color: #5f6368;
+            border: 1px solid #dadce0;
+        }
+
+            .btn-secondary:hover {
+                background: #e8eaed;
+                transform: translateY(-1px);
+            }
+
+        .button-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+            .button-row .btn {
+                flex: 1;
+            }
+
+        .alert {
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+        }
+
+        .alert-success {
+            background: #e6f4ea;
+            color: #137333;
+            border: 1px solid #34a853;
+        }
+
+        .alert-error {
+            background: #fce8e6;
+            color: #c5221f;
+            border: 1px solid #ea4335;
+        }
+
+        .alert-info {
+            background: #e8f0fe;
+            color: #1a73e8;
+            border: 1px solid #1a73e8;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #1a73e8;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .success-container {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .success-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .success-container h2 {
+            color: #137333;
+            margin-bottom: 10px;
+        }
+
+        /* ===== v3.4 Address Verification Styles ===== */
+        .btn-verify {
+            background: #1a73e8;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+            .btn-verify:hover {
+                background: #1557b0;
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(26,115,232,0.3);
+            }
+
+            .btn-verify:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+                transform: none;
+                box-shadow: none;
+            }
+
+        .addr-verify-panel {
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+            .addr-verify-panel.success {
+                background: #e6f4ea;
+                border: 1px solid #34a853;
+                color: #137333;
+            }
+
+            .addr-verify-panel.error {
+                background: #fce8e6;
+                border: 1px solid #ea4335;
+                color: #c5221f;
+            }
+
+            .addr-verify-panel.warning {
+                background: #fef7e0;
+                border: 1px solid #f9ab00;
+                color: #8a6d00;
+            }
+
+            .addr-verify-panel .addr-label {
+                font-weight: 600;
+                margin-bottom: 6px;
+            }
+
+            .addr-verify-panel .addr-detail {
+                margin: 4px 0;
+            }
+
+        .addr-verify-status {
+            display: inline-block;
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+            .addr-verify-status.verified {
+                background: #e6f4ea;
+                color: #137333;
+            }
+
+            .addr-verify-status.unverified {
+                background: #fce8e6;
+                color: #c5221f;
+            }
+
+            .addr-verify-status.bypassed {
+                background: #fef7e0;
+                color: #8a6d00;
+            }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="https://givingtothenations.org" target="_blank">
+                <img src="https://drive.google.com/uc?export=view&id=1D0iRBEpdzlOoLFjQbZmsEJKmYJ0IX5kH" alt=" Giving to the Nations" style="max-height: 80px; margin-bottom: 15px;">
+            </a>
+            <h1>Applicant Intake Form</h1>
+            <p>Giving to the Nations - Request for Services</p>
+        </div>
+
+        <div class="form-body">
+            <div id="loadingState" class="loading">
+                <div class="loading-spinner"></div>
+                <p>Loading form...</p>
+            </div>
+
+            <div id="successState" class="success-container hidden">
+                <div class="success-icon">✅</div>
+                <h2>Thank You!</h2>
+                <p>Your application has been submitted successfully.</p>
+                <p id="confirmationId"></p>
+                <p style="margin-top: 20px; color: #666;">Our processing time is approximately 2-3 weeks. We will get back with you using the 'Best Contact' provided in your Intake Form.</p>
+            </div>
+
+            <form id="intakeForm" class="hidden">
+
+                <!-- Hidden outdoor event field (auto-set based on event dates) -->
+                <input type="hidden" id="outdoorEvent" name="outdoorEvent" value="No">
+
+                <!-- Section 1: How Did You Hear About Us -->
+                <div class="section">
+                    <div class="section-title">Section 1: How Did You Hear About Us</div>
+                    <p class="section-desc">Please answer the questions below so we may serve you better.</p>
+
+                    <div class="form-group">
+                        <label>How did you learn about our program? <span class="required req-marker">*</span></label>
+                        <select id="learnedHow" name="learnedHow" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>More information about the person or organization that referred you <span class="required req-marker">*</span></label>
+                        <select id="referralInfo" name="referralInfo" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>What is the title or position of the person who referred you? <span class="required req-marker">*</span></label>
+                        <select id="referrerTitle" name="referrerTitle" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>What is the person's name who referred you?</label>
+                        <input type="text" id="referrerName" name="referrerName" placeholder="Enter name (if known)">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Please tell us anything else about how you heard about Giving to the Nations</label>
+                        <textarea id="additionalInfo" name="additionalInfo" placeholder="Optional additional information..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Have you used our services before? <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="usedServicesBefore" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="usedServicesBefore" value="No"> No</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Are you currently homeless? <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="currentlyHomeless" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="currentlyHomeless" value="No"> No</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 2: Applicant Information -->
+                <div class="section">
+                    <div class="section-title">Section 2: Applicant Information</div>
+
+                    <div class="form-group">
+                        <label>First Name <span class="required req-marker">*</span></label>
+                        <input type="text" id="firstName" name="firstName" class="req-field" required>
+                        <div class="error-message" id="firstNameError">First name is required</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Last Name <span class="required req-marker">*</span></label>
+                        <input type="text" id="lastName" name="lastName" class="req-field" required>
+                        <div class="error-message" id="lastNameError">Last name is required</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Street Address <span class="required req-marker">*</span></label>
+                        <input type="text" id="streetAddress" name="streetAddress" class="req-field addr-field" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Apartment #, Upper, Lower, or Lot #</label>
+                        <input type="text" id="apartment" name="apartment" placeholder="Optional">
+                    </div>
+
+                    <div class="form-group">
+                        <label>City <span class="required req-marker">*</span></label>
+                        <input type="text" id="city" name="city" class="req-field addr-field" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label>State <span class="required req-marker">*</span></label>
+                        <select id="state" name="state" class="req-field addr-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Zip Code <span class="required req-marker">*</span></label>
+                        <input type="text" id="zipCode" name="zipCode" class="req-field addr-field" required maxlength="5" pattern="[0-9]{5}" placeholder="5 digits">
+                        <div class="error-message" id="zipCodeError">Zip code must be 5 digits</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>County <span class="required req-marker">*</span></label>
+                        <input type="text" id="county" name="county" class="req-field" required>
+                    </div>
+
+                    <!-- v3.4: Address Verification Button and Result Panel -->
+                    <div class="form-group">
+                        <button type="button" id="verifyAddrBtn" class="btn-verify" onclick="verifyAddress()">
+                            Verify Address
+                        </button>
+                        <span id="addrVerifyStatus" class="addr-verify-status hidden"></span>
+                        <div id="addrVerifyPanel" class="addr-verify-panel hidden"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Address Type <span class="required req-marker">*</span></label>
+                        <select id="addressType" name="addressType" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Phone Number <span class="required req-marker">*</span></label>
+                        <input type="tel" id="phoneNumber" name="phoneNumber" class="req-field" required maxlength="14" placeholder="(555) 555-5555">
+                        <div class="error-message" id="phoneNumberError">Phone must be 10 digits</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Phone Type <span class="required req-marker">*</span></label>
+                        <select id="phoneType" name="phoneType" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Email <span class="required req-marker">*</span></label>
+                        <input type="email" id="email" name="email" class="req-field" required>
+                        <div class="error-message" id="emailError">Please enter a valid email address</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Best contact method <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="bestContact" value="Phone" class="req-field" required> Phone</label>
+                            <label><input type="radio" name="bestContact" value="Email"> Email</label>
+                            <label><input type="radio" name="bestContact" value="Text"> Text</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 3: Household Information -->
+                <div class="section">
+                    <div class="section-title">Section 3: Household Information</div>
+                    <p class="section-desc">Enter the number of people who live in your home by age category. For example, if you have 1 boy under 5 years old, you would choose the number 1 by 'Males under 5'.</p>
+
+                    <table class="age-table">
+                        <thead>
+                            <tr><th>Age Category</th><th>Count</th><th>Age Category</th><th>Count</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Males under 5</td>
+                                <td><select name="malesUnder5" id="malesUnder5"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females under 5</td>
+                                <td><select name="femalesUnder5" id="femalesUnder5"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 5-9</td>
+                                <td><select name="males5to9" id="males5to9"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 5-9</td>
+                                <td><select name="females5to9" id="females5to9"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 10-14</td>
+                                <td><select name="males10to14" id="males10to14"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 10-14</td>
+                                <td><select name="females10to14" id="females10to14"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 15-17</td>
+                                <td><select name="males15to17" id="males15to17"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 15-17</td>
+                                <td><select name="females15to17" id="females15to17"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 18-24</td>
+                                <td><select name="males18to24" id="males18to24"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 18-24</td>
+                                <td><select name="females18to24" id="females18to24"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 25-34</td>
+                                <td><select name="males25to34" id="males25to34"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 25-34</td>
+                                <td><select name="females25to34" id="females25to34"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 35-44</td>
+                                <td><select name="males35to44" id="males35to44"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 35-44</td>
+                                <td><select name="females35to44" id="females35to44"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 45-54</td>
+                                <td><select name="males45to54" id="males45to54"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 45-54</td>
+                                <td><select name="females45to54" id="females45to54"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 55-64</td>
+                                <td><select name="males55to64" id="males55to64"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 55-64</td>
+                                <td><select name="females55to64" id="females55to64"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 65-84</td>
+                                <td><select name="males65to84" id="males65to84"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 65-84</td>
+                                <td><select name="females65to84" id="females65to84"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                            <tr>
+                                <td>Males 85 and Over</td>
+                                <td><select name="males85plus" id="males85plus"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                                <td>Females 85 and Over</td>
+                                <td><select name="females85plus" id="females85plus"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select></td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div class="form-group" style="margin-top: 20px;">
+                        <label>Any children in your home newborn to 2 years old? <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="childrenNewbornTo2" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="childrenNewbornTo2" value="No"> No</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 4: About You -->
+                <div class="section">
+                    <div class="section-title">Section 4: About You</div>
+
+                    <div class="form-group">
+                        <label>Military Status <span class="required req-marker">*</span></label>
+                        <select id="militaryStatus" name="militaryStatus" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Please Select Your Racial Category <span class="required req-marker">*</span></label>
+                        <select id="racialCategory" name="racialCategory" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Please Select Your Ethnic Category <span class="required req-marker">*</span></label>
+                        <select id="ethnicCategory" name="ethnicCategory" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Are you receiving any assistance? <span class="required req-marker">*</span><br><small>Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.</small></label>
+                        <div id="assistanceContainer" class="checkbox-grid"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Are you currently employed? <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="currentlyEmployed" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="currentlyEmployed" value="No"> No</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Total annual household income <span class="required req-marker">*</span><br><small>(How much money does your family make in 1 year?)</small></label>
+                        <select id="annualIncome" name="annualIncome" class="req-field" required><option value="">-- Select --</option></select>
+                    </div>
+                </div>
+
+                <!-- Section 5: About Contacting -->
+                <div class="section">
+                    <div class="section-title">Section 5: About Contacting Giving to the Nations</div>
+
+                    <div class="form-group">
+                        <label>Was there an emergency situation which caused you to contact us? <span class="required req-marker">*</span></label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="emergencySituation" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="emergencySituation" value="No"> No</label>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Briefly explain your current situation <span class="required req-marker">*</span></label>
+                        <textarea id="currentSituation" name="currentSituation" class="req-field" required placeholder="Please describe your situation..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>How will receiving personal and home cleaning products help you? <span class="required req-marker">*</span></label>
+                        <textarea id="howProductsHelp" name="howProductsHelp" class="req-field" required placeholder="Please explain how these products will help..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>If you have received cleaning products from us in the past, how has receiving these products helped you?</label>
+                        <textarea id="pastProductsHelped" name="pastProductsHelped" placeholder="Optional - if you've received products before..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>May we use the information you provided above to share with potential donors? <span class="required req-marker">*</span></label>
+                        <p class="section-desc">ONLY the information from the 2 questions above about HOW WILL and HOW DID receiving cleaning products help will be shared.</p>
+                        <div class="radio-group">
+                            <label><input type="radio" name="mayUseInfo" value="Yes" class="req-field" required> Yes</label>
+                            <label><input type="radio" name="mayUseInfo" value="No"> No</label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 6: Acknowledgement -->
+                <div class="section">
+                    <div class="section-title">Section 6: Applicant Acknowledgement</div>
+
+                    <div class="alert alert-info">
+                        <strong>NOTE:</strong> Your answers on this form are important to help determine how to best serve you, and to obtain funding to support our programs.<br><br>
+                        <strong>I certify that I am a member of the household listed above and that all information regarding my household is true to the best of my knowledge.</strong>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Applicant Signature (Type your full name) <span class="required req-marker">*</span></label>
+                        <input type="text" id="applicantSignature" name="applicantSignature" class="req-field" required placeholder="Type your full legal name">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Signature Date <span id="sigDateNote" style="font-size:0.8rem; color:#666; font-weight:normal;">(set to today's date)</span></label>
+                        <input type="date" id="signatureDate" name="signatureDate">
+                    </div>
+
+                    <!-- Hidden date field - auto-populated -->
+                    <input type="hidden" id="formDate" name="formDate">
+                </div>
+
+                <div id="submitMessage" class="alert hidden"></div>
+                <div class="button-row">
+                    <button type="button" class="btn btn-secondary hidden" id="cancelBtn" onclick="cancelForm()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn">Submit Application</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let lookups = {};
+        let isEventMode = false;
+        let isStaffMode = false;
+        let enforceRequired = true;
+        let currentEventInfo = null;
+        let returnPage = '';
+        let webAppUrl = '';
+        let staffCode = '';  // v3.11: staff member's code, passed from SV via URL param
+
+        // v3.4: Address verification state
+        let addressVerified = false;   // true after successful verification
+        let addrFailCount = 0;         // count of failed verification attempts
+        let addrBypassed = false;      // true when bypassed after 2 failures
+        let addrVerifyInFlight = false; // true while API call is pending
+        let addrConfidence = '';        // stores confidence level (HIGH/MEDIUM/LOW) for saving to AM
+
+        document.addEventListener('DOMContentLoaded', function () {
+            // Read server-injected template parameters (safe from iframe sandboxing)
+            var serverMode = '<?= serverMode ?>' || '';
+            returnPage = '<?= serverReturnPage ?>' || '';
+            webAppUrl = '<?= serverWebAppUrl ?>' || '';
+
+            isStaffMode = (serverMode === 'staff');
+
+            // v3.11: Read staffCode from URL param (set by SV's openIntakeForm())
+            try {
+                var urlParams = new URLSearchParams(window.location.search);
+                staffCode = urlParams.get('staffCode') || '';
+            } catch (e) { staffCode = ''; }
+
+            if (isStaffMode) {
+                // Authorized user mode - show Cancel button, change Submit text
+                document.getElementById('cancelBtn').classList.remove('hidden');
+                document.getElementById('submitBtn').textContent = 'Save & Return';
+
+                // Staff mode - remove all required fields immediately
+                removeRequiredFields();
+                currentEventInfo = { isActive: false };
+                loadLookups();
+
+                // v3.5: Log staff intake session
+                logIntakeSessionToAudit('staff');
+            } else {
+                // Normal public mode - check event info
+                loadFormData();
+            }
+            setDefaultDate();
+
+            // v3.4: Listen for changes on address fields to reset verification
+            initAddrFieldListeners();
+            // v3.4: Auto-trigger verification when clicking fields after County
+            initAutoVerifyListeners();
+        });
+
+        /**
+         * v3.5: Logs an intake session start to the AuditLog via IntakeService.
+         * Fires once on page load after mode is determined.
+         * @param {string} mode - 'public', 'staff', or 'event'
+         */
+        function logIntakeSessionToAudit(mode) {
+            google.script.run
+                .withFailureHandler(function (e) { console.log('Session log failed: ' + e.message); })
+                .logIntakeSession({ mode: mode, userAgent: navigator.userAgent });
+        }
+
+        /**
+         * Cancel form without saving.
+         * v3.9 - In staff mode the form is opened in a new tab from SV; window.close() returns to SV.
+         * v3.10- Removed GAS URL fallback navigation which caused "You need access" auth error.
+         *        If window.close() is blocked, hides the form and shows a friendly message.
+         */
+        function cancelForm() {
+            if (isStaffMode) {
+                window.close();
+                // If close was blocked, show message instead of navigating to a GAS URL
+                setTimeout(function () {
+                    if (!window.closed) {
+                        var form = document.getElementById('intakeForm');
+                        if (form) form.classList.add('hidden');
+                        var ss = document.getElementById('successState');
+                        if (ss) {
+                            ss.classList.remove('hidden');
+                            ss.innerHTML = '<div class="success-icon">✓</div>' +
+                                '<h2>Cancelled</h2>' +
+                                '<p>Please close this window to return to the Staff Portal.</p>';
+                        }
+                    }
+                }, 300);
+            }
+        }
+
+        /**
+         * Sets default date fields to today's date.
+         * v3.8 - Public users: Signature Date locked to today (readonly).
+         *        Staff/event users: Signature Date remains editable; note hidden.
+         */
+        function setDefaultDate() {
+            var today = new Date().toISOString().split('T')[0];
+            document.getElementById('formDate').value = today;
+            document.getElementById('signatureDate').value = today;
+            if (!isStaffMode && !isEventMode) {
+                var sigField = document.getElementById('signatureDate');
+                sigField.setAttribute('readonly', 'readonly');
+                sigField.style.background = '#f1f3f4';
+                sigField.style.cursor = 'not-allowed';
+            } else {
+                var sigField = document.getElementById('signatureDate');
+                sigField.removeAttribute('readonly');
+                sigField.style.background = '';
+                sigField.style.cursor = '';
+                var note = document.getElementById('sigDateNote');
+                if (note) note.style.display = 'none';
+            }
+        }
+
+        /**
+         * Loads event info then lookups for public mode.
+         * v3.8 - Calls setDefaultDate() after event mode is determined so signature
+         *        date lock is applied correctly for public vs event users.
+         */
+        function loadFormData() {
+            // First check event info, then load lookups
+            google.script.run
+                .withSuccessHandler(function (eventInfo) {
+                    currentEventInfo = eventInfo;
+                    isEventMode = eventInfo.isActive;
+                    if (isEventMode) {
+                        document.getElementById('outdoorEvent').value = 'Yes';
+                        removeRequiredFields();
+                    } else {
+                        document.getElementById('outdoorEvent').value = 'No';
+                    }
+                    // v3.8: Re-apply after isEventMode is known
+                    setDefaultDate();
+                    loadLookups();
+
+                    // v3.5: Log public/event intake session
+                    logIntakeSessionToAudit(isEventMode ? 'event' : 'public');
+                })
+                .withFailureHandler(function (error) {
+                    console.log('Event info check failed, continuing with defaults');
+                    currentEventInfo = { isActive: false };
+                    setDefaultDate();
+                    loadLookups();
+
+                    // v3.5: Log public intake session (event check failed)
+                    logIntakeSessionToAudit('public');
+                })
+                .getEventInfo();
+        }
+
+        /**
+         * Removes all required field constraints and hides asterisks (event/staff mode)
+         */
+        function removeRequiredFields() {
+            enforceRequired = false;
+            // Remove required attribute from all fields
+            document.querySelectorAll('.req-field').forEach(function (field) {
+                field.removeAttribute('required');
+            });
+            // Hide all required markers (asterisks)
+            document.querySelectorAll('.req-marker').forEach(function (marker) {
+                marker.classList.add('hidden');
+            });
+        }
+
+        /**
+         * Loads lookup values and field map from server, populates dropdowns.
+         * v2.0 - Migrated to data-driven approach via getIntakePortalData() +
+         *        LU_FieldMap Lookup Source column, matching StaffVolunteerPortalWeb pattern.
+         */
+        function loadLookups() {
+            google.script.run
+                .withSuccessHandler(function (data) {
+                    lookups = data.lookups;
+                    populateDropdowns(data.dropdownFields || {});
+                    document.getElementById('loadingState').classList.add('hidden');
+                    document.getElementById('intakeForm').classList.remove('hidden');
+                })
+                .withFailureHandler(function (error) {
+                    document.getElementById('loadingState').innerHTML =
+                        '<div class="alert alert-error">Error loading form: ' + error.message + '</div>';
+                })
+                .getIntakePortalData();
+        }
+
+        /**
+         * Populates all dropdown selects using the LU_FieldMap-driven map.
+         * Translates uppercase Lookup Source keys to camelCase getAllLookups() keys.
+         * Falls back to hardcoded mapping for fields not in LU_FieldMap.
+         * @param {Object} dropdownFields - { htmlElementId: lookupSourceKey }
+         */
+        function populateDropdowns(dropdownFields) {
+            // Translate uppercase LU_FieldMap Lookup Source → getIntakeLookups() keys
+            var keyMap = {
+                'STATES':              'states',
+                'LEARNED_HOW':         'learnedHow',
+                'PERSON_ORG_REFERRED': 'personOrgReferred',
+                'TITLE_REFERRED':      'titleReferred',
+                'MILITARY':            'military',
+                'RACE':                'race',
+                'ETHNICITY':           'ethnicity',
+                'INCOME_LEVELS':       'incomeLevels',
+                'INCOME_SOURCES':      'incomeSources',
+                'PHONE_TYPE':          'phoneType',
+                'ADDRESS_TYPE':        'addressType'
+            };
+
+            // Data-driven: populate selects from LU_FieldMap
+            var populated = {};
+            for (var fldId in dropdownFields) {
+                var src  = dropdownFields[fldId];
+                var key  = keyMap[src] || keyMap[src.toUpperCase()] || src;
+                var vals = lookups[key];
+                if (vals && vals.length) {
+                    populateSelect(fldId, vals);
+                    populated[fldId] = true;
+                }
+            }
+
+            // Hardcoded fallback for any selects not covered by LU_FieldMap
+            var fallbacks = {
+                'learnedHow':    'learnedHow',
+                'referralInfo':  'personOrgReferred',
+                'referrerTitle': 'titleReferred',
+                'state':         'states',
+                'addressType':   'addressType',
+                'phoneType':     'phoneType',
+                'militaryStatus':'military',
+                'racialCategory':'race',
+                'ethnicCategory':'ethnicity',
+                'annualIncome':  'incomeLevels'
+            };
+            for (var id in fallbacks) {
+                if (!populated[id]) {
+                    var vals = lookups[fallbacks[id]];
+                    if (vals && vals.length) populateSelect(id, vals);
+                }
+            }
+
+            // Assistance checkboxes (incomeSources) — always hardcoded, not a select
+            var container = document.getElementById('assistanceContainer');
+            if (lookups.incomeSources && container && container.children.length === 0) {
+                lookups.incomeSources.forEach(function (source) {
+                    var label = document.createElement('label');
+                    label.innerHTML = '<input type="checkbox" name="assistanceReceiving" value="' + source + '"> ' + source;
+                    container.appendChild(label);
+                });
+            }
+        }
+
+        /**
+         * Populates a select element with an array of values
+         * @param {string} elementId - The select element's ID
+         * @param {Array} values - Array of option values/labels
+         */
+        function populateSelect(elementId, values) {
+            const select = document.getElementById(elementId);
+            if (!select || !values) return;
+
+            values.forEach(function (value) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                select.appendChild(option);
+            });
+        }
+
+        // Form validation - prevent default and call submitForm
+        document.getElementById('intakeForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            submitForm();
+        });
+
+        // v3.6: Real-time phone formatting - displays as (xxx) xxx-xxxx, validates 10 digits
+        document.getElementById('phoneNumber').addEventListener('input', function (e) {
+            const digits = e.target.value.replace(/\D/g, '').substring(0, 10);
+            let formatted = digits;
+            if (digits.length >= 7) {
+                formatted = '(' + digits.substring(0, 3) + ') ' + digits.substring(3, 6) + '-' + digits.substring(6);
+            } else if (digits.length >= 4) {
+                formatted = '(' + digits.substring(0, 3) + ') ' + digits.substring(3);
+            } else if (digits.length > 0) {
+                formatted = '(' + digits;
+            }
+            e.target.value = formatted;
+            const errorEl = document.getElementById('phoneNumberError');
+            if (digits.length > 0 && digits.length !== 10) {
+                e.target.classList.add('error');
+                errorEl.classList.add('show');
+            } else {
+                e.target.classList.remove('error');
+                errorEl.classList.remove('show');
+            }
+        });
+
+        // Real-time validation: zip code - digits only, 5 required
+        document.getElementById('zipCode').addEventListener('input', function (e) {
+            const digits = e.target.value.replace(/\D/g, '');
+            e.target.value = digits;
+            const errorEl = document.getElementById('zipCodeError');
+            if (digits.length > 0 && digits.length !== 5) {
+                e.target.classList.add('error');
+                errorEl.classList.add('show');
+            } else {
+                e.target.classList.remove('error');
+                errorEl.classList.remove('show');
+            }
+        });
+
+        // Real-time validation: email format on blur
+        document.getElementById('email').addEventListener('blur', function (e) {
+            const email = e.target.value;
+            const errorEl = document.getElementById('emailError');
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (email && !emailRegex.test(email)) {
+                e.target.classList.add('error');
+                errorEl.classList.add('show');
+            } else {
+                e.target.classList.remove('error');
+                errorEl.classList.remove('show');
+            }
+        });
+
+        // ============================================================
+        // v3.4: ADDRESS VERIFICATION FUNCTIONS
+        // ============================================================
+
+        /**
+         * Attaches change/input listeners to address fields (street, city, state, zip).
+         * When any address field is modified after verification, resets the verification
+         * status so the user must re-verify. Does NOT reset the fail counter.
+         */
+        function initAddrFieldListeners() {
+            document.querySelectorAll('.addr-field').forEach(function (field) {
+                field.addEventListener('input', function () {
+                    if (addressVerified || addrBypassed) {
+                        resetAddrVerification(false);
+                    }
+                });
+                // Also catch select changes (State dropdown)
+                field.addEventListener('change', function () {
+                    if (addressVerified || addrBypassed) {
+                        resetAddrVerification(false);
+                    }
+                });
+            });
+        }
+
+        /**
+         * Attaches focus listeners to all form fields after the County field.
+         * If the user clicks any of these fields without having verified (or bypassed)
+         * the address, and all four address fields have values, auto-triggers verification.
+         * Skipped in staff/event mode.
+         */
+        function initAutoVerifyListeners() {
+            // All interactive elements after County: addressType onward through end of form
+            var postAddrIds = [
+                'addressType', 'phoneNumber', 'phoneType', 'email',
+                'applicantSignature', 'signatureDate',
+                'militaryStatus', 'racialCategory', 'ethnicCategory',
+                'annualIncome', 'currentSituation', 'howProductsHelp', 'pastProductsHelped'
+            ];
+
+            postAddrIds.forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener('focus', autoTriggerVerify);
+                }
+            });
+
+            // Also catch radio buttons and checkboxes in sections after address
+            document.querySelectorAll(
+                'input[name="bestContact"], input[name="childrenNewbornTo2"], ' +
+                'input[name="currentlyEmployed"], input[name="emergencySituation"], ' +
+                'input[name="mayUseInfo"], input[name="assistanceReceiving"]'
+            ).forEach(function (el) {
+                el.addEventListener('focus', autoTriggerVerify);
+            });
+
+            // Age table selects
+            document.querySelectorAll('.age-table select').forEach(function (el) {
+                el.addEventListener('focus', autoTriggerVerify);
+            });
+        }
+
+        /**
+         * Auto-triggers address verification if not yet verified/bypassed,
+         * all address fields are filled, and we're not in staff/event mode.
+         * Called on focus of any field after the County section.
+         */
+        function autoTriggerVerify() {
+            // Skip if already satisfied or in bypass mode
+            if (addressVerified || addrBypassed) return;
+            if (isStaffMode || !enforceRequired) return;
+
+            // Only auto-trigger if all four address fields have values
+            var street = document.getElementById('streetAddress').value.trim();
+            var city = document.getElementById('city').value.trim();
+            var state = document.getElementById('state').value.trim();
+            var zip = document.getElementById('zipCode').value.trim();
+
+            if (street && city && state && zip) {
+                verifyAddress();
+            }
+        }
+
+        /**
+         * Resets address verification state. Called when address fields change
+         * after a successful verification or bypass.
+         * @param {boolean} fullReset - If true, also resets fail counter
+         */
+        function resetAddrVerification(fullReset) {
+            addressVerified = false;
+            addrBypassed = false;
+            addrConfidence = '';
+            if (fullReset) {
+                addrFailCount = 0;
+            }
+            var statusEl = document.getElementById('addrVerifyStatus');
+            var panelEl = document.getElementById('addrVerifyPanel');
+            statusEl.className = 'addr-verify-status hidden';
+            statusEl.textContent = '';
+            panelEl.className = 'addr-verify-panel hidden';
+            panelEl.innerHTML = '';
+            document.getElementById('verifyAddrBtn').disabled = false;
+            document.getElementById('verifyAddrBtn').textContent = 'Verify Address';
+        }
+
+        /**
+         * Calls the server-side verifyAddress() in AddressService.gs.
+         * On success: auto-populates all address fields from Google's response.
+         * On failure: increments fail counter; after 2 failures allows bypass.
+         */
+        function verifyAddress() {
+            // Prevent duplicate calls while one is in flight
+            if (addrVerifyInFlight) return;
+
+            var street = document.getElementById('streetAddress').value.trim();
+            var city = document.getElementById('city').value.trim();
+            var state = document.getElementById('state').value.trim();
+            var zip = document.getElementById('zipCode').value.trim();
+
+            // Basic client-side check before calling server
+            if (!street || !city || !state || !zip) {
+                showAddrPanel('error', 'Please fill in Street Address, City, State, and Zip Code before verifying.');
+                return;
+            }
+
+            var btn = document.getElementById('verifyAddrBtn');
+            btn.disabled = true;
+            btn.textContent = 'Verifying...';
+            addrVerifyInFlight = true;
+
+            google.script.run
+                .withSuccessHandler(handleVerifyResult)
+                .withFailureHandler(function (error) {
+                    handleVerifyResult({ success: false, error: 'Verification service error: ' + error.message });
+                })
+                .verifyAddress({
+                    street: street,
+                    city: city,
+                    state: state,
+                    zip: zip
+                });
+        }
+
+        /**
+         * Handles the result from AddressService.verifyAddress().
+         * On success: populates ALL form fields with Google verified data and shows confirmation.
+         * On failure: shows error, increments fail counter, offers bypass after 2 failures.
+         * @param {Object} result - The verifyAddress result object from AddressService
+         */
+        function handleVerifyResult(result) {
+            var btn = document.getElementById('verifyAddrBtn');
+            btn.disabled = false;
+            addrVerifyInFlight = false;
+
+            if (result.success && result.confidence !== 'LOW') {
+                var v = result.verified;
+
+                // Auto-populate all address fields from Google's verified response
+                document.getElementById('streetAddress').value = v.street || '';
+                document.getElementById('city').value = v.city || '';
+                document.getElementById('zipCode').value = v.zip || '';
+                document.getElementById('county').value = v.county || '';
+
+                // Set State dropdown - try short name first, then long name
+                setStateDropdown(v.state, v.stateLong);
+
+                // Mark as verified
+                addressVerified = true;
+                addrBypassed = false;
+                addrConfidence = result.confidence; // HIGH or MEDIUM
+                btn.textContent = 'Verified';
+
+                // Show verified status badge
+                var statusEl = document.getElementById('addrVerifyStatus');
+                statusEl.className = 'addr-verify-status verified';
+                statusEl.textContent = 'Verified';
+
+                showAddrPanel('success',
+                    '<div class="addr-label">Address verified and fields updated:</div>' +
+                    '<div class="addr-detail">' + v.formattedAddress + '</div>' +
+                    '<div class="addr-detail">County: ' + (v.county || 'Not available') + '</div>'
+                );
+
+            } else if (result.success && result.confidence === 'LOW') {
+                // LOW confidence = treated as failure (incomplete/vague match)
+                addrFailCount++;
+                var v = result.verified;
+                var statusEl = document.getElementById('addrVerifyStatus');
+
+                if (addrFailCount >= 2) {
+                    addrBypassed = true;
+                    addrConfidence = 'LOW'; // bypassed after 2 low-confidence attempts
+                    statusEl.className = 'addr-verify-status bypassed';
+                    statusEl.textContent = 'Bypassed';
+                    btn.textContent = 'Verify Address';
+
+                    showAddrPanel('warning',
+                        '<div class="addr-label">Verification bypassed</div>' +
+                        '<div class="addr-detail">Google returned a low confidence match: ' + (v.formattedAddress || '') + '</div>' +
+                        '<div class="addr-detail" style="margin-top:8px;">Address could not be verified with sufficient confidence after 2 attempts. ' +
+                        'You may proceed with the address as entered. Please double-check it is correct.</div>'
+                    );
+                } else {
+                    statusEl.className = 'addr-verify-status unverified';
+                    statusEl.textContent = 'Not Verified';
+                    btn.textContent = 'Verify Address';
+
+                    showAddrPanel('error',
+                        '<div class="addr-label">Low confidence match (Attempt ' + addrFailCount + ' of 2)</div>' +
+                        '<div class="addr-detail">Google could not confidently verify: ' + (v.formattedAddress || '') + '</div>' +
+                        '<div class="addr-detail" style="margin-top:8px;">Please ensure Street Address, City, State, and Zip Code are all filled in correctly, then try again.</div>'
+                    );
+                }
+
+            } else {
+                // Verification failed
+                addrFailCount++;
+                var msg = result.error || 'Address could not be verified.';
+
+                if (addrFailCount >= 2) {
+                    // After 2 failures, allow bypass
+                    addrBypassed = true;
+                    addrConfidence = 'ERROR'; // bypassed after 2 API errors
+                    var statusEl = document.getElementById('addrVerifyStatus');
+                    statusEl.className = 'addr-verify-status bypassed';
+                    statusEl.textContent = 'Bypassed';
+                    btn.textContent = 'Verify Address';
+
+                    showAddrPanel('warning',
+                        '<div class="addr-label">Verification bypassed</div>' +
+                        '<div class="addr-detail">' + msg + '</div>' +
+                        '<div class="addr-detail" style="margin-top:8px;">Address could not be verified after 2 attempts. ' +
+                        'You may proceed with the address as entered. Please double-check it is correct.</div>'
+                    );
+                } else {
+                    // First failure - must try again
+                    var statusEl = document.getElementById('addrVerifyStatus');
+                    statusEl.className = 'addr-verify-status unverified';
+                    statusEl.textContent = 'Not Verified';
+                    btn.textContent = 'Verify Address';
+
+                    showAddrPanel('error',
+                        '<div class="addr-label">Verification failed (Attempt ' + addrFailCount + ' of 2)</div>' +
+                        '<div class="addr-detail">' + msg + '</div>' +
+                        '<div class="addr-detail" style="margin-top:8px;">Please check the address and try again.</div>'
+                    );
+                }
+            }
+        }
+
+        /**
+         * Sets the State dropdown to match the Google-verified state value.
+         * Tries short name (e.g. "OH"), then long name (e.g. "Ohio"), case-insensitive.
+         * @param {string} stateShort - State abbreviation from Google
+         * @param {string} stateLong - Full state name from Google
+         */
+        function setStateDropdown(stateShort, stateLong) {
+            var sel = document.getElementById('state');
+            // Try exact match on short name first
+            for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === stateShort) {
+                    sel.selectedIndex = i;
+                    return;
+                }
+            }
+            // Try exact match on long name
+            for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === stateLong) {
+                    sel.selectedIndex = i;
+                    return;
+                }
+            }
+            // Try case-insensitive match on long name
+            if (stateLong) {
+                var lower = stateLong.toLowerCase();
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value.toLowerCase() === lower ||
+                        sel.options[i].text.toLowerCase() === lower) {
+                        sel.selectedIndex = i;
+                        return;
+                    }
+                }
+            }
+        }
+
+        /**
+         * Shows the address verification result panel with the given type and HTML content.
+         * @param {string} type - 'success', 'error', or 'warning'
+         * @param {string} html - HTML content to display
+         */
+        function showAddrPanel(type, html) {
+            var panel = document.getElementById('addrVerifyPanel');
+            panel.className = 'addr-verify-panel ' + type;
+            panel.innerHTML = html;
+            panel.classList.remove('hidden');
+        }
+
+        /**
+         * Checks if address verification requirement is satisfied for form submission.
+         * Bypassed in staff mode and event mode. Public users must verify or fail 2 times.
+         * @returns {boolean} true if OK to proceed, false if blocked
+         */
+        function isAddressVerificationSatisfied() {
+            // Staff mode and event mode bypass verification
+            if (isStaffMode || !enforceRequired) return true;
+
+            // Address is verified or has been bypassed after 2 failures
+            if (addressVerified || addrBypassed) return true;
+
+            return false;
+        }
+
+        // ============================================================
+        // FORM SUBMISSION
+        // ============================================================
+
+        /**
+         * Validates the form and submits to server via google.script.run.
+         * Checks: adult requirement (non-event), address verification gate (v3.4),
+         * then collects form data and calls submitIntakeForm().
+         */
+        function submitForm() {
+            const form = document.getElementById('intakeForm');
+            const formData = {};
+            const submitBtn = document.getElementById('submitBtn');
+            const submitMessage = document.getElementById('submitMessage');
+
+            // Only validate adult requirement if NOT in event mode
+            if (enforceRequired) {
+                const adultFields = [
+                    'males18to24', 'females18to24',
+                    'males25to34', 'females25to34',
+                    'males35to44', 'females35to44',
+                    'males45to54', 'females45to54',
+                    'males55to64', 'females55to64',
+                    'males65to84', 'females65to84',
+                    'males85plus', 'females85plus'
+                ];
+
+                let hasAdult = false;
+                adultFields.forEach(function (field) {
+                    const el = document.getElementById(field);
+                    if (el && parseInt(el.value) > 0) hasAdult = true;
+                });
+
+                if (!hasAdult) {
+                    submitMessage.textContent = 'Household must include at least one person age 18 or older.';
+                    submitMessage.className = 'alert alert-error';
+                    submitMessage.classList.remove('hidden');
+                    return;
+                }
+            }
+
+            // v3.4: Check address verification gate
+            if (!isAddressVerificationSatisfied()) {
+                submitMessage.textContent = 'Please verify your address before submitting. Click the "Verify Address" button in Section 2.';
+                submitMessage.className = 'alert alert-error';
+                submitMessage.classList.remove('hidden');
+
+                // Scroll to the verify button so user can see it
+                document.getElementById('verifyAddrBtn').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return;
+            }
+
+            // Disable button during submission
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Submitting...';
+            submitMessage.classList.add('hidden');
+
+            // Collect all form data
+            const inputs = form.querySelectorAll('input, select, textarea');
+            inputs.forEach(function (input) {
+                if (input.name) {
+                    if (input.type === 'radio') {
+                        if (input.checked) formData[input.name] = input.value;
+                    } else if (input.type === 'checkbox') {
+                        if (!formData[input.name]) formData[input.name] = [];
+                        if (input.checked) formData[input.name].push(input.value);
+                    } else {
+                        formData[input.name] = input.value;
+                    }
+                }
+            });
+
+            // v3.6: Strip phone formatting - save only 10 digits to AM
+            if (formData['phoneNumber']) {
+                formData['phoneNumber'] = formData['phoneNumber'].replace(/\D/g, '');
+            }
+
+            // v3.11: In staff mode, set Entered By to the staff member's code
+            if (isStaffMode && staffCode) {
+                formData['enteredBy'] = staffCode;
+            }
+
+            // Submit to server with event info
+            // 1b: Copy Signature Date as the Request Date
+            var sigDate = document.getElementById('signatureDate').value;
+            if (sigDate) {
+                formData['signatureDate'] = sigDate;
+                formData['formDate'] = sigDate;
+            }
+
+            // v3.5: Save address verification result to AM
+            if (addrConfidence) {
+                formData['addressValidity'] = addrConfidence;
+            } else if (isStaffMode || (typeof currentEventInfo !== 'undefined' && currentEventInfo && currentEventInfo.isActive)) {
+                formData['addressValidity'] = 'STAFF_BYPASS';
+            }
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        if (isStaffMode) {
+                            // v3.9: Notify SV (opener) of the new record ID via postMessage,
+                            // then close this tab. SV listens for {type:'newRecord'} and shows
+                            // the product prompt without navigating away.
+                            // v3.10: If close is blocked, show message — never navigate to GAS URL.
+                            var sigDate = document.getElementById('signatureDate').value || '';
+                            if (window.opener && !window.opener.closed) {
+                                window.opener.postMessage({
+                                    type:        'newRecord',
+                                    recordId:    result.recordId,
+                                    requestDate: sigDate
+                                }, '*');
+                            }
+                            window.close();
+                            setTimeout(function () {
+                                if (!window.closed) {
+                                    form.classList.add('hidden');
+                                    document.getElementById('successState').classList.remove('hidden');
+                                    document.getElementById('confirmationId').textContent =
+                                        'Record ID: ' + result.recordId;
+                                    document.querySelector('#successState p:last-child').textContent =
+                                        'Record saved. Please close this window to return to the Staff Portal.';
+                                }
+                            }, 300);
+                            return;
+                        }
+                        // Public user - show success message
+                        form.classList.add('hidden');
+                        document.getElementById('successState').classList.remove('hidden');
+                        document.getElementById('confirmationId').textContent =
+                            'Confirmation #: ' + result.recordId;
+                    } else {
+                        submitMessage.textContent = result.error;
+                        submitMessage.className = 'alert alert-error';
+                        submitMessage.classList.remove('hidden');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = isStaffMode ? 'Save & Return' : 'Submit Application';
+                    }
+                })
+                .withFailureHandler(function (error) {
+                    submitMessage.textContent = 'Submission failed: ' + error.message;
+                    submitMessage.className = 'alert alert-error';
+                    submitMessage.classList.remove('hidden');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = isStaffMode ? 'Save & Return' : 'Submit Application';
+                })
+                .submitIntakeForm(formData, currentEventInfo);
+        }
+    </script>
+</body>
+</html>
