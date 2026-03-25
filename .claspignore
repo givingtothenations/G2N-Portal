@@ -1,0 +1,14 @@
+﻿node_modules/**
+package.json
+package-lock.json
+eslint.config.js
+eslint.config.mjs
+.eslintrc
+.eslintrc.js
+.eslintrc.json
+.gitignore
+.git/**
+.vscode/**
+obj/**
+*.md
+README*
