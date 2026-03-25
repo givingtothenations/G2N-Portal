@@ -1,5 +1,5 @@
-/**
- * GrantsReportService.gs
+﻿/**
+ * GrantsReportService.gs  [AP — AdminPortalWeb]
  * Handles grant/analytics report generation for G2N System
  * v2.0 - Added Funding Sources, Income Sources, Collaboration Source
  *         Shared helpers for AM + Archive data combining
@@ -56,6 +56,16 @@
  *         skips GAS aggregation loop. Both fall back to Sheets path on error.
  *         Extracted _writeRequestFrequencySpreadsheet_() and _buildGrantSummaryDoc_()
  *         as private helpers shared by both MySQL and Sheets paths.
+ * v3.8 - Baby product detection: calculateProductCounts() now checks 2nd character
+ *         of BoxCode for 'B' (case-insensitive). Baby codes route to babyRequested /
+ *         babyDistributed; non-baby non-DR/PF codes route to productsRequested /
+ *         productsDistributed. Return value gains babyRequested and babyDistributed.
+ *         calculateDetailedAgeBrackets() gains totalMales and totalFemales.
+ *         generateHouseholdsReport(): Added Funding Code column (after Service Status),
+ *         Added Baby Products Requested and Baby Products Received columns (after
+ *         Products Distributed). colIdx gains fundingCode. Row builder updated.
+ *         NOTE: MySQL path (sp_get_report_data) will need calc_baby_requested and
+ *         calc_baby_received columns added as a follow-on DB change.
  *
  * Reports:
  *   1. Applicants Open Requests
@@ -359,65 +369,77 @@ function calculateAgeBrackets(headers, row, adultMaxAge) {
 }
 
 /**
- * Calculate detailed age bracket breakdowns for reports requiring full age detail
- * Returns male/female/total for each category plus individual bracket totals
- * Children <18, Adults 18-64, Seniors >64
+ * Calculate detailed age bracket breakdowns for reports requiring full age detail.
+ * Returns male/female/total for each category plus individual bracket totals.
+ * Children <18 (maxAge ≤ 17), Adults 18-64 (maxAge 18-64), Seniors ≥65 (maxAge >64).
+ * v3.8 - Added totalMales (sum all male brackets) and totalFemales (sum all female
+ *         brackets) to result object. Available to all callers without change.
  * @param {Array} headers - Column headers
- * @param {Array} row - Data row
- * @returns {Object} Detailed age breakdown
+ * @param {Array} row     - Data row
+ * @returns {Object} Detailed age breakdown including totalMales and totalFemales
  */
 function calculateDetailedAgeBrackets(headers, row) {
-  var result = {
-    people: 0,
-    totalChildren: 0, maleChildren: 0, femaleChildren: 0,
-    under5: 0, aged5t9: 0, aged10t14: 0, aged15t17: 0,
-    totalAdults: 0, maleAdults: 0, femaleAdults: 0,
-    aged18t24: 0, aged25t34: 0, aged35t44: 0, aged45t54: 0, aged55t64: 0,
-    totalSeniors: 0, maleSeniors: 0, femaleSeniors: 0,
-    aged65t84: 0, aged85up: 0
-  };
-  
-  for (var b = 0; b < AGE_BRACKETS.length; b++) {
-    var bracket = AGE_BRACKETS[b];
-    var maleIdx = headers.indexOf(bracket.male);
-    var femaleIdx = headers.indexOf(bracket.female);
-    var maleVal = maleIdx !== -1 ? (parseInt(row[maleIdx]) || 0) : 0;
-    var femaleVal = femaleIdx !== -1 ? (parseInt(row[femaleIdx]) || 0) : 0;
-    var bracketTotal = maleVal + femaleVal;
-    
-    result.people += bracketTotal;
-    
-    if (bracket.maxAge <= 17) {
-      result.totalChildren += bracketTotal;
-      result.maleChildren += maleVal;
-      result.femaleChildren += femaleVal;
-      
-      if (bracket.maxAge <= 4) result.under5 += bracketTotal;
-      else if (bracket.maxAge <= 9) result.aged5t9 += bracketTotal;
-      else if (bracket.maxAge <= 14) result.aged10t14 += bracketTotal;
-      else result.aged15t17 += bracketTotal;
-      
-    } else if (bracket.maxAge <= 64) {
-      result.totalAdults += bracketTotal;
-      result.maleAdults += maleVal;
-      result.femaleAdults += femaleVal;
-      
-      if (bracket.maxAge <= 24) result.aged18t24 += bracketTotal;
-      else if (bracket.maxAge <= 34) result.aged25t34 += bracketTotal;
-      else if (bracket.maxAge <= 44) result.aged35t44 += bracketTotal;
-      else if (bracket.maxAge <= 54) result.aged45t54 += bracketTotal;
-      else result.aged55t64 += bracketTotal;
-      
-    } else {
-      result.totalSeniors += bracketTotal;
-      result.maleSeniors += maleVal;
-      result.femaleSeniors += femaleVal;
-      if (bracket.maxAge <= 84) result.aged65t84 += bracketTotal;
-      else result.aged85up += bracketTotal;
+    var result = {
+        people: 0,
+        totalChildren: 0, maleChildren: 0, femaleChildren: 0,
+        under5: 0, aged5t9: 0, aged10t14: 0, aged15t17: 0,
+        totalAdults: 0, maleAdults: 0, femaleAdults: 0,
+        aged18t24: 0, aged25t34: 0, aged35t44: 0, aged45t54: 0, aged55t64: 0,
+        totalSeniors: 0, maleSeniors: 0, femaleSeniors: 0,
+        aged65t84: 0, aged85up: 0,
+        // v3.8: cross-category gender totals
+        totalMales: 0,
+        totalFemales: 0
+    };
+
+    for (var b = 0; b < AGE_BRACKETS.length; b++) {
+        var bracket = AGE_BRACKETS[b];
+        var maleIdx = headers.indexOf(bracket.male);
+        var femaleIdx = headers.indexOf(bracket.female);
+        var maleVal = maleIdx !== -1 ? (parseInt(row[maleIdx]) || 0) : 0;
+        var femaleVal = femaleIdx !== -1 ? (parseInt(row[femaleIdx]) || 0) : 0;
+        var total = maleVal + femaleVal;
+
+        result.people += total;
+        result.totalMales += maleVal;    // v3.8
+        result.totalFemales += femaleVal;  // v3.8
+
+        if (bracket.maxAge <= 17) {
+            // Children: Under 5, 5-9, 10-14, 15-17
+            result.totalChildren += total;
+            result.maleChildren += maleVal;
+            result.femaleChildren += femaleVal;
+            switch (bracket.maxAge) {
+                case 4: result.under5 += total; break;
+                case 9: result.aged5t9 += total; break;
+                case 14: result.aged10t14 += total; break;
+                case 17: result.aged15t17 += total; break;
+            }
+        } else if (bracket.maxAge <= 64) {
+            // Adults: 18-24, 25-34, 35-44, 45-54, 55-64
+            result.totalAdults += total;
+            result.maleAdults += maleVal;
+            result.femaleAdults += femaleVal;
+            switch (bracket.maxAge) {
+                case 24: result.aged18t24 += total; break;
+                case 34: result.aged25t34 += total; break;
+                case 44: result.aged35t44 += total; break;
+                case 54: result.aged45t54 += total; break;
+                case 64: result.aged55t64 += total; break;
+            }
+        } else {
+            // Seniors: 65-84, 85+
+            result.totalSeniors += total;
+            result.maleSeniors += maleVal;
+            result.femaleSeniors += femaleVal;
+            switch (bracket.maxAge) {
+                case 84: result.aged65t84 += total; break;
+                case 999: result.aged85up += total; break;
+            }
+        }
     }
-  }
-  
-  return result;
+
+    return result;
 }
 
 
@@ -583,85 +605,131 @@ function loadProductLookupData(fromDate, toDate) {
 }
 
 /**
- * Calculate Products Requested and Products Distributed for a record
- * v3.0 Logic: Check code VALUE to determine lookup path:
- *   If code IS "DR" or "PF" -> use DR/PF_Products by ID + RequestDate -> QtyRequested/QtyReceived
- *     (counted once per record even if multiple codes are DR/PF)
- *   If code is NOT "DR" or "PF" -> use Distributed_Products by BoxCode -> sum Quantity
- * Applied to Received Product Codes 1, 2, and 3
- * Products only counted for Service Status = Picked Up or Delivered
- * @param {string} id - Record ID
+ * Calculate Products Requested, Products Distributed, Baby Products Requested,
+ * and Baby Products Distributed for a record.
+ *
+ * Routing logic (applied per code slot 1, 2, 3):
+ *   - "DR" or "PF"  → DR/PF_Products lookup by ID + RequestDate.
+ *                      QtyRequested → productsRequested; QtyReceived → productsDistributed.
+ *                      Counted only ONCE per record regardless of how many slots are DR/PF.
+ *   - 2nd char = 'B' → Distributed_Products lookup by BoxCode.
+ *                      Quantity → babyRequested AND babyDistributed.
+ *   - All other codes → Distributed_Products lookup by BoxCode.
+ *                       Quantity → productsRequested AND productsDistributed.
+ *
+ * Products only counted when Service Status = "Picked Up" or "Delivered"
+ * (callers are responsible for pre-filtering rows).
+ *
+ * v3.0 - Initial DR/PF vs BoxCode routing, codes 1-3.
+ * v3.1 - Fixed DR/PF double-count: only once per record.
+ * v3.8 - Baby product detection: code[1].toUpperCase() === 'B' routes to baby totals.
+ *         Return value gains babyRequested and babyDistributed.
+ *         MySQL path: uses pre-computed calc_baby_requested / calc_baby_received when
+ *         available (requires sp_get_report_data update — see v3.8 release notes).
+ *
+ * @param {string} id           - Record ID
  * @param {string} productCode1 - Received Product Code 1
  * @param {string} productCode2 - Received Product Code 2
  * @param {string} productCode3 - Received Product Code 3
- * @param {Date} requestDate - Request Date for DR/PF_Products matching
- * @param {Object} productData - From loadProductLookupData()
- * @returns {Object} { productsRequested: n, productsDistributed: n }
+ * @param {Date}   requestDate  - Request Date for DR/PF_Products matching
+ * @param {Object} productData  - From loadProductLookupData()
+ * @param {Array}  [headers]    - Optional: column headers for MySQL pre-computed path
+ * @param {Array}  [row]        - Optional: data row for MySQL pre-computed path
+ * @returns {Object} {
+ *   productsRequested:  number,
+ *   productsDistributed: number,
+ *   babyRequested:      number,
+ *   babyDistributed:    number
+ * }
  */
-function calculateProductCounts(id, productCode1, productCode2, productCode3, requestDate, productData, headers, row) {
-  // ── MySQL path: use pre-computed columns from sp_get_report_data ──────────
-  // The stored procedure appends calc_qty_requested / calc_qty_received to every
-  // applicant row, eliminating the need for dictionary lookups entirely.
-  if (headers && row) {
-    var reqIdx = headers.indexOf('calc_qty_requested');
-    var recIdx = headers.indexOf('calc_qty_received');
-    if (reqIdx !== -1 && recIdx !== -1) {
-      return {
-        productsRequested:  parseInt(row[reqIdx])  || 0,
-        productsDistributed:parseInt(row[recIdx])  || 0
-      };
-    }
-  }
+function calculateProductCounts(id, productCode1, productCode2, productCode3,
+    requestDate, productData, headers, row) {
 
-  // ── Sheets path: original dictionary lookup ───────────────────────────────
-  var requested = 0;
-  var distributed = 0;
-  
-  var codes = [
-    (productCode1 || '').toString().trim(),
-    (productCode2 || '').toString().trim(),
-    (productCode3 || '').toString().trim()
-  ];
-  var recId = (id || '').toString().trim();
-  
-  // Build composite key for DR/PF_Products lookup
-  var dateKey = '';
-  if (requestDate instanceof Date && !isNaN(requestDate.getTime())) {
-    dateKey = Utilities.formatDate(requestDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-  }
-  var compositeKey = recId + '|' + dateKey;
-  
-  var drPfCounted = false; // Only count DR/PF once per record
-  
-  for (var c = 0; c < codes.length; c++) {
-    var code = codes[c];
-    if (code === '') continue;
-    
-    var codeUpper = code.toUpperCase();
-    
-    if (codeUpper === 'DR' || codeUpper === 'PF') {
-      // DR/PF codes: lookup by ID + Request Date in DR/PF_Products (once per record)
-      if (!drPfCounted) {
-        var drPf = productData.drPfByIdDate[compositeKey];
-        if (drPf) {
-          requested += drPf.qtyRequested;
-          distributed += drPf.qtyReceived;
+    // ── MySQL path: use pre-computed columns from sp_get_report_data ──────────
+    // When the stored procedure appends all four calc columns, use them directly.
+    if (headers && row) {
+        var reqIdx = headers.indexOf('calc_qty_requested');
+        var recIdx = headers.indexOf('calc_qty_received');
+        var babyReqIdx = headers.indexOf('calc_baby_requested');   // v3.8 — requires SP update
+        var babyRecIdx = headers.indexOf('calc_baby_received');    // v3.8 — requires SP update
+
+        if (reqIdx !== -1 && recIdx !== -1) {
+            return {
+                productsRequested: parseInt(row[reqIdx]) || 0,
+                productsDistributed: parseInt(row[recIdx]) || 0,
+                babyRequested: babyReqIdx !== -1 ? (parseInt(row[babyReqIdx]) || 0) : 0,
+                babyDistributed: babyRecIdx !== -1 ? (parseInt(row[babyRecIdx]) || 0) : 0
+            };
         }
-        drPfCounted = true;
-      }
-    } else {
-      // Non-DR/PF codes: lookup BoxCode in Distributed_Products and sum Quantity
-      var dpMatch = productData.distProdByBox[code];
-      if (dpMatch && dpMatch.length > 0) {
-        var sum = 0;
-        for (var i = 0; i < dpMatch.length; i++) sum += dpMatch[i];
-        requested += sum;
-        distributed += sum;
-      }
     }
-  }
-  
-  return { productsRequested: requested, productsDistributed: distributed };
+
+    // ── Sheets path: dictionary lookup ───────────────────────────────────────
+    var requested = 0;
+    var distributed = 0;
+    var babyReq = 0;  // v3.8
+    var bayDist = 0;  // v3.8
+
+    var codes = [
+        (productCode1 || '').toString().trim(),
+        (productCode2 || '').toString().trim(),
+        (productCode3 || '').toString().trim()
+    ];
+    var recId = (id || '').toString().trim();
+
+    // Build composite key for DR/PF_Products lookup
+    var dateKey = '';
+    if (requestDate instanceof Date && !isNaN(requestDate.getTime())) {
+        dateKey = Utilities.formatDate(requestDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    }
+    var compositeKey = recId + '|' + dateKey;
+
+    var drPfCounted = false; // Only count DR/PF once per record
+
+    for (var c = 0; c < codes.length; c++) {
+        var code = codes[c];
+        if (code === '') continue;
+
+        var codeUpper = code.toUpperCase();
+
+        if (codeUpper === 'DR' || codeUpper === 'PF') {
+            // DR/PF: lookup by ID + RequestDate in DR/PF_Products (once per record)
+            if (!drPfCounted) {
+                var drPf = productData.drPfByIdDate[compositeKey];
+                if (drPf) {
+                    requested += drPf.qtyRequested;
+                    distributed += drPf.qtyReceived;
+                }
+                drPfCounted = true;
+            }
+
+        } else if (code.length >= 2 && code.charAt(1).toUpperCase() === 'B') {
+            // v3.8 — Baby product: 2nd character is 'B' → route to baby totals
+            var babyMatch = productData.distProdByBox[code];
+            if (babyMatch && babyMatch.length > 0) {
+                var babySum = 0;
+                for (var bi = 0; bi < babyMatch.length; bi++) babySum += babyMatch[bi];
+                babyReq += babySum;
+                bayDist += babySum;
+            }
+
+        } else {
+            // Regular BoxCode: lookup Distributed_Products and sum Quantity
+            var dpMatch = productData.distProdByBox[code];
+            if (dpMatch && dpMatch.length > 0) {
+                var dpSum = 0;
+                for (var di = 0; di < dpMatch.length; di++) dpSum += dpMatch[di];
+                requested += dpSum;
+                distributed += dpSum;
+            }
+        }
+    }
+
+    return {
+        productsRequested: requested,
+        productsDistributed: distributed,
+        babyRequested: babyReq,   // v3.8
+        babyDistributed: bayDist    // v3.8
+    };
 }
 
 
@@ -1404,235 +1472,288 @@ function _writeRequestFrequencySpreadsheet_(records, totalRequestCount, masterCo
 // ============ HOUSEHOLDS REPORT ============
 
 /**
- * Generate Households report with full age bracket detail
- * Columns: Quarter, Year, Month, Day, City, State, Zip, County, Applicant Type,
- *          Request Type, Service Status, Military Status, Race, Ethnicity,
- *          Homeless, Employed, Income Level, Income Source Type,
- *          Number of Households, Number of Requests, Products Requested,
- *          Products Distributed, Total People, Total Children, Male Children,
- *          Female Children, Children 2 and Under, Under 5, 5-9, 10-14, 15-17,
- *          Total Adults, Male Adults, Female Adults, 18-24, 25-34, 35-44,
- *          45-54, 55-64, Total Seniors, Male Seniors, Female Seniors, 65-84, 85 & Up
+ * Generate Households report with full age bracket detail.
+ *
+ * Columns:
+ *   Quarter, Year, Month, Day, City, State, Zip, County,
+ *   Applicant Type, Request Type, Service Status, Funding Code [v3.8],
+ *   Military Status, Race, Ethnicity, Homeless, Employed, Income Level,
+ *   Income Source Type, Number of Households, Number of Requests,
+ *   Products Requested, Products Distributed,
+ *   Baby Products Requested [v3.8], Baby Products Received [v3.8],
+ *   Total People, Total Children, Male Children, Female Children,
+ *   Children 2 and Under, Under 5, 5-9, 10-14, 15-17,
+ *   Total Adults, Male Adults, Female Adults,
+ *   18-24, 25-34, 35-44, 45-54, 55-64,
+ *   Total Seniors, Male Seniors, Female Seniors, 65-84, 85 & Up
+ *
  * Order: Quarter, Year, Month, Day, City, State, Zip, County
  * Filter: Service Status = "Picked Up" or "Delivered"
+ *
+ * v3.8 - Added Funding Code column (after Service Status).
+ *         Added Baby Products Requested and Baby Products Received columns
+ *         (after Products Distributed). colIdx gains fundingCode.
+ *         Row builder updated. Uses calculateProductCounts() v3.8 return shape.
+ *
  * @param {string} fromDateStr - Start date (YYYY-MM-DD)
- * @param {string} toDateStr - End date (YYYY-MM-DD)
+ * @param {string} toDateStr   - End date (YYYY-MM-DD)
+ * @returns {Object} Result with reportUrl, downloadUrl, recordCount
  */
 function generateHouseholdsReport(fromDateStr, toDateStr) {
-  try {
-    if (!fromDateStr || !toDateStr) {
-      return { success: false, error: 'Both From Date and To Date are required' };
+    try {
+        if (!fromDateStr || !toDateStr) {
+            return { success: false, error: 'Both From Date and To Date are required' };
+        }
+
+        var fromDate = parseDateInput(fromDateStr, false);
+        var toDate = parseDateInput(toDateStr, true);
+
+        if (fromDate > toDate) {
+            return { success: false, error: 'From Date must be before To Date' };
+        }
+
+        var filters = [
+            { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
+        ];
+
+        var combined = getCombinedData(fromDate, toDate, filters);
+
+        if (combined.totalCount === 0) {
+            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
+        }
+
+        var headers = combined.headers;
+        var rows = combined.rows;
+        var productData = loadProductLookupData(fromDate, toDate);
+
+        var colIdx = {
+            id: headers.indexOf(resolveAMField_('ID')),
+            requestDate: headers.indexOf(resolveAMField_('Request Date')),
+            firstName: headers.indexOf(resolveAMField_('First Name')),
+            lastName: headers.indexOf(resolveAMField_('Last Name')),
+            county: headers.indexOf(resolveAMField_('County')),
+            zipCode: headers.indexOf(resolveAMField_('Zip Code')),
+            city: headers.indexOf(resolveAMField_('City')),
+            state: headers.indexOf(resolveAMField_('State')),
+            requestType: headers.indexOf(resolveAMField_('Request Type')),
+            serviceStatus: headers.indexOf(resolveAMField_('Service Status')),
+            fundingCode: headers.indexOf(resolveAMField_('Funding Code')),  // v3.8
+            militaryStatus: headers.indexOf(resolveAMField_('Military Status')),
+            race: headers.indexOf(resolveAMField_('Please Select Your Racial Category')),
+            ethnicity: headers.indexOf(resolveAMField_('Please Select Your Ethnic Category')),
+            homeless: headers.indexOf(resolveAMField_('Are you currently homeless?')),
+            employed: headers.indexOf(resolveAMField_('Are you currently employed?')),
+            incomeLevel: headers.indexOf(resolveAMField_(COL_INCOME)),
+            assistance: headers.indexOf(resolveAMField_(COL_ASSISTANCE)),
+            usedBefore: headers.indexOf(resolveAMField_(COL_USED_BEFORE)),
+            productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
+            productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
+            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
+        };
+
+        // Build row-level records, sorted later
+        var records = [];
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var reqDate = new Date(row[colIdx.requestDate]);
+            var quarter = Math.ceil((reqDate.getMonth() + 1) / 3);
+            var year = reqDate.getFullYear();
+            var month = reqDate.getMonth() + 1;
+            var day = reqDate.getDate();
+
+            var ages = calculateDetailedAgeBrackets(headers, row);
+            var recId = getStr(row, colIdx.id);
+            var code1 = getStr(row, colIdx.productCode1);
+            var code2 = getStr(row, colIdx.productCode2);
+            var code3 = getStr(row, colIdx.productCode3);
+            var products = calculateProductCounts(recId, code1, code2, code3, reqDate, productData, headers, row);
+
+            // Income Source Type: expand comma-separated values into separate rows
+            var rawAssistance = getStr(row, colIdx.assistance);
+            var sourceTypes = rawAssistance.indexOf(', ') !== -1
+                ? rawAssistance.split(', ')
+                : [rawAssistance];
+
+            var firstName = getStr(row, colIdx.firstName);
+            var lastName = getStr(row, colIdx.lastName);
+            var applicantType = getApplicantType(getStr(row, colIdx.usedBefore));
+
+            for (var s = 0; s < sourceTypes.length; s++) {
+                records.push({
+                    quarter: quarter,
+                    year: year,
+                    month: month,
+                    day: day,
+                    city: getStr(row, colIdx.city),
+                    state: getStr(row, colIdx.state),
+                    zip: getStr(row, colIdx.zipCode),
+                    county: getStr(row, colIdx.county),
+                    applicantType: applicantType,
+                    requestType: getStr(row, colIdx.requestType),
+                    serviceStatus: getStr(row, colIdx.serviceStatus),
+                    fundingCode: getStr(row, colIdx.fundingCode),   // v3.8
+                    militaryStatus: getStr(row, colIdx.militaryStatus),
+                    race: getStr(row, colIdx.race),
+                    ethnicity: getStr(row, colIdx.ethnicity),
+                    homeless: getStr(row, colIdx.homeless),
+                    employed: getStr(row, colIdx.employed),
+                    incomeLevel: getStr(row, colIdx.incomeLevel),
+                    incomeSourceType: sourceTypes[s].trim(),
+                    // Products (v3.8: includes baby totals)
+                    productsRequested: products.productsRequested,
+                    productsDistributed: products.productsDistributed,
+                    babyRequested: products.babyRequested,    // v3.8
+                    babyDistributed: products.babyDistributed,  // v3.8
+                    // Age brackets
+                    ages: ages
+                });
+            }
+        }
+
+        // Sort: Quarter, Year, Month, Day, City, State, Zip, County
+        records.sort(function (a, b) {
+            var cmp = a.quarter - b.quarter;
+            if (cmp !== 0) return cmp;
+            cmp = a.year - b.year;
+            if (cmp !== 0) return cmp;
+            cmp = a.month - b.month;
+            if (cmp !== 0) return cmp;
+            cmp = a.day - b.day;
+            if (cmp !== 0) return cmp;
+            cmp = a.city.localeCompare(b.city);
+            if (cmp !== 0) return cmp;
+            cmp = a.state.localeCompare(b.state);
+            if (cmp !== 0) return cmp;
+            cmp = a.zip.localeCompare(b.zip);
+            if (cmp !== 0) return cmp;
+            return a.county.localeCompare(b.county);
+        });
+
+        // Create spreadsheet
+        var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var reportName = 'Households_' + fromFormatted + '_to_' + toFormatted;
+        var spreadsheet = SpreadsheetApp.create(reportName);
+        var sheet = spreadsheet.getActiveSheet();
+        sheet.setName('Households');
+
+        moveToFolder(spreadsheet.getId(), CONFIG.GRANTS_FOLDER_ID);
+
+        // v3.8: Funding Code inserted after Service Status;
+        //        Baby Products Requested / Baby Products Received inserted after Products Distributed.
+        var dataHeaders = [
+            'Quarter', 'Year', 'Month', 'Day', 'City', 'State', 'Zip', 'County',
+            'Applicant Type', 'Request Type', 'Service Status', 'Funding Code',
+            'Military Status', 'Race', 'Ethnicity', 'Homeless', 'Employed',
+            'Income Level', 'Income Source Type',
+            'Number of Households', 'Number of Requests',
+            'Products Requested', 'Products Distributed',
+            'Baby Products Requested', 'Baby Products Received',
+            'Total People', 'Total Children', 'Male Children', 'Female Children',
+            'Children 2 and Under', 'Under 5', '5-9', '10-14', '15-17',
+            'Total Adults', 'Male Adults', 'Female Adults',
+            '18-24', '25-34', '35-44', '45-54', '55-64',
+            'Total Seniors', 'Male Seniors', 'Female Seniors', '65-84', '85 & Up'
+        ];
+        var reportColCount = dataHeaders.length;
+
+        var currentRow = writeReportTitleSection(sheet, 'Households', fromDate, toDate,
+            combined.totalCount, combined.masterCount, combined.archiveCount);
+
+        var headerRowNum = currentRow;
+        sheet.getRange(headerRowNum, 1, 1, reportColCount).setValues([dataHeaders]);
+        styleReportHeader(sheet, headerRowNum, reportColCount);
+        currentRow++;
+
+        // Build all data rows in memory (batch write)
+        var allRows = [];
+        for (var i = 0; i < records.length; i++) {
+            var rec = records[i];
+            var a = rec.ages;
+            allRows.push([
+                'Q' + rec.quarter, rec.year, rec.month, rec.day,
+                rec.city, rec.state, rec.zip, rec.county,
+                rec.applicantType, rec.requestType, rec.serviceStatus,
+                rec.fundingCode,                        // v3.8: Funding Code
+                rec.militaryStatus, rec.race, rec.ethnicity, rec.homeless, rec.employed,
+                rec.incomeLevel, rec.incomeSourceType,
+                1, 1,                                   // Number of Households, Number of Requests
+                rec.productsRequested, rec.productsDistributed,
+                rec.babyRequested, rec.babyDistributed, // v3.8: Baby Products Requested / Received
+                a.people,
+                a.totalChildren, a.maleChildren, a.femaleChildren,
+                a.under5, a.under5, a.aged5t9, a.aged10t14, a.aged15t17,
+                a.totalAdults, a.maleAdults, a.femaleAdults,
+                a.aged18t24, a.aged25t34, a.aged35t44, a.aged45t54, a.aged55t64,
+                a.totalSeniors, a.maleSeniors, a.femaleSeniors,
+                a.aged65t84, a.aged85up
+            ]);
+        }
+
+        if (allRows.length > 0) {
+            sheet.getRange(currentRow, 1, allRows.length, reportColCount).setValues(allRows);
+            // Alternating row colors
+            for (var i = 1; i < allRows.length; i += 2) {
+                sheet.getRange(currentRow + i, 1, 1, reportColCount).setBackground('#f8f9fa');
+            }
+            currentRow += allRows.length;
+        }
+
+        currentRow++;
+        sheet.getRange(currentRow, 1).setValue('End of Report - ' + records.length + ' records');
+        sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
+
+        // Column widths
+        sheet.setColumnWidth(1, 60);  // Quarter
+        sheet.setColumnWidth(2, 50);  // Year
+        sheet.setColumnWidth(3, 60);  // Month
+        sheet.setColumnWidth(4, 40);  // Day
+        sheet.setColumnWidth(5, 120);  // City
+        sheet.setColumnWidth(6, 50);  // State
+        sheet.setColumnWidth(7, 60);  // Zip
+        sheet.setColumnWidth(8, 100);  // County
+        sheet.setColumnWidth(9, 80);  // Applicant Type
+        sheet.setColumnWidth(10, 90);  // Request Type
+        sheet.setColumnWidth(11, 90);  // Service Status
+        sheet.setColumnWidth(12, 90);  // Funding Code  (v3.8)
+        sheet.setColumnWidth(13, 100); // Military Status
+        sheet.setColumnWidth(14, 100); // Race
+        sheet.setColumnWidth(15, 80);  // Ethnicity
+        sheet.setColumnWidth(16, 70);  // Homeless
+        sheet.setColumnWidth(17, 70);  // Employed
+        sheet.setColumnWidth(18, 120); // Income Level
+        sheet.setColumnWidth(19, 130); // Income Source Type
+        // remaining numeric columns
+        for (var c = 20; c <= reportColCount; c++) {
+            sheet.setColumnWidth(c, 70);
+        }
+
+        sheet.setFrozenRows(headerRowNum);
+
+        var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+        var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+        logAudit('GRANTS_REPORT', null, 'Generated Households report: ' +
+            fromDisplay + ' to ' + toDisplay + ' (' + records.length + ' records)');
+
+        var reportUrl = spreadsheet.getUrl();
+        var downloadUrl = 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx';
+
+        return {
+            success: true,
+            message: 'Report generated with ' + records.length + ' records',
+            recordCount: records.length,
+            masterCount: combined.masterCount,
+            archiveCount: combined.archiveCount,
+            reportUrl: reportUrl,
+            downloadUrl: downloadUrl,
+            reportId: spreadsheet.getId()
+        };
+
+    } catch (error) {
+        Logger.log('Households report error: ' + error.message);
+        return { success: false, error: 'Report generation failed: ' + error.message };
     }
-    
-    var fromDate = parseDateInput(fromDateStr, false);
-    var toDate = parseDateInput(toDateStr, true);
-    
-    if (fromDate > toDate) {
-      return { success: false, error: 'From Date must be before To Date' };
-    }
-    
-    var filters = [
-      { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
-    ];
-    
-    var combined = getCombinedData(fromDate, toDate, filters);
-    
-    if (combined.totalCount === 0) {
-      return { success: false, error: 'No records found for the specified date range with Picked Up or Delivered status' };
-    }
-    
-    var headers = combined.headers;
-    var rows = combined.rows;
-    
-    var productData = loadProductLookupData(fromDate, toDate);
-    
-    var colIdx = {
-      id:             headers.indexOf(resolveAMField_('ID')),
-      requestDate:    headers.indexOf(resolveAMField_('Request Date')),
-      firstName:      headers.indexOf(resolveAMField_('First Name')),
-      lastName:       headers.indexOf(resolveAMField_('Last Name')),
-      county:         headers.indexOf(resolveAMField_('County')),
-      zipCode:        headers.indexOf(resolveAMField_('Zip Code')),
-      city:           headers.indexOf(resolveAMField_('City')),
-      state:          headers.indexOf(resolveAMField_('State')),
-      serviceStatus:  headers.indexOf(resolveAMField_('Service Status')),
-      incomeLevel:    headers.indexOf(resolveAMField_(COL_INCOME)),
-      usedBefore:     headers.indexOf(resolveAMField_(COL_USED_BEFORE)),
-      requestType:    headers.indexOf(resolveAMField_('Request Type')),
-      militaryStatus: headers.indexOf(resolveAMField_('Military Status')),
-      race:           headers.indexOf(resolveAMField_('Please Select Your Racial Category')),
-      ethnicity:      headers.indexOf(resolveAMField_('Please Select Your Ethnic Category')),
-      homeless:       headers.indexOf(resolveAMField_('Are you currently homeless?')),
-      employed:       headers.indexOf(resolveAMField_('Are you currently employed?')),
-      assistance:     headers.indexOf(resolveAMField_(COL_ASSISTANCE)),
-      babyBox:        headers.indexOf(resolveAMField_(COL_BABY_BOX)),
-      productCode1:   headers.indexOf(resolveAMField_('Received Product Code 1')),
-      productCode2:   headers.indexOf(resolveAMField_('Received Product Code 2')),
-      productCode3:   headers.indexOf(resolveAMField_('Received Product Code 3'))
-    };
-    
-    // Build row-level records
-    var records = [];
-    
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var reqDate = new Date(row[colIdx.requestDate]);
-      var ages = calculateDetailedAgeBrackets(headers, row);
-      
-      var firstName = getStr(row, colIdx.firstName);
-      var lastName = getStr(row, colIdx.lastName);
-      var clientKey = (firstName + '|' + lastName).toLowerCase();
-      
-      var recId = getStr(row, colIdx.id);
-      var code1 = getStr(row, colIdx.productCode1);
-      var code2 = getStr(row, colIdx.productCode2);
-      var code3 = getStr(row, colIdx.productCode3);
-      var products = calculateProductCounts(recId, code1, code2, code3, reqDate, productData, headers, row);
-      
-      // Split Income Source Type into separate line per item
-      var rawAssistance = getStr(row, colIdx.assistance);
-      var sourceTypes = rawAssistance.indexOf(', ') !== -1 ? rawAssistance.split(', ') : [rawAssistance];
-      
-      var baseRec = {
-        quarter: getQuarter(reqDate.getMonth()),
-        year: reqDate.getFullYear(),
-        monthNum: reqDate.getMonth(),
-        month: getMonthName(reqDate.getMonth()),
-        day: reqDate.getDate(),
-        city: getStr(row, colIdx.city),
-        state: getStr(row, colIdx.state),
-        zip: getStr(row, colIdx.zipCode),
-        county: getStr(row, colIdx.county),
-        applicantType: getApplicantType(getStr(row, colIdx.usedBefore)),
-        requestType: getStr(row, colIdx.requestType),
-        serviceStatus: getStr(row, colIdx.serviceStatus),
-        militaryStatus: getStr(row, colIdx.militaryStatus),
-        race: getStr(row, colIdx.race),
-        ethnicity: getStr(row, colIdx.ethnicity),
-        homeless: getStr(row, colIdx.homeless),
-        employed: getStr(row, colIdx.employed),
-        incomeLevel: getStr(row, colIdx.incomeLevel),
-        clientKey: clientKey,
-        children2Under: getBabyBoxIndicator(getStr(row, colIdx.babyBox)),
-        productsRequested: products.productsRequested,
-        productsDistributed: products.productsDistributed,
-        ages: ages
-      };
-      
-      for (var s = 0; s < sourceTypes.length; s++) {
-        var rec = {};
-        for (var key in baseRec) rec[key] = baseRec[key];
-        rec.incomeSourceType = sourceTypes[s].trim();
-        records.push(rec);
-      }
-    }
-    
-    // Sort: Quarter, Year, Month, Day, City, State, Zip, County
-    records.sort(function(a, b) {
-      if (a.quarter !== b.quarter) return a.quarter - b.quarter;
-      if (a.year !== b.year) return a.year - b.year;
-      if (a.monthNum !== b.monthNum) return a.monthNum - b.monthNum;
-      if (a.day !== b.day) return a.day - b.day;
-      var cmp = a.city.localeCompare(b.city);
-      if (cmp !== 0) return cmp;
-      cmp = a.state.localeCompare(b.state);
-      if (cmp !== 0) return cmp;
-      cmp = a.zip.localeCompare(b.zip);
-      if (cmp !== 0) return cmp;
-      return a.county.localeCompare(b.county);
-    });
-    
-    
-    // Create spreadsheet
-    var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    var reportName = 'Households_' + fromFormatted + '_to_' + toFormatted;
-    var spreadsheet = SpreadsheetApp.create(reportName);
-    var sheet = spreadsheet.getActiveSheet();
-    sheet.setName('Households');
-    
-    moveToFolder(spreadsheet.getId(), CONFIG.GRANTS_FOLDER_ID);
-    
-    var dataHeaders = ['Quarter', 'Year', 'Month', 'Day', 'City', 'State', 'Zip', 'County',
-                       'Applicant Type', 'Request Type', 'Service Status', 'Military Status',
-                       'Race', 'Ethnicity', 'Homeless', 'Employed', 'Income Level', 'Income Source Type',
-                       'Number of Households', 'Number of Requests', 'Products Requested', 'Products Distributed',
-                       'Total People', 'Total Children', 'Male Children', 'Female Children',
-                       'Children 2 and Under', 'Under 5', '5-9', '10-14', '15-17',
-                       'Total Adults', 'Male Adults', 'Female Adults',
-                       '18-24', '25-34', '35-44', '45-54', '55-64',
-                       'Total Seniors', 'Male Seniors', 'Female Seniors', '65-84', '85 & Up'];
-    var reportColCount = dataHeaders.length;
-    
-    var currentRow = writeReportTitleSection(sheet, 'Households', fromDate, toDate,
-      combined.totalCount, combined.masterCount, combined.archiveCount);
-    
-    var headerRowNum = currentRow;
-    sheet.getRange(headerRowNum, 1, 1, reportColCount).setValues([dataHeaders]);
-    styleReportHeader(sheet, headerRowNum, reportColCount);
-    currentRow++;
-    
-    // Build all data rows in memory
-    var allRows = [];
-    for (var i = 0; i < records.length; i++) {
-      var rec = records[i];
-      var a = rec.ages;
-      allRows.push([
-        'Q' + rec.quarter, rec.year, rec.month, rec.day, rec.city, rec.state, rec.zip, rec.county,
-        rec.applicantType, rec.requestType, rec.serviceStatus, rec.militaryStatus,
-        rec.race, rec.ethnicity, rec.homeless, rec.employed, rec.incomeLevel, rec.incomeSourceType,
-        1, 1, rec.productsRequested, rec.productsDistributed,
-        a.people, a.totalChildren, a.maleChildren, a.femaleChildren,
-        rec.children2Under, a.under5, a.aged5t9, a.aged10t14, a.aged15t17,
-        a.totalAdults, a.maleAdults, a.femaleAdults,
-        a.aged18t24, a.aged25t34, a.aged35t44, a.aged45t54, a.aged55t64,
-        a.totalSeniors, a.maleSeniors, a.femaleSeniors, a.aged65t84, a.aged85up
-      ]);
-    }
-    
-    // Batch write all data rows
-    if (allRows.length > 0) {
-      sheet.getRange(currentRow, 1, allRows.length, reportColCount).setValues(allRows);
-      // Alternating row colors
-      for (var i = 1; i < allRows.length; i += 2) {
-        sheet.getRange(currentRow + i, 1, 1, reportColCount).setBackground('#f8f9fa');
-      }
-      currentRow += allRows.length;
-    }
-    
-    currentRow++;
-    sheet.getRange(currentRow, 1).setValue('End of Report - ' + records.length + ' rows, ' + combined.totalCount + ' source records');
-    sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
-    
-    // Column widths
-    for (var c = 1; c <= 4; c++) sheet.setColumnWidth(c, c === 3 ? 80 : (c === 1 ? 60 : (c === 2 ? 50 : 40)));
-    sheet.setColumnWidth(5, 100); sheet.setColumnWidth(6, 50); sheet.setColumnWidth(7, 60); sheet.setColumnWidth(8, 100);
-    for (var c = 9; c <= 18; c++) sheet.setColumnWidth(c, c === 18 ? 150 : (c >= 12 ? 100 : 90));
-    for (var c = 19; c <= 22; c++) sheet.setColumnWidth(c, 100);
-    for (var c = 23; c <= 44; c++) sheet.setColumnWidth(c, 70);
-    
-    sheet.setFrozenRows(headerRowNum);
-    
-    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-    logAudit('GRANTS_REPORT', null, 'Generated Households report: ' + 
-      fromDisplay + ' to ' + toDisplay + ' (' + combined.totalCount + ' records, ' + records.length + ' rows)');
-    
-    var reportUrl = spreadsheet.getUrl();
-    var downloadUrl = 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx';
-    
-    return {
-      success: true,
-      message: 'Report generated with ' + combined.totalCount + ' records in ' + records.length + ' rows',
-      recordCount: combined.totalCount, masterCount: combined.masterCount,
-      archiveCount: combined.archiveCount, reportUrl: reportUrl,
-      downloadUrl: downloadUrl, reportId: spreadsheet.getId()
-    };
-    
-  } catch (error) {
-    Logger.log('Households report error: ' + error.message);
-    return { success: false, error: 'Report generation failed: ' + error.message };
-  }
 }
 
 
