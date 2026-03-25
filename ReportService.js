@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ReportService.gs
  * Operational report generation and data management for G2N System
  *
@@ -114,6 +114,24 @@
  *          colWidths updated for 2 new columns; both long-text columns wrapped.
  *          After successful generation calls appendLastScheduledId() to record
  *          endId + report date in LU_LastScheduled for Beginning ID auto-population.
+ * v5.19 - generateSchedulingReport: removed beginId/endId parameters entirely.
+ *          Report now includes ALL records from Applicants_Master (no archive,
+ *          no ID range, no 1-year date filter).
+ *          Report name is date-only (no ID range in title).
+ *          Removed magenta AM highlight and appendLastScheduledId() call.
+ *          Added 'Learned How' column after 'Referrer Title' in reportColumns.
+ *          Confirmed 'How Products Help' immediately after 'Current Situation'
+ *          in additionalColumns.
+ *          Report column headers now written via getReportHeader_() from
+ *          LU_FieldMap; rawKeyHeaders array used internally for column position
+ *          tracking (data validation, wrap, etc.) so no raw-name indexOf needed.
+ *          Assistance column text wrapping applied.
+ *          colWidths updated to 45 columns (inserted Learned How at index 14).
+ *          processSchedulingReport: rptIdCol / rptSchedCodeCol / rptStatusCol
+ *          lookups changed from resolveAMField_() to getReportHeader_() to match
+ *          the report headers now written by generateSchedulingReport.
+ *          AdminPortalWeb v7.3: removed Beginning ID field, loadLastScheduledId(),
+ *          and related client-side logic.
  */
 
 /**
@@ -529,419 +547,357 @@ function getLastAmId() {
 }
 
 /**
- * Generates a Scheduling Report spreadsheet for a range of record IDs
- * Combines male/female age brackets, reorders columns for printing,
- * filters to records within 1 year, auto-uppercases distribution codes
- * Phase 4 enhancements:
- *   - If endId is 0 or omitted, uses last ID in AM
- *   - Adds "History" column marking rows with IDs outside beginId–endId range
- *   - Adds data validation dropdowns for Sched Distrib Code and Service Status
- *   - Sorts by Last Name, First Name, ID (not Request Date)
- *   - Highlights the endId row in AM with magenta background
- * @param {string|number} beginId - Start of ID range
- * @param {string|number} endId - End of ID range (0 = auto-detect last AM row)
- * @param {string} distribCode - Optional distribution code filter
- * @param {string} serviceStatus - Optional Service Status filter
- * @returns {Object} { success, reportUrl, downloadUrl, recordCount }
+ * Generates a Scheduling Report spreadsheet for ALL records in Applicants_Master.
+ * Combines male/female age brackets, sorts by Last Name / First Name / ID,
+ * marks History per-name (highest ID = current; all lower IDs = History).
+ * Phase 4 enhancements retained:
+ *   - History column (first column)
+ *   - Data validation dropdowns for Sched Distrib Code and Service Status
+ *   - Sorts by Last Name, First Name, ID
+ *   - Column headers use LU_FieldMap Report Header values via getReportHeader_()
+ * v5.19 - No ID range params. All AM rows included. Date filter removed.
+ *          Learned How column added after Referrer Title.
+ *          How Products Help confirmed after Current Situation.
+ *          Assistance column wrapped. colWidths updated (45 cols).
+ * @returns {Object} { success, reportUrl, reportId, recordCount }
  */
-function generateSchedulingReport(beginId, endId, distribCode, serviceStatus) {
-  try {
-    if (!beginId) {
-      return { success: false, error: 'Beginning ID is required' };
-    }
-    
-    const sheet = getMasterSheet();
-    if (!sheet) {
-      return { success: false, error: 'Master sheet not found' };
-    }
-    
-    const data = sheet.getDataRange().getValues();
-    const rawHeaders = data[0];
-    const headers = trimHeaders(rawHeaders);
-    
-    const idCol        = headers.indexOf(resolveAMField_('ID'));
-    const firstNameCol = headers.indexOf(resolveAMField_('First Name'));
-    const lastNameCol  = headers.indexOf(resolveAMField_('Last Name'));
-    
-    // Phase 4A.2: Auto-detect endId if 0 or omitted
-    if (!endId || parseInt(endId) === 0) {
-      var maxId = 0;
-      for (var i = 1; i < data.length; i++) {
-        var rowId = parseInt(data[i][idCol]);
-        if (!isNaN(rowId) && rowId > maxId) maxId = rowId;
-      }
-      endId = maxId;
-      if (endId === 0) {
-        return { success: false, error: 'No records found in Applicants_Master' };
-      }
-    }
-    
-    beginId = parseInt(beginId);
-    endId = parseInt(endId);
-    
-    if (beginId > endId) {
-      return { success: false, error: 'Beginning ID must be less than or equal to Ending ID' };
-    }
-    
-    const namesInRange = new Map();
-    
-    for (let i = 1; i < data.length; i++) {
-      const id = parseInt(data[i][idCol]);
-      if (id >= beginId && id <= endId) {
-        const firstName = (data[i][firstNameCol] || '').toString().trim().toLowerCase();
-        const lastName = (data[i][lastNameCol] || '').toString().trim().toLowerCase();
-        if (firstName || lastName) {
-          namesInRange.set(firstName + '|' + lastName, true);
-        }
-      }
-    }
-    
-    if (namesInRange.size === 0) {
-      return { success: false, error: 'No records found in ID range ' + beginId + ' to ' + endId };
-    }
-    
-    const oneYearAgo = new Date();
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    
-    // Report columns - reordered with Last Name, First Name after Next Service Availability Date
-    const reportColumns = [
-      'Scheduled Distribution Code',
-      'Service Status',
-      'Admin Notes',
-      'Take Baby Box?',
-      'ID',
-      'Request Type',
-      'Request Date',
-      'Last Date Served',
-      'Next Service Availability Date',
-      'Last Name',
-      'First Name',
-      'More information about the person or organization that referred you.',
-      'What is the title or position of the person who referred you?',    // v5.18: added after Referral Info
-      "What is the person's name who referred you?",
-      'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.',
-      'Are you currently homeless?',
-      'Street Address',
-      'Apartment #, Upper, Lower, or Lot #',
-      'City',
-      'State',
-      'County',
-      'Address type?',
-      'Phone Number',
-      'Phone type?',
-      'Email',
-      'Best contact method (What is the best way to get ahold of you?)'
-    ];
-    
-    // Age brackets - we'll combine males and females
-    const ageBracketPairs = [
-      { label: 'Under 5', male: '[Males under 5]', female: '[Females under 5]' },
-      { label: '5-9', male: '[Males 5-9]', female: '[Females 5-9]' },
-      { label: '10-14', male: '[Males 10-14]', female: '[Females 10-14]' },
-      { label: '15-17', male: '[Males 15-17]', female: '[Females 15-17]' },
-      { label: '18-24', male: '[Males 18-24]', female: '[Females 18-24]' },
-      { label: '25-34', male: '[Males 25-34]', female: '[Females 25-34]' },
-      { label: '35-44', male: '[Males 35-44]', female: '[Females 35-44]' },
-      { label: '45-54', male: '[Males 45-54]', female: '[Females 45-54]' },
-      { label: '55-64', male: '[Males 55-64]', female: '[Females 55-64]' },
-      { label: '65-84', male: '[Males 65-84]', female: '[Females 65-84]' },
-      { label: '85 and Over', male: '[Males 85 and Over]', female: '[Females 85 and Over]' }
-    ];
-    
-    // Additional columns after age brackets
-    const additionalColumns = [
-      'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.',
-      'Are you currently employed?',
-      'Total annual household income. (How much money does your family make in 1 year?)',
-      'Was there an emergency situation which caused you to contact us?',
-      'Briefly explain your current situation.',
-      'How will receiving personal and home cleaning products help you?'   // v5.18: added as last column
-    ];
-    
-    const colIndexMap = {};
-    reportColumns.forEach(col => {
-      const idx = headers.indexOf(resolveAMField_(col));
-      if (idx !== -1) colIndexMap[col] = idx;
-    });
-    ageBracketPairs.forEach(pair => {
-      const maleIdx   = headers.indexOf(resolveAMField_(pair.male));
-      const femaleIdx = headers.indexOf(resolveAMField_(pair.female));
-      if (maleIdx !== -1)   colIndexMap[pair.male]   = maleIdx;
-      if (femaleIdx !== -1) colIndexMap[pair.female] = femaleIdx;
-    });
-    additionalColumns.forEach(col => {
-      const idx = headers.indexOf(resolveAMField_(col));
-      if (idx !== -1) colIndexMap[col] = idx;
-    });
-    
-    const requestDateCol      = headers.indexOf(resolveAMField_('Request Date'));
-    const schedDistribCodeCol = headers.indexOf(resolveAMField_('Scheduled Distribution Code'));
-    
-    const records = [];
-    for (let i = 1; i < data.length; i++) {
-      const firstName = (data[i][firstNameCol] || '').toString().trim().toLowerCase();
-      const lastName = (data[i][lastNameCol] || '').toString().trim().toLowerCase();
-      const nameKey = firstName + '|' + lastName;
-      
-      if (!namesInRange.has(nameKey)) continue;
-      
-      const requestDate = data[i][requestDateCol];
-      if (requestDate) {
-        const reqDate = new Date(requestDate);
-        if (reqDate < oneYearAgo) continue;
-      }
-      
-      // Phase 4A.4: Determine if this row is "History" (ID outside the requested range)
-      const rowId = parseInt(data[i][idCol]) || 0;
-      const isHistory = rowId < beginId || rowId > endId;
-      
-      records.push({
-        rowData: data[i],
-        lastName: data[i][lastNameCol] || '',
-        firstName: data[i][firstNameCol] || '',
-        requestDate: requestDate,
-        rowId: rowId,
-        isHistory: isHistory
-      });
-    }
-    
-    if (records.length === 0) {
-      return { success: false, error: 'No records found within 1 year for the specified criteria' };
-    }
-    
-    // Phase 4A.6: Sort by Last Name, First Name, ID (not Request Date)
-    records.sort((a, b) => {
-      const lastCmp = a.lastName.toString().localeCompare(b.lastName.toString());
-      if (lastCmp !== 0) return lastCmp;
-      const firstCmp = a.firstName.toString().localeCompare(b.firstName.toString());
-      if (firstCmp !== 0) return firstCmp;
-      return a.rowId - b.rowId;
-    });
-
-    // v5.18: Recompute History flag per name — the highest ID for each name is "current";
-    // all lower IDs for the same name are History, regardless of whether they fall in the
-    // beginId-endId range. This correctly flags older records for clients with multiple IDs.
-    const maxIdPerName = new Map();
-    for (const rec of records) {
-      const nameKey = rec.firstName.toString().toLowerCase() + '|' + rec.lastName.toString().toLowerCase();
-      const cur = maxIdPerName.get(nameKey) || 0;
-      if (rec.rowId > cur) maxIdPerName.set(nameKey, rec.rowId);
-    }
-    for (const rec of records) {
-      const nameKey = rec.firstName.toString().toLowerCase() + '|' + rec.lastName.toString().toLowerCase();
-      const maxId = maxIdPerName.get(nameKey) || rec.rowId;
-      rec.isHistory = rec.rowId < maxId;
-    }
-    
-    const titleCode = beginId + '-' + endId;
-    const reportName = 'Scheduling_' + titleCode + '_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    const spreadsheet = SpreadsheetApp.create(reportName);
-    const reportSheet = spreadsheet.getActiveSheet();
-    
-    // Move to Scheduling folder
-    const folderId = CONFIG.SCHEDULING_FOLDER_ID;
-    if (folderId && folderId.length > 0) {
-      try {
-        moveToFolder(spreadsheet.getId(), folderId);
-      } catch (folderError) {
-        Logger.log('ERROR moving to Scheduling folder: ' + folderError.message);
-      }
-    }
-    
-    // Build header row - History + reportColumns + combined age bracket labels + additionalColumns
-    // Phase 4A.4: Add History as first column
-    const allReportHeaders = ['History', ...reportColumns];
-    ageBracketPairs.forEach(pair => {
-      allReportHeaders.push(pair.label);
-    });
-    allReportHeaders.push(...additionalColumns);
-    
-    // Set headers - force plain text format first to prevent "5-9" being interpreted as dates
-    reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
-    reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
-    reportSheet.getRange(1, 1, 1, allReportHeaders.length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
-    
-    // Build data rows
-    const dataRows = [];
-    for (const rec of records) {
-      const row = [];
-      
-      // Phase 4A.4: History column first
-      row.push(rec.isHistory ? 'History' : '');
-      
-      // Add regular columns
-      for (const col of reportColumns) {
-        const idx = colIndexMap[col];
-        if (idx !== undefined) {
-          let val = rec.rowData[idx];
-          if (val instanceof Date) {
-            val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
-          }
-          // Auto-uppercase Scheduled Distribution Code values
-          if (col === 'Scheduled Distribution Code' && val && typeof val === 'string') {
-            val = val.toUpperCase();
-          }
-          // v5.12: Format phone number as (XXX) XXX-XXXX
-          if (col === 'Phone Number') {
-            val = formatPhoneNumber_(val);
-          }
-          row.push(val || '');
-        } else {
-          row.push('');
-        }
-      }
-      
-      // Add combined age brackets
-      for (const pair of ageBracketPairs) {
-        const maleIdx = colIndexMap[pair.male];
-        const femaleIdx = colIndexMap[pair.female];
-        const maleVal = maleIdx !== undefined ? (parseInt(rec.rowData[maleIdx]) || 0) : 0;
-        const femaleVal = femaleIdx !== undefined ? (parseInt(rec.rowData[femaleIdx]) || 0) : 0;
-        const combined = maleVal + femaleVal;
-        row.push(combined > 0 ? combined : '');
-      }
-      
-      // Add additional columns
-      for (const col of additionalColumns) {
-        const idx = colIndexMap[col];
-        if (idx !== undefined) {
-          let val = rec.rowData[idx];
-          if (val instanceof Date) {
-            val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
-          }
-          row.push(val || '');
-        } else {
-          row.push('');
-        }
-      }
-      
-      dataRows.push(row);
-    }
-    
-    if (dataRows.length > 0) {
-      reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
-    }
-    
-    // Set explicit column widths (History col first, then rest shifted by 1)
-    // v5.18: Added Referrer Title (172) after Referral Info at position 14,
-    //        and How Products Help (732) at the end as last column.
-    const colWidths = [55,99,91,200,44,59,63,85,106,101,95,75,172,172,128,244,87,145,84,76,66,57,126,94,79,186,141,52,26,41,41,41,41,41,41,41,41,77,221,86,172,97,732,732];
-    for (let i = 0; i < colWidths.length && i < allReportHeaders.length; i++) {
-      reportSheet.setColumnWidth(i + 1, colWidths[i]);
-    }
-    
-    // Wrap header row and freeze it
-    reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
-    reportSheet.setFrozenRows(1);
-    
-    // Wrap last 2 long-text columns (Briefly Explain + How Products Help) if present
-    const lastCol = allReportHeaders.length;
-    if (dataRows.length > 0) {
-      reportSheet.getRange(2, lastCol, dataRows.length, 1).setWrap(true);       // How Products Help
-      if (lastCol > 1) {
-        reportSheet.getRange(2, lastCol - 1, dataRows.length, 1).setWrap(true); // Briefly Explain
-      }
-    }
-    
-    // Fix row 2 height (set to default height of 21)
-    if (dataRows.length > 0) {
-      reportSheet.setRowHeight(2, 21);
-    }
-    
-    // Phase 4A.5: Add data validation dropdowns for Sched Distrib Code and Service Status
-    if (dataRows.length > 0) {
-      try {
-        // SchedDistribCode dropdown (column index in allReportHeaders)
-        var schedCodeColIdx = allReportHeaders.indexOf('Scheduled Distribution Code');
-        if (schedCodeColIdx !== -1) {
-          var schedCodes = getLookupValues('SCHED_DISB_CODES', 'SchedDisbCode');
-          if (schedCodes && schedCodes.length > 0) {
-            var schedRule = SpreadsheetApp.newDataValidation()
-              .requireValueInList(schedCodes, true)
-              .setAllowInvalid(true) // Allow keeping existing values
-              .build();
-            reportSheet.getRange(2, schedCodeColIdx + 1, dataRows.length, 1).setDataValidation(schedRule);
-          }
-        }
-        
-        // Service Status dropdown
-        var statusColIdx = allReportHeaders.indexOf('Service Status');
-        if (statusColIdx !== -1) {
-          var statusValues = getLookupValues('SERVICE_STATUS', 'Status');
-          if (statusValues && statusValues.length > 0) {
-            var statusRule = SpreadsheetApp.newDataValidation()
-              .requireValueInList(statusValues, true)
-              .setAllowInvalid(true)
-              .build();
-            reportSheet.getRange(2, statusColIdx + 1, dataRows.length, 1).setDataValidation(statusRule);
-          }
-        }
-      } catch (valError) {
-        Logger.log('Data validation warning: ' + valError.message);
-      }
-    }
-    
-    // Phase 4A.7: Highlight the endId row in AM with Magenta background
+function generateSchedulingReport() {
     try {
-      var masterSheet = getMasterSheet();
-      if (masterSheet) {
-        var amData = masterSheet.getDataRange().getValues();
-        var amHeaders = trimHeaders(amData[0]);
-        var amIdCol = amHeaders.indexOf(resolveAMField_('ID'));
-        if (amIdCol !== -1) {
-          for (var r = 1; r < amData.length; r++) {
-            if (parseInt(amData[r][amIdCol]) === endId) {
-              masterSheet.getRange(r + 1, 1, 1, amHeaders.length).setBackground('#FF00FF');
-              break;
+        const sheet = getMasterSheet();
+        if (!sheet) {
+            return { success: false, error: 'Master sheet not found' };
+        }
+
+        const data = sheet.getDataRange().getValues();
+        const headers = trimHeaders(data[0]);
+        const idCol = headers.indexOf(resolveAMField_('ID'));
+        const firstNameCol = headers.indexOf(resolveAMField_('First Name'));
+        const lastNameCol = headers.indexOf(resolveAMField_('Last Name'));
+
+        if (idCol === -1) {
+            return { success: false, error: 'ID column not found in Applicants_Master' };
+        }
+
+        // ── Report columns (raw AM header names used for colIndexMap lookups) ──
+        const reportColumns = [
+            'Scheduled Distribution Code',
+            'Service Status',
+            'Admin Notes',
+            'Take Baby Box?',
+            'ID',
+            'Request Type',
+            'Request Date',
+            'Last Date Served',
+            'Next Service Availability Date',
+            'Last Name',
+            'First Name',
+            'More information about the person or organization that referred you.',
+            'What is the title or position of the person who referred you?',      // v5.18 Referrer Title
+            'How did you learn about our program?',                               // v5.19 Learned How
+            "What is the person's name who referred you?",
+            'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.',
+            'Are you currently homeless?',
+            'Street Address',
+            'Apartment #, Upper, Lower, or Lot #',
+            'City',
+            'State',
+            'County',
+            'Address type?',
+            'Phone Number',
+            'Phone type?',
+            'Email',
+            'Best contact method (What is the best way to get ahold of you?)'
+        ];
+
+        // ── Age brackets (combined male + female) ──
+        const ageBracketPairs = [
+            { label: 'Under 5', male: '[Males under 5]', female: '[Females under 5]' },
+            { label: '5-9', male: '[Males 5-9]', female: '[Females 5-9]' },
+            { label: '10-14', male: '[Males 10-14]', female: '[Females 10-14]' },
+            { label: '15-17', male: '[Males 15-17]', female: '[Females 15-17]' },
+            { label: '18-24', male: '[Males 18-24]', female: '[Females 18-24]' },
+            { label: '25-34', male: '[Males 25-34]', female: '[Females 25-34]' },
+            { label: '35-44', male: '[Males 35-44]', female: '[Females 35-44]' },
+            { label: '45-54', male: '[Males 45-54]', female: '[Females 45-54]' },
+            { label: '55-64', male: '[Males 55-64]', female: '[Females 55-64]' },
+            { label: '65-84', male: '[Males 65-84]', female: '[Females 65-84]' },
+            { label: '85 and Over', male: '[Males 85 and Over]', female: '[Females 85 and Over]' }
+        ];
+
+        // ── Additional columns after age brackets ──
+        const additionalColumns = [
+            'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.',
+            'Are you currently employed?',
+            'Total annual household income. (How much money does your family make in 1 year?)',
+            'Was there an emergency situation which caused you to contact us?',
+            'Briefly explain your current situation.',
+            'How will receiving personal and home cleaning products help you?'    // v5.18/5.19 after Current Situation
+        ];
+
+        // ── Build AM column index map ──
+        const colIndexMap = {};
+        reportColumns.forEach(col => {
+            const idx = headers.indexOf(resolveAMField_(col));
+            if (idx !== -1) colIndexMap[col] = idx;
+        });
+        ageBracketPairs.forEach(pair => {
+            const mi = headers.indexOf(resolveAMField_(pair.male));
+            const fi = headers.indexOf(resolveAMField_(pair.female));
+            if (mi !== -1) colIndexMap[pair.male] = mi;
+            if (fi !== -1) colIndexMap[pair.female] = fi;
+        });
+        additionalColumns.forEach(col => {
+            const idx = headers.indexOf(resolveAMField_(col));
+            if (idx !== -1) colIndexMap[col] = idx;
+        });
+
+        // ── v5.19: Collect ALL records from AM (no ID range, no date filter, no archive) ──
+        const records = [];
+        for (let i = 1; i < data.length; i++) {
+            const firstName = (data[i][firstNameCol] || '').toString().trim();
+            const lastName = (data[i][lastNameCol] || '').toString().trim();
+            if (!firstName && !lastName) continue;   // skip blank rows
+
+            records.push({
+                rowData: data[i],
+                lastName: lastName,
+                firstName: firstName,
+                rowId: parseInt(data[i][idCol]) || 0,
+                isHistory: false
+            });
+        }
+
+        if (records.length === 0) {
+            return { success: false, error: 'No records found in Applicants_Master' };
+        }
+
+        // ── Sort by Last Name, First Name, ID ──
+        records.sort((a, b) => {
+            const lc = a.lastName.localeCompare(b.lastName);
+            if (lc !== 0) return lc;
+            const fc = a.firstName.localeCompare(b.firstName);
+            if (fc !== 0) return fc;
+            return a.rowId - b.rowId;
+        });
+
+        // ── v5.18/5.19: History flag per name — highest ID = current ──
+        const maxIdPerName = new Map();
+        for (const rec of records) {
+            const key = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            const cur = maxIdPerName.get(key) || 0;
+            if (rec.rowId > cur) maxIdPerName.set(key, rec.rowId);
+        }
+        for (const rec of records) {
+            const key = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            const maxId = maxIdPerName.get(key) || rec.rowId;
+            rec.isHistory = rec.rowId < maxId;
+        }
+
+        // ── Create spreadsheet ──
+        const reportName = 'Scheduling_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        const spreadsheet = SpreadsheetApp.create(reportName);
+        const reportSheet = spreadsheet.getActiveSheet();
+
+        const folderId = CONFIG.SCHEDULING_FOLDER_ID;
+        if (folderId && folderId.length > 0) {
+            try { moveToFolder(spreadsheet.getId(), folderId); }
+            catch (fe) { Logger.log('ERROR moving to Scheduling folder: ' + fe.message); }
+        }
+
+        // ── v5.19: Build display headers (LU_FieldMap Report Headers) + raw key array ──
+        // rawKeyHeaders tracks column positions for data validation / wrap / etc.
+        const rawKeyHeaders = ['History'];
+        const allReportHeaders = ['History'];
+
+        reportColumns.forEach(col => {
+            rawKeyHeaders.push(col);
+            allReportHeaders.push(getReportHeader_(col));
+        });
+        ageBracketPairs.forEach(pair => {
+            rawKeyHeaders.push(pair.label);
+            allReportHeaders.push(pair.label);
+        });
+        additionalColumns.forEach(col => {
+            rawKeyHeaders.push(col);
+            allReportHeaders.push(getReportHeader_(col));
+        });
+
+        // Write header row — force plain text to prevent date interpretation of '5-9' etc.
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length)
+            .setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+
+        // ── Build data rows ──
+        const dataRows = [];
+        for (const rec of records) {
+            const row = [];
+
+            row.push(rec.isHistory ? 'History' : '');
+
+            for (const col of reportColumns) {
+                const idx = colIndexMap[col];
+                if (idx !== undefined) {
+                    let val = rec.rowData[idx];
+                    if (val instanceof Date) {
+                        val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
+                    }
+                    if (col === 'Scheduled Distribution Code' && val && typeof val === 'string') {
+                        val = val.toUpperCase();
+                    }
+                    if (col === 'Phone Number') {
+                        val = formatPhoneNumber_(val);
+                    }
+                    row.push(val || '');
+                } else {
+                    row.push('');
+                }
             }
-          }
+
+            for (const pair of ageBracketPairs) {
+                const mi = colIndexMap[pair.male];
+                const fi = colIndexMap[pair.female];
+                const mv = mi !== undefined ? (parseInt(rec.rowData[mi]) || 0) : 0;
+                const fv = fi !== undefined ? (parseInt(rec.rowData[fi]) || 0) : 0;
+                const tot = mv + fv;
+                row.push(tot > 0 ? tot : '');
+            }
+
+            for (const col of additionalColumns) {
+                const idx = colIndexMap[col];
+                if (idx !== undefined) {
+                    let val = rec.rowData[idx];
+                    if (val instanceof Date) {
+                        val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
+                    }
+                    row.push(val || '');
+                } else {
+                    row.push('');
+                }
+            }
+
+            dataRows.push(row);
         }
-      }
-    } catch (highlightError) {
-      Logger.log('Magenta highlight warning: ' + highlightError.message);
-    }
-    
-    logAudit('REPORT', null, 'Generated Scheduling Report for IDs ' + beginId + '-' + endId + ' with ' + records.length + ' records');
 
-    // v5.18: Record endId and report date in LU_LastScheduled for next Beginning ID auto-fill
-    try {
-      var reportDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy');
-      appendLastScheduledId(endId, reportDate);
-    } catch (luErr) {
-      Logger.log('appendLastScheduledId warning (non-fatal): ' + luErr.message);
-    }
+        if (dataRows.length > 0) {
+            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
+        }
 
-    return {
-      success: true,
-      message: 'Scheduling report generated',
-      recordCount: records.length,
-      beginId: beginId,
-      endId: endId,
-      reportUrl: spreadsheet.getUrl(),
-      reportId: spreadsheet.getId()
-    };
-    
-  } catch (error) {
-    Logger.log('Scheduling report error: ' + error.message);
-    return { success: false, error: 'Report generation failed: ' + error.message };
-  }
+        // ── v5.19: Column widths — 45 cols (1 History + 27 reportCols + 11 age + 6 additional)
+        //           Index 14 = Learned How (128) inserted after Referrer Title ──
+        const colWidths = [
+            55,  // History
+            99,  // Scheduled Distribution Code
+            91,  // Service Status
+            200, // Admin Notes
+            44,  // Take Baby Box?
+            59,  // ID
+            63,  // Request Type
+            85,  // Request Date
+            106, // Last Date Served
+            101, // Next Service Availability Date
+            95,  // Last Name
+            75,  // First Name
+            172, // Referral Info
+            172, // Referrer Title       (v5.18)
+            128, // Learned How          (v5.19 - NEW)
+            128, // Referrer Name
+            244, // Additional Info (how heard)
+            87,  // Currently Homeless?
+            145, // Street Address
+            84,  // Apt/Unit/Lot
+            76,  // City
+            66,  // State
+            57,  // County
+            126, // Address Type
+            94,  // Phone Number
+            79,  // Phone Type
+            186, // Email
+            141, // Best Contact Method
+            52,  // Under 5
+            26,  // 5-9
+            41,  // 10-14
+            41,  // 15-17
+            41,  // 18-24
+            41,  // 25-34
+            41,  // 35-44
+            41,  // 45-54
+            41,  // 55-64
+            41,  // 65-84
+            77,  // 85 and Over
+            221, // Assistance
+            86,  // Currently Employed?
+            172, // Annual Household Income
+            97,  // Emergency Situation?
+            732, // Briefly Explain Current Situation
+            732  // How Products Help
+        ];
+        for (let i = 0; i < colWidths.length && i < allReportHeaders.length; i++) {
+            reportSheet.setColumnWidth(i + 1, colWidths[i]);
+        }
+
+        // Wrap header row, freeze it
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
+        reportSheet.setFrozenRows(1);
+
+        if (dataRows.length > 0) {
+            // v5.19: Wrap Assistance column (comma-delimited values)
+            const assistIdx = rawKeyHeaders.indexOf(
+                'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.'
+            );
+            if (assistIdx !== -1) {
+                reportSheet.getRange(2, assistIdx + 1, dataRows.length, 1).setWrap(true);
+            }
+
+            // Wrap last 2 long-text columns (Briefly Explain + How Products Help)
+            const lastCol = allReportHeaders.length;
+            reportSheet.getRange(2, lastCol, dataRows.length, 1).setWrap(true); // How Products Help
+            reportSheet.getRange(2, lastCol - 1, dataRows.length, 1).setWrap(true); // Briefly Explain
+
+            // Fix row 2 height
+            reportSheet.setRowHeight(2, 21);
+
+            // Phase 4A.5: Data validation dropdowns — use rawKeyHeaders for position tracking
+            try {
+                const schedCodeColIdx = rawKeyHeaders.indexOf('Scheduled Distribution Code');
+                if (schedCodeColIdx !== -1) {
+                    const schedCodes = getLookupValues('SCHED_DISB_CODES', 'SchedDisbCode');
+                    if (schedCodes && schedCodes.length > 0) {
+                        const schedRule = SpreadsheetApp.newDataValidation()
+                            .requireValueInList(schedCodes, true).setAllowInvalid(true).build();
+                        reportSheet.getRange(2, schedCodeColIdx + 1, dataRows.length, 1).setDataValidation(schedRule);
+                    }
+                }
+
+                const statusColIdx = rawKeyHeaders.indexOf('Service Status');
+                if (statusColIdx !== -1) {
+                    const statusValues = getLookupValues('SERVICE_STATUS', 'Status');
+                    if (statusValues && statusValues.length > 0) {
+                        const statusRule = SpreadsheetApp.newDataValidation()
+                            .requireValueInList(statusValues, true).setAllowInvalid(true).build();
+                        reportSheet.getRange(2, statusColIdx + 1, dataRows.length, 1).setDataValidation(statusRule);
+                    }
+                }
+            } catch (valError) {
+                Logger.log('Data validation warning: ' + valError.message);
+            }
+        }
+
+        logAudit('REPORT', null, 'Generated Scheduling Report with ' + records.length + ' records');
+
+        return {
+            success: true,
+            message: 'Scheduling report generated',
+            recordCount: records.length,
+            reportUrl: spreadsheet.getUrl(),
+            reportId: spreadsheet.getId()
+        };
+
+    } catch (error) {
+        Logger.log('Scheduling report error: ' + error.message);
+        return { success: false, error: 'Report generation failed: ' + error.message };
+    }
 }
-
-/**
- * Phase 4A.8: Processes the latest Scheduling Report
- * Finds the most recent report in the Scheduling folder, reads non-History rows,
- * and updates AM records:
- *   - If SchedDisbCode is present → looks up LU_SchedDisbCodes to get
- *     StartDate, Interval, FundingSource; writes SchedDisbCode to AM,
- *     sets Service Status to "Scheduled", sets Distribution Start Date
- *     to StartDate, sets Distribution Interval, sets Funding Source,
- *     extracts Generic Distribution Code from alpha prefix of code
- *   - If SchedDisbCode is blank but Service Status edited → writes status back,
- *     sets Last Date Served and Final Service Contact Date to current date,
- *     sets Next Service Availability Date to current date + 90 days
- * Uses caching to avoid repeated lookups for the same code
- * @returns {Object} { success, updatedCount, reportName, log[] }
- */
 function processSchedulingReport() {
   try {
     var folderId = CONFIG.SCHEDULING_FOLDER_ID;
@@ -981,9 +937,10 @@ function processSchedulingReport() {
     
     var rptHeaders = trimHeaders(reportData[0]);
     var historyCol = rptHeaders.indexOf('History');
-    var rptIdCol       = rptHeaders.indexOf(resolveAMField_('ID'));
-    var rptSchedCodeCol= rptHeaders.indexOf(resolveAMField_('Scheduled Distribution Code'));
-    var rptStatusCol   = rptHeaders.indexOf(resolveAMField_('Service Status'));
+    var rptIdCol        = rptHeaders.indexOf(getReportHeader_('ID'));
+    var rptSchedCodeCol = rptHeaders.indexOf(getReportHeader_('Scheduled Distribution Code'));
+    var rptStatusCol = rptHeaders.indexOf(getReportHeader_('Service Status'));
+    var rptAdminNotesCol = rptHeaders.indexOf(getReportHeader_('Admin Notes'))
     
     if (rptIdCol === -1) {
       return { success: false, error: 'Report missing ID column' };

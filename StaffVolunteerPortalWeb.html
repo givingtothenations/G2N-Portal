@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   StaffVolunteerPortalWeb.html
   Staff/Volunteer Portal for G2N Request Management System (consolidated single file)
   Provides: login authentication, record search (by ID/FormID/Name+Date),
@@ -884,23 +884,41 @@
             var isAdmin = currentUser && currentUser.isAdmin;
 
             if (isAdmin) {
-                // v4.15: Try window.close() — works when SV was opened by AP via window.open().
-                // If blocked (URL-launched SV), show thankYouOverlay with an admin-specific message
-                // rather than navigating to a GAS URL which triggers "You need access".
-                document.getElementById('spinnerOverlay').classList.add('hidden');
-                window.close();
-                setTimeout(function () {
-                    if (!window.closed) {
-                        // Close was blocked — show message and hide portal
-                        var box = document.querySelector('#thankYouOverlay .thank-you-box');
-                        if (box) {
-                            box.innerHTML = '<h2>Session Ended</h2>' +
-                                '<p>Please close this window to return to the Admin Portal.</p>';
-                        }
-                        document.getElementById('mainPortal').classList.add('hidden');
-                        document.getElementById('thankYouOverlay').classList.remove('hidden');
-                    }
-                }, 300);
+                // v4.16: Always log out server-side first, then close/show message
+                google.script.run
+                    .withSuccessHandler(function () {
+                        currentUser = null;
+                        document.getElementById('spinnerOverlay').classList.add('hidden');
+                        window.close();
+                        setTimeout(function () {
+                            if (!window.closed) {
+                                var box = document.querySelector('#thankYouOverlay .thank-you-box');
+                                if (box) {
+                                    box.innerHTML = '<h2>Session Ended</h2>' +
+                                        '<p>Please close this window to return to the Admin Portal.</p>';
+                                }
+                                document.getElementById('mainPortal').classList.add('hidden');
+                                document.getElementById('thankYouOverlay').classList.remove('hidden');
+                            }
+                        }, 300);
+                    })
+                    .withFailureHandler(function () {
+                        currentUser = null;
+                        document.getElementById('spinnerOverlay').classList.add('hidden');
+                        window.close();
+                        setTimeout(function () {
+                            if (!window.closed) {
+                                var box = document.querySelector('#thankYouOverlay .thank-you-box');
+                                if (box) {
+                                    box.innerHTML = '<h2>Session Ended</h2>' +
+                                        '<p>Please close this window to return to the Admin Portal.</p>';
+                                }
+                                document.getElementById('mainPortal').classList.add('hidden');
+                                document.getElementById('thankYouOverlay').classList.remove('hidden');
+                            }
+                        }, 300);
+                    })
+                    .logoutUser();
             } else {
                 // Staff/Volunteer - log out and show thank you
                 google.script.run
