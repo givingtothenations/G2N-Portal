@@ -130,6 +130,9 @@
          generateSchedulingReport() client function simplified —
          no beginId validation, passes no arguments to server.
          Tab-open handler no longer calls loadLastScheduledId().
+  v7.4 - Manage Dropdowns: added Scheduled Distribution Codes (LU_SchedDisbCodes)
+         to luSheetSelector. Allows admin to activate/deactivate SchedDisbCodes
+         directly in AP without opening G2N_Lookups spreadsheet.
 -->
 
 <!DOCTYPE html>
@@ -1713,6 +1716,8 @@
                         <option value="SERVICE_STATUS">Service Status (LU_ServiceStatus)</option>
                         <option value="SERVICE_HOW">Service How (LU_ServiceHow)</option>
                         <option value="FUNDING_SOURCES">Funding Sources (LU_FundingSources)</option>
+                        <option value="SCHED_DISB_CODES">Scheduled Distribution Codes (LU_SchedDisbCodes)</option>
+                        <option value="REPORT_COLUMNS">Report Columns (LU_ReportColumns)</option>
                         <option value="INCOME_LEVELS">Income Levels (LU_IncomeLevels)</option>
                         <option value="INCOME_SOURCES">Income Sources (LU_IncomeSources)</option>
                         <option value="LEARNED_HOW">Learned How (LU_LearnedHow)</option>
@@ -2357,99 +2362,99 @@
         */
         function generateSchedulingReport() {
             showMessage('schedMessage', 'Generating scheduling report...', 'info');
-        document.getElementById('schedGenerateBtn').disabled = true;
-        document.getElementById('schedReportLink').classList.add('hidden');
+            document.getElementById('schedGenerateBtn').disabled = true;
+            document.getElementById('schedReportLink').classList.add('hidden');
 
-        google.script.run
-        .withSuccessHandler(function (result) {
-            document.getElementById('schedGenerateBtn').disabled = false;
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    document.getElementById('schedGenerateBtn').disabled = false;
 
-        if (result.success) {
-            showMessage('schedMessage',
-                'Report generated with ' + result.recordCount + ' records!',
-                'success');
-        document.getElementById('schedReportUrl').href = result.reportUrl;
-        document.getElementById('schedReportLink').classList.remove('hidden');
+                    if (result.success) {
+                        showMessage('schedMessage',
+                            'Report generated with ' + result.recordCount + ' records!',
+                            'success');
+                        document.getElementById('schedReportUrl').href = result.reportUrl;
+                        document.getElementById('schedReportLink').classList.remove('hidden');
                     } else {
-            showMessage('schedMessage', result.error, 'error');
+                        showMessage('schedMessage', result.error, 'error');
                     }
                 })
-        .withFailureHandler(function (error) {
-            document.getElementById('schedGenerateBtn').disabled = false;
-        showMessage('schedMessage',
-        'Report generation failed: ' + error.message, 'error');
+                .withFailureHandler(function (error) {
+                    document.getElementById('schedGenerateBtn').disabled = false;
+                    showMessage('schedMessage',
+                        'Report generation failed: ' + error.message, 'error');
                 })
-        .generateSchedulingReport();
+                .generateSchedulingReport();
         }
 
-    // ============ PROCESS DISTRIBUTION ============
+        // ============ PROCESS DISTRIBUTION ============
 
-    function findDistributionReport() {
-    var distribCodeEl = document.getElementById('processDistribCode');
-    var distribCode = distribCodeEl.value.trim().toUpperCase();
+        function findDistributionReport() {
+            var distribCodeEl = document.getElementById('processDistribCode');
+            var distribCode = distribCodeEl.value.trim().toUpperCase();
 
-    if (!distribCode) {
-    showMessage('processMessage', 'Please select a Distribution Code', 'error');
-    return;
-    }
+            if (!distribCode) {
+                showMessage('processMessage', 'Please select a Distribution Code', 'error');
+                return;
+            }
 
-    showMessage('processMessage', 'Searching for report...', 'info');
-    document.getElementById('findReportBtn').disabled = true;
-    document.getElementById('foundReportInfo').classList.add('hidden');
-    document.getElementById('editableReportSection').classList.add('hidden');
+            showMessage('processMessage', 'Searching for report...', 'info');
+            document.getElementById('findReportBtn').disabled = true;
+            document.getElementById('foundReportInfo').classList.add('hidden');
+            document.getElementById('editableReportSection').classList.add('hidden');
 
-    google.script.run
-    .withSuccessHandler(function (result) {
-    document.getElementById('findReportBtn').disabled = false;
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    document.getElementById('findReportBtn').disabled = false;
 
-    if (result.success) {
-    foundReportData = result;
-    document.getElementById('foundReportName').textContent = result.reportName;
-    document.getElementById('foundReportId').textContent = result.reportId;
-    document.getElementById('foundRecordCount').textContent = result.recordCount || 'Unknown';
-    document.getElementById('foundReportInfo').classList.remove('hidden');
-    showMessage('processMessage', 'Report found! Loading editable view...', 'info');
+                    if (result.success) {
+                        foundReportData = result;
+                        document.getElementById('foundReportName').textContent = result.reportName;
+                        document.getElementById('foundReportId').textContent = result.reportId;
+                        document.getElementById('foundRecordCount').textContent = result.recordCount || 'Unknown';
+                        document.getElementById('foundReportInfo').classList.remove('hidden');
+                        showMessage('processMessage', 'Report found! Loading editable view...', 'info');
 
-    // Phase 4B.4: Load editable report data
-    loadEditableReportData(result.reportId);
-    } else {
-    showMessage('processMessage', result.error, 'error');
-    }
-    })
-    .withFailureHandler(function (error) {
-    document.getElementById('findReportBtn').disabled = false;
-    var errorMsg = error.message || error.toString();
-    if (errorMsg.indexOf('permission') > -1 || errorMsg.indexOf('authorization') > -1) {
-    showMessage('processMessage', 'Authorization required. Please re-authorize the script: Open Apps Script editor, Run menu > Run function > select any function, then approve permissions.', 'error');
-    } else {
-    showMessage('processMessage', 'Search failed: ' + errorMsg, 'error');
-    }
-    })
-    .findDistributionReportByCode(distribCode);
-    }
+                        // Phase 4B.4: Load editable report data
+                        loadEditableReportData(result.reportId);
+                    } else {
+                        showMessage('processMessage', result.error, 'error');
+                    }
+                })
+                .withFailureHandler(function (error) {
+                    document.getElementById('findReportBtn').disabled = false;
+                    var errorMsg = error.message || error.toString();
+                    if (errorMsg.indexOf('permission') > -1 || errorMsg.indexOf('authorization') > -1) {
+                        showMessage('processMessage', 'Authorization required. Please re-authorize the script: Open Apps Script editor, Run menu > Run function > select any function, then approve permissions.', 'error');
+                    } else {
+                        showMessage('processMessage', 'Search failed: ' + errorMsg, 'error');
+                    }
+                })
+                .findDistributionReportByCode(distribCode);
+        }
 
-    /**
-    * Phase 4B.4: Loads distribution report data into editable grid
-    * @param {string} reportId - Google Sheets ID
-    */
-    function loadEditableReportData(reportId) {
-    google.script.run
-    .withSuccessHandler(function (result) {
-    if (result.success) {
-    editableReportHeaders = result.headers;
-    editableReportRows = result.rows;
-    renderEditableReport();
-    document.getElementById('editableReportSection').classList.remove('hidden');
-    showMessage('processMessage', result.rows.length + ' records loaded. Review and edit as needed, then Save or Save & Process.', 'success');
-    } else {
-    showMessage('processMessage', 'Could not load report data: ' + result.error, 'error');
-    }
-    })
-    .withFailureHandler(function (error) {
-    showMessage('processMessage', 'Failed to load report data: ' + error.message, 'error');
-    })
-    .getDistributionReportData(reportId);
-    }
+        /**
+        * Phase 4B.4: Loads distribution report data into editable grid
+        * @param {string} reportId - Google Sheets ID
+        */
+        function loadEditableReportData(reportId) {
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        editableReportHeaders = result.headers;
+                        editableReportRows = result.rows;
+                        renderEditableReport();
+                        document.getElementById('editableReportSection').classList.remove('hidden');
+                        showMessage('processMessage', result.rows.length + ' records loaded. Review and edit as needed, then Save or Save & Process.', 'success');
+                    } else {
+                        showMessage('processMessage', 'Could not load report data: ' + result.error, 'error');
+                    }
+                })
+                .withFailureHandler(function (error) {
+                    showMessage('processMessage', 'Failed to load report data: ' + error.message, 'error');
+                })
+                .getDistributionReportData(reportId);
+        }
 
         /**
              * Phase 4B.4: Renders editable distribution report as HTML table
@@ -4095,6 +4100,6 @@
             document.getElementById('ae_resultsPanel').classList.add('hidden');
             document.getElementById('ae_searchPanel').classList.remove('hidden');
         }
-</script>
+    </script>
 </body>
 </html>

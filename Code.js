@@ -90,6 +90,7 @@
  * v6.0 - One-time data fix macros added under 'One-Time Data Fixes' menu.
  * v6.1 - Macros read source sheets from G2N_Lookups (no external openById).
  *         Test run skips archive scan — only AM searched in dryRun mode.
+ * v6.2 - REPORT_COLUMNS added to CONFIG.LOOKUPS
  */
 
 // ============ CONFIGURATION ============
@@ -151,7 +152,8 @@ const CONFIG = {
     SCHED_DISB_CODES: 'LU_SchedDisbCodes',
     EVENT_INFO: 'LU_EventInfo',
     SAVED_REPORTS: 'LU_SavedReports',  // v5.2: Saved Custom Data Sheet specs
-  },
+        REPORT_COLUMNS: 'LU_ReportColumns',   // v6.2 — added  
+    },
 
   // Data sheet names (in G2N_Data workbook — loaded on demand, not preloaded)
   DATA_SHEETS: {
