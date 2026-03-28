@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Code.gs
  * Main entry point and configuration for G2N Request Management System
  * Handles web app routing (doGet), custom menus, workbook connections,
@@ -215,6 +215,18 @@ function onOpen() {
   }
 
   menu.addToUi();
+}
+
+/*
+* Resets cache when an admin edits LU_ReportColumns:
+*/
+
+function onEdit(e) {
+    if (e && e.source) {
+        var sheetName = e.range.getSheet().getName();
+        if (sheetName === 'LU_FieldMap') clearFieldMapCache();
+        if (sheetName === 'LU_ReportColumns') clearReportColumnCache(); // ADD THIS
+    }
 }
 
 /**
