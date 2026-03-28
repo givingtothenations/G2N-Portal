@@ -145,8 +145,11 @@
  *         Alternating row background applied as a single loop of setBackground()
  *         per-row (not per-cell). Eliminates 800+ API calls for a 80-record
  *         report; fixes "running forever" / 6-minute GAS timeout.
- *  
- * */
+ *   v5.22 - Re-added generateDistributionReport() which was missing from the file.
+ *           Filters AM by Scheduled Distribution Code, builds record objects,
+ *           calls createDistributionReportSpreadsheet() (batch write, v5.21).
+ * 
+ */
 
 'use strict';
 
@@ -752,6 +755,120 @@ function previewDistributionReport(distribCode) {
     Logger.log('previewDistributionReport error: ' + e.message);
     return { success: false, error: 'Preview failed: ' + e.message };
   }
+}
+
+/**
+ * Generate Distribution Report Google Sheet for a given Scheduled Distribution Code.
+ *
+ * Reads all Applicants_Master rows where Scheduled Distribution Code matches
+ * distribCode, builds a record object per row, sorts by Last Name / First Name,
+ * and calls createDistributionReportSpreadsheet() to write the sheet.
+ *
+ * hasBabyBox  — true if ANY matched row has Take Baby Box? = 'X'
+ * hasExtraBox — true if ANY matched row has a non-blank Scheduled Box Code 3
+ *
+ * Called from AP: generateDistributionReport(distribCode, startDate, endDate, pickupTimes)
+ *
+ * v5.22 — Restored (was missing from file; caused indefinite hang on generate)
+ *
+ * @param {string} distribCode  - Scheduled Distribution Code (will be uppercased)
+ * @param {string} startDate    - Display start date string (e.g. '3/15/26')
+ * @param {string} endDate      - Display end date string (e.g. '3/29/26')
+ * @param {string} pickupTimes  - Pickup times text for report header
+ * @returns {{ success, recordCount, reportUrl, downloadUrl, reportId }}
+ */
+function generateDistributionReport(distribCode, startDate, endDate, pickupTimes) {
+    try {
+        if (!distribCode) {
+            return { success: false, error: 'Distribution Code is required' };
+        }
+
+        distribCode = distribCode.toString().toUpperCase();
+
+        var sheet = getMasterSheet();
+        if (!sheet) {
+            return { success: false, error: 'Master sheet not found' };
+        }
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+
+        var colIdx = {
+            id: headers.indexOf(resolveAMField_('ID')),
+            firstName: headers.indexOf(resolveAMField_('First Name')),
+            lastName: headers.indexOf(resolveAMField_('Last Name')),
+            address1: headers.indexOf(resolveAMField_('Street Address')),
+            address2: headers.indexOf(resolveAMField_('Apartment #, Upper, Lower, or Lot #')),
+            city: headers.indexOf(resolveAMField_('City')),
+            phone: headers.indexOf(resolveAMField_('Phone Number')),
+            schedDistribCode: headers.indexOf(resolveAMField_('Scheduled Distribution Code')),
+            babyBox: headers.indexOf(resolveAMField_('Take Baby Box?')),
+            schedBoxCode3: headers.indexOf(resolveAMField_('Scheduled Box Code 3'))
+        };
+
+        if (colIdx.schedDistribCode === -1) {
+            return { success: false, error: 'Scheduled Distribution Code column not found in Applicants_Master' };
+        }
+
+        var filteredRecords = [];
+        var hasBabyBox = false;
+        var hasExtraBox = false;
+
+        for (var i = 1; i < data.length; i++) {
+            var rowCode = (data[i][colIdx.schedDistribCode] || '').toString().toUpperCase();
+            if (rowCode !== distribCode) continue;
+
+            var babyVal = colIdx.babyBox !== -1 ? (data[i][colIdx.babyBox] || '').toString().trim().toUpperCase() : '';
+            var box3Val = colIdx.schedBoxCode3 !== -1 ? (data[i][colIdx.schedBoxCode3] || '').toString().trim() : '';
+
+            if (babyVal === 'X') hasBabyBox = true;
+            if (box3Val !== '') hasExtraBox = true;
+
+            filteredRecords.push({
+                submissionId: colIdx.id !== -1 ? (data[i][colIdx.id] || '').toString().trim() : '',
+                firstName: colIdx.firstName !== -1 ? (data[i][colIdx.firstName] || '').toString().trim() : '',
+                lastName: colIdx.lastName !== -1 ? (data[i][colIdx.lastName] || '').toString().trim() : '',
+                address1: colIdx.address1 !== -1 ? (data[i][colIdx.address1] || '').toString().trim() : '',
+                address2: colIdx.address2 !== -1 ? (data[i][colIdx.address2] || '').toString().trim() : '',
+                city: colIdx.city !== -1 ? (data[i][colIdx.city] || '').toString().trim() : '',
+                phone: colIdx.phone !== -1 ? (data[i][colIdx.phone] || '').toString().trim() : '',
+                distribCode: distribCode,
+                babyBox: babyVal === 'X' ? 'X' : '',
+                extraBox: box3Val !== '' ? 'X' : ''
+            });
+        }
+
+        if (filteredRecords.length === 0) {
+            return { success: false, error: 'No records found for distribution code: ' + distribCode };
+        }
+
+        // Sort: Last Name, First Name
+        filteredRecords.sort(function (a, b) {
+            var lc = a.lastName.localeCompare(b.lastName);
+            return lc !== 0 ? lc : a.firstName.localeCompare(b.firstName);
+        });
+
+        // createDistributionReportSpreadsheet() uses single batch setValues() (v5.21)
+        var spreadsheet = createDistributionReportSpreadsheet(
+            distribCode, filteredRecords, hasBabyBox, hasExtraBox,
+            startDate, endDate, pickupTimes
+        );
+
+        logAudit('REPORT', null,
+            'Generated Distribution Report for ' + distribCode + ': ' + filteredRecords.length + ' records');
+
+        return {
+            success: true,
+            recordCount: filteredRecords.length,
+            reportUrl: spreadsheet.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+            reportId: spreadsheet.getId()
+        };
+
+    } catch (e) {
+        Logger.log('generateDistributionReport error: ' + e.message);
+        return { success: false, error: 'Report generation failed: ' + e.message };
+    }
 }
 
 /**
