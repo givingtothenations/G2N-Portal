@@ -180,14 +180,6 @@ function onOpen() {
     .addItem('Get Staff Portal URL', 'showStaffPortalUrl')
     .addItem('Get Admin Portal URL', 'showAdminPortalUrl')
     .addItem('Get Intake Form URL', 'showIntakeFormUrl')
-    .addSeparator()
-    .addSubMenu(ui.createMenu('One-Time Data Fixes')
-      .addItem('TEST RUN — Fixed Distrib Codes (no changes)', 'testRunFixedDistribCodes')
-      .addItem('Apply Fixed Distribution Codes to AM', 'applyFixedDistribCodes')
-      .addSeparator()
-      .addItem('TEST RUN — Hygiene Schedule (no changes)', 'testRunHygieneSched')
-      .addItem('Apply Hygiene Schedule to LU_SchedDisbCodes', 'applyHygieneSched'));
-
   // v5.4: Owner-only items — Dev Environment and Setup
   try {
     const ownerEmail = SpreadsheetApp.getActiveSpreadsheet().getOwner().getEmail();
