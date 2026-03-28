@@ -1,4 +1,4 @@
-/**
+﻿/**
  * SharedUtils.gs
  * Shared utility functions for the G2N System.
  * Extracted from Code.gs and GrantsReportService.gs to centralize
@@ -12,14 +12,19 @@
  *           getBabyBoxIndicator(), moveToFolder(), styleReportHeader(),
  *           styleGroupRow(), writeReportTitleSection()
  *         ProductService.gs: normalizeProductDate() → renamed normalizeDate()
- *
+ * v1.2 - isRowActive() aligned with AP isBooleanChecked() — now accepts
+ *         boolean true, string 'TRUE'/'true'/'Y'/'YES'/'Yes', number 1,
+ *         string '1'. Previously accepted only boolean true and 'TRUE',
+ *         causing getActiveSchedDisbCodes() to return empty when Active
+ *         column contained 'Y' or other truthy variants.
+ *         Fixes Distribution Report / Process Distribution dropdown empty.
+ * 
  * Sections:
  *   DATE UTILITIES — trimHeaders, htmlDateToSheet, extractYear, parseDateInput, normalizeDate
  *   ROW UTILITIES — isRowActive, getStr, getApplicantType, getBabyBoxIndicator
  *   FILE UTILITIES — moveToFolder
  *   REPORT STYLING UTILITIES — styleReportHeader, styleGroupRow, writeReportTitleSection
  */
-
 
 // ============ FIELDMAP HELPERS ============
 
@@ -170,15 +175,36 @@ function normalizeDate(dateVal) {
 
 /**
  * Checks if a data row is "active" based on the Active column value.
- * Returns true if there is no Active column, or the value is boolean true / string 'TRUE'.
- * @param {Array} row - Data row from sheet
+ *
+ * Returns true when:
+ *   - No Active column exists (activeColIndex === -1) — all rows included
+ *   - boolean  true
+ *   - string   'TRUE', 'true', 'True'  (any case)
+ *   - string   'Y', 'y', 'YES', 'Yes', 'yes'
+ *   - number   1
+ *   - string   '1'
+ *
+ * Returns false for boolean false, 0, '', null, undefined, 'N', 'NO',
+ * 'FALSE', 'false', or any other value not in the truthy list above.
+ *
+ * Aligned with isBooleanChecked() in AdminPortalWeb.html so the server-side
+ * active check is consistent with what the AP LU editor displays as checked.
+ *
+ * v1.2: Expanded from (val === true || val === 'TRUE') to cover all truthy
+ *        variants. Fixes getActiveSchedDisbCodes() returning empty when
+ *        LU_SchedDisbCodes Active column contains 'Y' or other variants.
+ *
+ * @param {Array}  row            - Data row from sheet
  * @param {number} activeColIndex - Column index of Active field (-1 if absent)
  * @returns {boolean}
  */
 function isRowActive(row, activeColIndex) {
-  if (activeColIndex === -1) return true;
-  var val = row[activeColIndex];
-  return val === true || val === 'TRUE';
+    if (activeColIndex === -1) return true;
+    var val = row[activeColIndex];
+    if (val === true || val === 1) return true;
+    if (val === false || val === 0 || val === '' || val === null || val === undefined) return false;
+    var s = val.toString().trim().toUpperCase();
+    return s === 'TRUE' || s === 'Y' || s === 'YES' || s === '1';
 }
 
 /**
