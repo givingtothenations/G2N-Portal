@@ -132,15 +132,21 @@
  *          the report headers now written by generateSchedulingReport.
  *          AdminPortalWeb v7.3: removed Beginning ID field, loadLastScheduledId(),
  *          and related client-side logic.
- *   v5.20 - LU_ReportColumns integration for generateSchedulingReport().
- *            Column definitions (previously hardcoded reportColumns,
- *            ageBracketPairs, additionalColumns arrays) now read from
- *            LU_ReportColumns 'Scheduling' via ReportColumnService.
- *            Column widths applied via applyReportColumnFormatting().
- *            Falls back to v5.19 hardcoded arrays when LU_ReportColumns empty.
- *            processSchedulingReport() unchanged — still uses getReportHeader_()
- *            for column lookups since it reads the generated report back.
- */
+ * v5.20 - LU_ReportColumns integration for generateSchedulingReport().
+ *          Column definitions (previously hardcoded reportColumns,
+ *          ageBracketPairs, additionalColumns arrays) now read from
+ *          LU_ReportColumns 'Scheduling' via ReportColumnService.
+ *          Column widths applied via applyReportColumnFormatting().
+ *          Falls back to v5.19 hardcoded arrays when LU_ReportColumns empty.
+ *          processSchedulingReport() unchanged — still uses getReportHeader_()
+ *          for column lookups since it reads the generated report back.
+ * v5.21 - createDistributionReportSpreadsheet(): replaced per-row setValue()
+ *         loop with single batch setValues() call for data rows.
+ *         Alternating row background applied as a single loop of setBackground()
+ *         per-row (not per-cell). Eliminates 800+ API calls for a 80-record
+ *         report; fixes "running forever" / 6-minute GAS timeout.
+ *  
+ * */
 
 'use strict';
 
@@ -532,143 +538,160 @@ function formatPhoneNumber_(raw) {
 }
 
 /**
- * Creates the Distribution Report spreadsheet with formatted headers and data
- * @param {string} distribCode - Distribution code
- * @param {Object[]} records - Filtered/sorted record objects
- * @param {boolean} hasBabyBox  - Whether to include Baby Box column
- * @param {boolean} hasExtraBox - v5.12: Whether to include Extra Box column (any row has Box Code 3)
- * @param {string} startDate - Report start date
- * @param {string} endDate - Report end date
- * @param {string} pickupTimes - Pickup times text
- * @returns {Object} { reportUrl, downloadUrl, spreadsheetId }
+ * Creates the Distribution Report spreadsheet with formatted headers and data.
+ *
+ * v5.12: Baby Box and Extra Box are optional columns inserted after Date Picked Up.
+ * v5.21: Data rows now written as a single batch setValues() call instead of
+ *        per-row setValue() loops. Eliminates 800+ individual API calls per
+ *        report generation; fixes GAS 6-minute execution timeout.
+ *
+ * @param {string}   distribCode  - Distribution code
+ * @param {Object[]} records      - Filtered/sorted record objects
+ * @param {boolean}  hasBabyBox   - Whether to include Baby Box column
+ * @param {boolean}  hasExtraBox  - Whether to include Extra Box column (v5.12)
+ * @param {string}   startDate    - Report start date string
+ * @param {string}   endDate      - Report end date string
+ * @param {string}   pickupTimes  - Pickup times text
+ * @returns {GoogleAppsScript.Spreadsheet.Spreadsheet} The created spreadsheet
  */
-function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, hasExtraBox, startDate, endDate, pickupTimes) {
-  const reportName = 'Distribution_' + distribCode + '_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-  const spreadsheet = SpreadsheetApp.create(reportName);
-  const sheet = spreadsheet.getActiveSheet();
-  
-  // Move to Distribution Reports folder
-  const folderId = CONFIG.DISTRIBUTION_FOLDER_ID;
-  Logger.log('DISTRIBUTION_FOLDER_ID: ' + folderId);
-  
-  if (folderId && folderId.length > 0) {
-    try {
-      moveToFolder(spreadsheet.getId(), folderId);
-      Logger.log('Report successfully moved to Distribution folder');
-    } catch (folderError) {
-      Logger.log('ERROR moving to Distribution folder: ' + folderError.message);
-    }
-  } else {
-    Logger.log('WARNING: DISTRIBUTION_FOLDER_ID not configured');
-  }
-  
-  let currentRow = 1;
-  
-  // === HEADER SECTION ===
-  sheet.getRange(currentRow, 1).setValue('Total Recipients: ' + records.length);
-  sheet.getRange(currentRow, 1).setFontWeight('bold');
-  currentRow++;
-  
-  sheet.getRange(currentRow, 1).setValue('Giving to the Nations');
-  sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(14);
-  currentRow++;
-  
-  sheet.getRange(currentRow, 1).setValue('Cleaning Box Distribution');
-  sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(12);
-  currentRow++;
-  
-  let dateLabel = 'Available Dates: ' + startDate + '-' + endDate;
-  sheet.getRange(currentRow, 1).setValue(dateLabel);
-  currentRow++;
-  
-  if (pickupTimes) {
-    sheet.getRange(currentRow, 1).setValue('Available Pick Up Times: ' + pickupTimes);
-    currentRow++;
-  }
-  
-  const createdDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yy');
-  sheet.getRange(currentRow, 1).setValue('Created: ' + createdDate);
-  currentRow++;
-  
-  currentRow++;
-  
-  // === DATA HEADER ROW ===
-  const headerRow = currentRow;
-  let col = 1;
-  
-  // v5.12: Baby Box and Extra Box are optional columns inserted after Date Picked Up
-  const dataHeaders = ['Date Picked Up'];
-  if (hasBabyBox)  dataHeaders.push('Baby Box');
-  if (hasExtraBox) dataHeaders.push('Extra Box');
-  dataHeaders.push('First Name', 'Last Name', getReportHeader_('Street Address'), getReportHeader_('Apartment #, Upper, Lower, or Lot #'), 'City', 'Phone', 'Distribution Code', 'Submission #');
-  
-  for (let i = 0; i < dataHeaders.length; i++) {
-    sheet.getRange(headerRow, col + i).setValue(dataHeaders[i]);
-  }
-  
-  styleReportHeader(sheet, headerRow, dataHeaders.length);
-  
-  currentRow++;
-  
-  // === DATA ROWS ===
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i];
-    col = 1;
-    
-    sheet.getRange(currentRow, col++).setValue('');           // Date Picked Up (blank for staff)
-    if (hasBabyBox)  sheet.getRange(currentRow, col++).setValue(record.babyBox);
-    if (hasExtraBox) sheet.getRange(currentRow, col++).setValue(record.extraBox);  // v5.12
-    
-    sheet.getRange(currentRow, col++).setValue(record.firstName);
-    sheet.getRange(currentRow, col++).setValue(record.lastName);
-    sheet.getRange(currentRow, col++).setValue(record.address1);
-    sheet.getRange(currentRow, col++).setValue(record.address2);
-    sheet.getRange(currentRow, col++).setValue(record.city);
-    sheet.getRange(currentRow, col++).setValue(formatPhoneNumber_(record.phone));
-    sheet.getRange(currentRow, col++).setValue(record.distribCode);
-    sheet.getRange(currentRow, col++).setValue(record.submissionId);
-    
-    currentRow++;
-  }
-  
-  const dataRange = sheet.getRange(headerRow + 1, 1, records.length, dataHeaders.length);
-  dataRange.setBorder(true, true, true, true, true, true);
-  
-  for (let i = 0; i < records.length; i++) {
-    if (i % 2 === 1) {
-      sheet.getRange(headerRow + 1 + i, 1, 1, dataHeaders.length).setBackground('#f3f3f3');
-    }
-  }
-  
-  // Footer notes for Baby Box and/or Extra Box
-  const footerLines = [];
-  if (hasBabyBox) {
-    footerLines.push('Note: Recipients with "X" in the \'Baby Box\' column will receive 2 boxes, 1 large box and 1 small box. All others receive 1 large box.');
-  }
-  if (hasExtraBox) {
-    footerLines.push('Note: Recipients with "X" in the \'Extra Box\' column will receive a special box in addition to the Scheduled Box.');
+function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, hasExtraBox,
+    startDate, endDate, pickupTimes) {
+    const reportName = 'Distribution_' + distribCode + '_' +
+        Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    const spreadsheet = SpreadsheetApp.create(reportName);
+    const sheet = spreadsheet.getActiveSheet();
 
-  }
-  if (footerLines.length > 0) {
-    for (const line of footerLines) {
-      currentRow++;
-      sheet.getRange(currentRow, 1).setValue(line);
-      sheet.getRange(currentRow, 1, 1, dataHeaders.length).merge();
-      sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setWrap(true);
+    // Move to Distribution folder
+    const folderId = CONFIG.DISTRIBUTION_FOLDER_ID;
+    if (folderId && folderId.length > 0) {
+        try {
+            moveToFolder(spreadsheet.getId(), folderId);
+        } catch (folderError) {
+            Logger.log('ERROR moving to Distribution folder: ' + folderError.message);
+        }
+    } else {
+        Logger.log('WARNING: DISTRIBUTION_FOLDER_ID not configured');
     }
-  }
-  
-  // Column widths — built dynamically to match actual column order
-  // Cols: [Date Picked Up, (Baby Box?), (Extra Box?), First Name, Last Name, Addr1, Addr2, City, Phone, Distrib Code, Submission #]
-  const widths = [100];
-  if (hasBabyBox)  widths.push(70);
-  if (hasExtraBox) widths.push(70);
-  widths.push(100, 100, 180, 80, 120, 120, 100, 90);
-  for (let c = 0; c < widths.length; c++) {
-    sheet.setColumnWidth(c + 1, widths[c]);
-  }
-  
-  return spreadsheet;
+
+    let currentRow = 1;
+
+    // ── Header section (few cells — individual writes are fine here) ──────────
+    sheet.getRange(currentRow, 1).setValue('Total Recipients: ' + records.length)
+        .setFontWeight('bold');
+    currentRow++;
+
+    sheet.getRange(currentRow, 1).setValue('Giving to the Nations')
+        .setFontWeight('bold').setFontSize(14);
+    currentRow++;
+
+    sheet.getRange(currentRow, 1).setValue('Cleaning Box Distribution')
+        .setFontWeight('bold').setFontSize(12);
+    currentRow++;
+
+    sheet.getRange(currentRow, 1).setValue('Available Dates: ' + startDate + '-' + endDate);
+    currentRow++;
+
+    if (pickupTimes) {
+        sheet.getRange(currentRow, 1).setValue('Available Pick Up Times: ' + pickupTimes);
+        currentRow++;
+    }
+
+    sheet.getRange(currentRow, 1).setValue(
+        'Created: ' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yy'));
+    currentRow++;
+
+    currentRow++; // blank row before data header
+
+    // ── Data header row ───────────────────────────────────────────────────────
+    const headerRow = currentRow;
+
+    // v5.12: Baby Box and Extra Box are optional columns
+    const dataHeaders = ['Date Picked Up'];
+    if (hasBabyBox) dataHeaders.push('Baby Box');
+    if (hasExtraBox) dataHeaders.push('Extra Box');
+    dataHeaders.push(
+        'First Name', 'Last Name',
+        getReportHeader_('Street Address'),
+        getReportHeader_('Apartment #, Upper, Lower, or Lot #'),
+        'City', 'Phone', 'Distribution Code', 'Submission #'
+    );
+
+    const numCols = dataHeaders.length;
+    sheet.getRange(headerRow, 1, 1, numCols).setValues([dataHeaders]);
+    styleReportHeader(sheet, headerRow, numCols);
+    currentRow++;
+
+    // ── Data rows — SINGLE batch write (v5.21) ────────────────────────────────
+    // Build entire 2D array in memory first, then write in one setValues() call.
+    // Previous implementation used ~11 setValue() calls per record; for 80 records
+    // that was 880+ API calls. This version uses exactly 1 regardless of row count.
+    if (records.length > 0) {
+        const dataRows = records.map(function (record) {
+            const row = [
+                ''    // Date Picked Up — blank for staff to fill in
+            ];
+            if (hasBabyBox) row.push(record.babyBox || '');
+            if (hasExtraBox) row.push(record.extraBox || '');
+            row.push(
+                record.firstName || '',
+                record.lastName || '',
+                record.address1 || '',
+                record.address2 || '',
+                record.city || '',
+                formatPhoneNumber_(record.phone),
+                record.distribCode || '',
+                record.submissionId || ''
+            );
+            return row;
+        });
+
+        // Single API call for all data
+        sheet.getRange(currentRow, 1, dataRows.length, numCols).setValues(dataRows);
+
+        // Border around entire data range
+        sheet.getRange(headerRow + 1, 1, records.length, numCols)
+            .setBorder(true, true, true, true, true, true);
+
+        // Alternating row shading — one setBackground() per other-row (not per cell)
+        for (let i = 1; i < records.length; i += 2) {
+            sheet.getRange(headerRow + 1 + i, 1, 1, numCols).setBackground('#f3f3f3');
+        }
+
+        currentRow += records.length;
+    }
+
+    // ── Footer notes ──────────────────────────────────────────────────────────
+    const footerLines = [];
+    if (hasBabyBox) {
+        footerLines.push(
+            "Note: Recipients with \"X\" in the 'Baby Box' column will receive 2 boxes, " +
+            "1 large box and 1 small box. All others receive 1 large box.");
+    }
+    if (hasExtraBox) {
+        footerLines.push(
+            "Note: Recipients with \"X\" in the 'Extra Box' column will receive a special " +
+            "box in addition to the Scheduled Box.");
+    }
+    for (const line of footerLines) {
+        currentRow++;
+        sheet.getRange(currentRow, 1).setValue(line);
+        sheet.getRange(currentRow, 1, 1, numCols).merge();
+        sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setWrap(true);
+    }
+
+    // ── Column widths ─────────────────────────────────────────────────────────
+    // Built dynamically to match actual column order:
+    // [Date Picked Up, (Baby Box?), (Extra Box?), First Name, Last Name,
+    //  Addr1, Addr2, City, Phone, Distrib Code, Submission #]
+    const widths = [100];
+    if (hasBabyBox) widths.push(70);
+    if (hasExtraBox) widths.push(70);
+    widths.push(100, 100, 180, 80, 120, 120, 100, 90);
+    for (let c = 0; c < widths.length; c++) {
+        sheet.setColumnWidth(c + 1, widths[c]);
+    }
+
+    return spreadsheet;
 }
 
 /**
