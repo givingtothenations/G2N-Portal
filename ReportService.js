@@ -297,26 +297,33 @@ function _buildSchedRow_(rec, cols, colIndexMap) {
 }
 
 /**
- * Get all distribution codes from LU_DistribCodes for data validation dropdowns.
- * Returns empty array on error (dropdown just won't populate, which is non-fatal).
+ * Get all ACTIVE Scheduled Distribution Codes for data validation dropdowns.
+ *
+ * Reads from LU_SchedDisbCodes (CONFIG.LOOKUPS.SCHED_DISB_CODES), which is the
+ * authoritative source for scheduled distribution codes. Filters to Active = TRUE
+ * rows only, matching the same logic used by the Distribution Reports tab dropdown.
+ *
+ * Delegates to getActiveSchedDisbCodes() in LookupService.gs which already
+ * handles Active column filtering, date formatting, and caching correctly.
+ *
+ * NOTE: This was previously reading from LU_DistribCodes (wrong sheet — that table
+ * holds generic distribution/pickup codes, not scheduled distribution codes).
  *
  * Only add this function if it doesn't already exist in your ReportService.js.
  *
  * @private
- * @returns {string[]}
+ * @returns {string[]} Sorted array of active SchedDisbCode strings
  */
 function getAllDistribCodes_() {
     try {
-        var wb = getLookupsWorkbook();
-        var sh = wb.getSheetByName('LU_DistribCodes');
-        if (!sh || sh.getLastRow() < 2) return [];
-        var data = sh.getDataRange().getValues();
-        var out = [];
-        for (var i = 1; i < data.length; i++) {
-            var v = (data[i][0] || '').toString().trim();
-            if (v) out.push(v);
-        }
-        return out;
+        // getActiveSchedDisbCodes() is in LookupService.gs — reads LU_SchedDisbCodes,
+        // filters Active = TRUE, returns [{code, startDate, interval, ...}]
+        var activeCodes = getActiveSchedDisbCodes();
+        if (!activeCodes || activeCodes.length === 0) return [];
+        return activeCodes
+            .map(function (c) { return (c.code || '').toString().trim().toUpperCase(); })
+            .filter(function (c) { return c !== ''; })
+            .sort();
     } catch (e) {
         Logger.log('getAllDistribCodes_ error (non-fatal): ' + e.message);
         return [];
@@ -324,123 +331,191 @@ function getAllDistribCodes_() {
 }
 
 /**
- * Generates a Distribution Report spreadsheet filtered by distribution code
- * Sorts by Last Name, First Name; includes Baby Box indicator if applicable
- * Moves report to Distribution folder in Google Drive
- * @param {string} distribCode - Scheduled Distribution Code to filter by
- * @param {string} startDate - Report start date
- * @param {string} endDate - Report end date
- * @param {string} pickupTimes - Pickup time text for report header
- * @returns {Object} { success, reportUrl, downloadUrl, recordCount }
+ * Generate Scheduling Report for ALL Applicants_Master records.
+ *
+ * Report includes every active AM record — no ID range, no date filter,
+ * no archive workbooks. Columns are driven by LU_ReportColumns 'Scheduling'.
+ *
+ * HISTORY FLAG:
+ *   For each unique first+last name, the highest ID = current record.
+ *   All lower IDs for the same name are marked 'History' in the first column.
+ *
+ * DATA VALIDATION:
+ *   Scheduled Distribution Code column gets a dropdown from LU_DistribCodes.
+ *   Service Status column gets a dropdown with standard status values.
+ *
+ * SORT ORDER: Last Name, First Name, ID (ascending).
+ *
+ * COLUMN HEADERS: Resolved via LU_FieldMap Report Headers (getReportHeader_()).
+ *   processSchedulingReport() also uses getReportHeader_() when reading the
+ *   report back, so both functions stay in sync automatically.
+ *
+ * v5.19 — All AM rows included; Learned How column added; no ID range params
+ * v5.20 — Column definitions from LU_ReportColumns 'Scheduling' via
+ *          ReportColumnService. _buildSchedRow_() replaces inline row builder.
+ *          applyReportColumnFormatting() replaces hardcoded colWidths array.
+ *          Falls back to v5.19 hardcoded column set when LU_ReportColumns empty.
+ *
+ * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount }}
  */
-function generateDistributionReport(distribCode, startDate, endDate, pickupTimes) {
-  try {
-    if (!distribCode) {
-      return { success: false, error: 'Distribution Code is required' };
-    }
-    
-    // Force uppercase
-    distribCode = distribCode.toString().toUpperCase();
-    
-    const sheet = getMasterSheet();
-    if (!sheet) {
-      return { success: false, error: 'Master sheet not found' };
-    }
-    
-    const data = sheet.getDataRange().getValues();
-    const headers = trimHeaders(data[0]);
-    
-    const colIndices = {
-      id:              headers.indexOf(resolveAMField_('ID')),
-      firstName:       headers.indexOf(resolveAMField_('First Name')),
-      lastName:        headers.indexOf(resolveAMField_('Last Name')),
-      address1:        headers.indexOf(resolveAMField_('Street Address')),
-      address2:        headers.indexOf(resolveAMField_('Apartment #, Upper, Lower, or Lot #')),
-      city:            headers.indexOf(resolveAMField_('City')),
-      phone:           headers.indexOf(resolveAMField_('Phone Number')),
-      schedDistribCode:headers.indexOf(resolveAMField_('Scheduled Distribution Code')),
-      originalFormId:  headers.indexOf(resolveAMField_('Original Form ID')),
-      babyBox:         headers.indexOf(resolveAMField_('Take Baby Box?')),
-      schedBoxCode3:   headers.indexOf(resolveAMField_('Scheduled Box Code 3')),  // v5.12
-      distribStartDate:headers.indexOf(resolveAMField_('Distribution Start Date')),
-      distribInterval: headers.indexOf(resolveAMField_('Distribution Interval'))
-    };
-    
-    const filteredRecords = [];
-    let hasBabyBox = false;
-    let hasExtraBox = false;  // v5.12: true when any row has Scheduled Box Code 3
-    
-    for (let i = 1; i < data.length; i++) {
-      const row = data[i];
-      const rowDistribCode = row[colIndices.schedDistribCode];
-      
-      if (rowDistribCode && rowDistribCode.toString().toUpperCase() === distribCode) {
-        // v5.12: Extra Box = 'X' when Scheduled Box Code 3 has any non-empty value
-        const boxCode3 = colIndices.schedBoxCode3 !== -1
-          ? (row[colIndices.schedBoxCode3] || '').toString().trim() : '';
-        const extraBox = boxCode3.length > 0 ? 'X' : '';
-        if (extraBox) hasExtraBox = true;
+function generateSchedulingReport() {
+    try {
+        var sheet = getMasterSheet();
+        if (!sheet) return { success: false, error: 'Master sheet not found' };
 
-        const record = {
-          firstName: row[colIndices.firstName] || '',
-          lastName: row[colIndices.lastName] || '',
-          address1: row[colIndices.address1] || '',
-          address2: row[colIndices.address2] || '',
-          city: row[colIndices.city] || '',
-          phone: row[colIndices.phone] || '',
-          distribCode: rowDistribCode,
-          submissionId: row[colIndices.id] || '',
-          babyBox: row[colIndices.babyBox] || '',
-          extraBox: extraBox  // v5.12
-        };
-        
-        if (record.babyBox === 'X' || record.babyBox === 'x') {
-          hasBabyBox = true;
-          record.babyBox = 'X';
-        } else {
-          record.babyBox = '';
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var idCol = headers.indexOf(resolveAMField_('ID'));
+        var fnCol = headers.indexOf(resolveAMField_('First Name'));
+        var lnCol = headers.indexOf(resolveAMField_('Last Name'));
+        if (idCol === -1) return { success: false, error: 'ID column not found in Applicants_Master' };
+
+        // ── Get column definitions from LU_ReportColumns (with v5.19 fallback) ──
+        var cols = getReportColumns('Scheduling');
+        if (cols.length === 0) {
+            Logger.log('generateSchedulingReport: LU_ReportColumns empty — using v5.19 fallback');
+            cols = _getSchedFallbackCols_();
         }
-        
-        filteredRecords.push(record);
-      }
+
+        // ── Build colIndexMap: maps each column key → AM column index ──────────
+        // 'History' skipped (not an AM column).
+        // [Calc] age bracket keys: index their constituent M/F columns instead.
+        // All other keys: look up the resolved raw AM header in the headers array.
+        var colIndexMap = {};
+        cols.forEach(function (col) {
+            var key = col.key;
+            if (key === 'History') return;          // handled as special case in _buildSchedRow_
+
+            var bracketPair = SCHED_AGE_BRACKET_MAP_[key];
+            if (bracketPair) {
+                // Index both constituent columns so _buildSchedRow_ can sum them
+                var mi = headers.indexOf(resolveAMField_(bracketPair.male));
+                var fi = headers.indexOf(resolveAMField_(bracketPair.female));
+                if (mi !== -1) colIndexMap[bracketPair.male] = mi;
+                if (fi !== -1) colIndexMap[bracketPair.female] = fi;
+                return;
+            }
+
+            var idx = headers.indexOf(resolveAMField_(key));
+            if (idx !== -1) colIndexMap[key] = idx;
+        });
+
+        // ── Collect records (all AM rows, skip blank name rows) ────────────────
+        var records = [];
+        for (var i = 1; i < data.length; i++) {
+            var fn = (data[i][fnCol] || '').toString().trim();
+            var ln = (data[i][lnCol] || '').toString().trim();
+            if (!fn && !ln) continue;
+            records.push({
+                rowData: data[i],
+                lastName: ln,
+                firstName: fn,
+                rowId: parseInt(data[i][idCol]) || 0,
+                isHistory: false                          // set below
+            });
+        }
+        if (records.length === 0)
+            return { success: false, error: 'No records found in Applicants_Master' };
+
+        // ── Sort: Last Name, First Name, ID ───────────────────────────────────
+        records.sort(function (a, b) {
+            var lc = a.lastName.localeCompare(b.lastName); if (lc) return lc;
+            var fc = a.firstName.localeCompare(b.firstName); if (fc) return fc;
+            return a.rowId - b.rowId;
+        });
+
+        // ── History flag: per-name, highest ID = current ──────────────────────
+        var maxIdPerName = {};
+        records.forEach(function (rec) {
+            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            maxIdPerName[k] = Math.max(maxIdPerName[k] || 0, rec.rowId);
+        });
+        records.forEach(function (rec) {
+            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            rec.isHistory = rec.rowId < (maxIdPerName[k] || rec.rowId);
+        });
+
+        // ── Create spreadsheet ─────────────────────────────────────────────────
+        var reportName = 'Scheduling_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var spreadsheet = SpreadsheetApp.create(reportName);
+        var reportSheet = spreadsheet.getActiveSheet();
+        if (CONFIG.SCHEDULING_FOLDER_ID && CONFIG.SCHEDULING_FOLDER_ID.length > 0) {
+            try { moveToFolder(spreadsheet.getId(), CONFIG.SCHEDULING_FOLDER_ID); }
+            catch (fe) { Logger.log('ERROR moving to Scheduling folder: ' + fe.message); }
+        }
+
+        // ── Write header row ───────────────────────────────────────────────────
+        // Force plain text (@) so values like '5-9' are not interpreted as dates
+        var allReportHeaders = cols.map(function (c) { return c.label; });
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length)
+            .setFontWeight('bold')
+            .setBackground('#4a86e8')
+            .setFontColor('white');
+
+        // ── Build and write data rows ──────────────────────────────────────────
+        var dataRows = records.map(function (rec) {
+            return _buildSchedRow_(rec, cols, colIndexMap);
+        });
+        if (dataRows.length > 0) {
+            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
+        }
+
+        // ── Apply column widths and wrap from LU_ReportColumns ─────────────────
+        // applyReportColumnFormatting() replaces the v5.19 hardcoded colWidths array
+        applyReportColumnFormatting(reportSheet, cols, 2, dataRows.length + 1);
+
+        // ── Data validation dropdowns ──────────────────────────────────────────
+        // Find column numbers by matching the resolved header labels
+        var schedCodeLabel = getReportHeader_('Scheduled Distribution Code') || 'Scheduled Distribution Code';
+        var svcStatusLabel = getReportHeader_('Service Status') || 'Service Status';
+        var schedCodeColNum = allReportHeaders.indexOf(schedCodeLabel) + 1;   // 1-based
+        var svcStatusColNum = allReportHeaders.indexOf(svcStatusLabel) + 1;
+
+        if (dataRows.length > 0) {
+            // Scheduled Distribution Code dropdown from LU_DistribCodes
+            var distribCodes = getAllDistribCodes_();
+            if (schedCodeColNum > 0 && distribCodes.length > 0) {
+                var schedRule = SpreadsheetApp.newDataValidation()
+                    .requireValueInList(distribCodes, true)
+                    .setAllowInvalid(true)
+                    .build();
+                reportSheet.getRange(2, schedCodeColNum, dataRows.length, 1).setDataValidation(schedRule);
+            }
+
+            // Service Status dropdown
+            var statusValues = ['Picked Up', 'Delivered', 'Cancelled', 'Open', 'Pending'];
+            if (svcStatusColNum > 0) {
+                var statusRule = SpreadsheetApp.newDataValidation()
+                    .requireValueInList(statusValues, true)
+                    .setAllowInvalid(true)
+                    .build();
+                reportSheet.getRange(2, svcStatusColNum, dataRows.length, 1).setDataValidation(statusRule);
+            }
+        }
+
+        // ── Freeze header row and set wrap ─────────────────────────────────────
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
+        reportSheet.setFrozenRows(1);
+
+        logAudit('REPORT', null, 'Generated Scheduling Report — ' + records.length + ' records');
+
+        return {
+            success: true,
+            message: 'Scheduling Report generated with ' + records.length + ' records',
+            reportUrl: spreadsheet.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+            reportId: spreadsheet.getId(),
+            recordCount: records.length
+        };
+
+    } catch (e) {
+        Logger.log('generateSchedulingReport error: ' + e.message);
+        return { success: false, error: 'Report generation failed: ' + e.message };
     }
-    
-    if (filteredRecords.length === 0) {
-      return { success: false, error: 'No records found for Distribution Code: ' + distribCode };
-    }
-    
-    filteredRecords.sort(function(a, b) {
-      const lastNameCompare = a.lastName.localeCompare(b.lastName);
-      if (lastNameCompare !== 0) return lastNameCompare;
-      return a.firstName.localeCompare(b.firstName);
-    });
-    
-    const reportSpreadsheet = createDistributionReportSpreadsheet(
-      distribCode, 
-      filteredRecords, 
-      hasBabyBox,
-      hasExtraBox,
-      startDate, 
-      endDate, 
-      pickupTimes
-    );
-    
-    logAudit('REPORT', null, 'Generated Distribution Report for ' + distribCode + ' with ' + filteredRecords.length + ' records');
-    
-    return {
-      success: true,
-      message: 'Report generated successfully',
-      recordCount: filteredRecords.length,
-      hasBabyBox: hasBabyBox,
-      reportUrl: reportSpreadsheet.getUrl(),
-      reportId: reportSpreadsheet.getId()
-    };
-    
-  } catch (error) {
-    Logger.log('Report generation error: ' + error.message);
-    return { success: false, error: 'Report generation failed: ' + error.message };
-  }
 }
+
 
 /**
  * Formats a phone number as (XXX) XXX-XXXX for 10-digit values.
