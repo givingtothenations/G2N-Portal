@@ -145,10 +145,11 @@
  *         Alternating row background applied as a single loop of setBackground()
  *         per-row (not per-cell). Eliminates 800+ API calls for a 80-record
  *         report; fixes "running forever" / 6-minute GAS timeout.
- *   v5.22 - Re-added generateDistributionReport() which was missing from the file.
- *           Filters AM by Scheduled Distribution Code, builds record objects,
- *           calls createDistributionReportSpreadsheet() (batch write, v5.21).
- * 
+ * v5.22 - Re-added generateDistributionReport() which was missing from the file.
+ *         Filters AM by Scheduled Distribution Code, builds record objects,
+ *         calls createDistributionReportSpreadsheet() (batch write, v5.21).
+ * v5.23 - Added lastRecordId parameter. Non-History rows with rowId > lastRecordId
+ *         are highlighted pink (#FFB6C1) after data rows are written.
  */
 
 'use strict';
@@ -467,8 +468,14 @@ function generateSchedulingReport() {
         var dataRows = records.map(function (rec) {
             return _buildSchedRow_(rec, cols, colIndexMap);
         });
-        if (dataRows.length > 0) {
-            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
+        // ── Highlight new records pink (rowId > lastRecordId threshold) ────────
+        if (newRecordThreshold > 0 && dataRows.length > 0) {
+            for (var pi = 0; pi < records.length; pi++) {
+                if (!records[pi].isHistory && records[pi].rowId > newRecordThreshold) {
+                    reportSheet.getRange(pi + 2, 1, 1, allReportHeaders.length)
+                        .setBackground('#FFB6C1');
+                }
+            }
         }
 
         // ── Apply column widths and wrap from LU_ReportColumns ─────────────────
@@ -993,7 +1000,14 @@ function getLastAmId() {
  *
  * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount }}
  */
-function generateSchedulingReport() {
+
+/**
+ * v5.23 - Added lastRecordId parameter. Non-History rows with rowId > lastRecordId
+ *         are highlighted pink (#FFB6C1) after data rows are written.
+ * @param {number} [lastRecordId=0] - Highest ID from the previous scheduling report.
+ */
+function generateSchedulingReport(lastRecordId) {
+    var newRecordThreshold = parseInt(lastRecordId) || 0;
     try {
         var sheet = getMasterSheet();
         if (!sheet) return { success: false, error: 'Master sheet not found' };

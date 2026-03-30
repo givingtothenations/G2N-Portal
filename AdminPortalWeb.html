@@ -812,6 +812,14 @@
                     LU_FieldMap.
                 </div>
 
+                <div class="form-group" style="max-width:340px; margin-bottom:12px;">
+                    <label for="schedLastId">
+                        Last Record ID from Previous Report
+                        <span style="color:#888; font-size:0.85em;">(optional — new records highlighted pink)</span>
+                    </label>
+                    <input type="number" id="schedLastId" min="0" placeholder="e.g. 1542"
+                           style="width:100%; padding:8px 10px; border:1px solid #dadce0; border-radius:6px; font-size:14px;">
+                </div>
                 <button class="btn-primary btn-block" onclick="generateSchedulingReport()" id="schedGenerateBtn">
                     Generate Scheduling Report
                 </button>
@@ -2364,6 +2372,8 @@
             showMessage('schedMessage', 'Generating scheduling report...', 'info');
             document.getElementById('schedGenerateBtn').disabled = true;
             document.getElementById('schedReportLink').classList.add('hidden');
+
+            var lastIdVal = parseInt(document.getElementById('schedLastId').value.trim()) || 0;
 
             google.script.run
                 .withSuccessHandler(function (result) {
