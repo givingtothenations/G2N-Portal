@@ -2366,7 +2366,7 @@
         * v6.9 - Original version with beginId
         * v7.1 - parseInt with trim since field was type="text"
         * v7.3 - Removed beginId entirely; server no longer requires it.
-        *        Calls generateSchedulingReport() with no arguments.
+        * v7.5 - Passes lastIdVal to server for new-record pink highlighting.
         */
         function generateSchedulingReport() {
             showMessage('schedMessage', 'Generating scheduling report...', 'info');
@@ -2394,7 +2394,7 @@
                     showMessage('schedMessage',
                         'Report generation failed: ' + error.message, 'error');
                 })
-                .generateSchedulingReport();
+                .generateSchedulingReport(lastIdVal);
         }
 
         // ============ PROCESS DISTRIBUTION ============

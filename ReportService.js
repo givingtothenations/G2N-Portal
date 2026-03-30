@@ -468,6 +468,9 @@ function generateSchedulingReport() {
         var dataRows = records.map(function (rec) {
             return _buildSchedRow_(rec, cols, colIndexMap);
         });
+        if (dataRows.length > 0) {
+            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
+        }
         // ── Highlight new records pink (rowId > lastRecordId threshold) ────────
         if (newRecordThreshold > 0 && dataRows.length > 0) {
             for (var pi = 0; pi < records.length; pi++) {
