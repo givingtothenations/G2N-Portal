@@ -144,6 +144,14 @@
          <input type="date">. SCHED_DISB_CODES records sorted alphabetically on load.
          Distribution code dropdowns (Process Distribution, Distribution Reports)
          explicitly sorted alphabetically client-side.
+  v7.7 - Manage Dropdowns: Distribution Codes (LU_DistribCodes) now sorted
+         alphabetically by Code column on load.
+         buildLookupRow(): time columns (header ends in 'Time') now render
+         as plain text inputs with placeholder instead of date pickers —
+         fixes Event Begins/Ends Time displaying as dates.
+         Add Event Information: added Begin Time and End Time text input
+         columns to eventTable; saveEventInfo() passes eventBeginsTime and
+         eventEndsTime to saveEventInfoRecords().
 -->
 
 <!DOCTYPE html>
@@ -811,14 +819,6 @@
 
                 <div class="alert alert-info">
                     <strong>Info:</strong> Generates a Scheduling Report containing
-                    <strong>all records</strong> in Applicants_Master (no archive records).
-                    Rows are marked as History when a more recent record exists for the
-                    same applicant name. Column headers use Report Header values from
-                    LU_FieldMap.
-                </div>
-
-                <div class="alert alert-info">
-                    <strong>Info:</strong> Generates a Scheduling Report containing
                     <strong>all records</strong> in Applicants_Master.
                     New records (IDs since the last report) are highlighted pink/bold with yellow name cells.
                     History rows are identified by applicant name. Column headers use Report Header values from LU_FieldMap.
@@ -1228,7 +1228,9 @@
                                 <th>Distribution Type</th>
                                 <th>Type Of Items</th>
                                 <th>Begins Date</th>
+                                <th>Begin Time</th>
                                 <th>Ends Date</th>
+                                <th>End Time</th>
                                 <th>BoxCode</th>
                                 <th>Number Served</th>
                                 <th>Location</th>
@@ -1986,7 +1988,8 @@
                     DISTRIBUTED_PRODUCTS: 'Distributed Products',
                     EVENT_INFO: 'Event Information',
                     DISTRIB_CODES: 'Distribution Codes',
-                    SCHED_DISB_CODES: 'Scheduled Distribution Codes'                };
+                    SCHED_DISB_CODES: 'Scheduled Distribution Codes'
+                };
                 document.getElementById('luEditorTitle').textContent = nameMap[key] || key;
                 document.getElementById('luEditorContainer').classList.remove('hidden');
                 luCurrentSheetKey = key;
@@ -2777,7 +2780,9 @@
                 '<td><input type="text" id="eventDistType_' + n + '" placeholder="e.g., Food Box"></td>' +
                 '<td><input type="text" id="eventItemType_' + n + '" placeholder="e.g., Cleaning"></td>' +
                 '<td><input type="date" id="eventBegins_' + n + '"></td>' +
+                '<td><input type="text" id="eventBeginTime_' + rowNum + '" placeholder="9:00 AM" style="padding:4px;border:1px solid #ccc;border-radius:3px;width:90px;"></td>' +
                 '<td><input type="date" id="eventEnds_' + n + '"></td>' +
+                '<td><input type="text" id="eventEndTime_' + rowNum + '" placeholder="12:00 PM" style="padding:4px;border:1px solid #ccc;border-radius:3px;width:90px;"></td>' +
                 '<td><select id="eventBoxCode_' + n + '">' + boxOptions + '</select></td>' +
                 '<td><input type="number" id="eventNumServed_' + n + '" min="0" style="width:80px"></td>' +
                 '<td><input type="text" id="eventLocation_' + n + '" placeholder="Location"></td>' +
@@ -2803,7 +2808,11 @@
                 var distType = document.getElementById('eventDistType_' + rowId).value.trim();
                 var itemType = document.getElementById('eventItemType_' + rowId).value.trim();
                 var begins = document.getElementById('eventBegins_' + rowId).value;
+                var beginTime = document.getElementById('eventBeginTime_' + rowId)
+                    ? document.getElementById('eventBeginTime_' + rowId).value.trim() : '';
                 var ends = document.getElementById('eventEnds_' + rowId).value;
+                var endTime = document.getElementById('eventEndTime_' + rowId)
+                    ? document.getElementById('eventEndTime_' + rowId).value.trim() : '';
                 var boxCode = document.getElementById('eventBoxCode_' + rowId).value;
                 var numServed = document.getElementById('eventNumServed_' + rowId).value;
                 var location = document.getElementById('eventLocation_' + rowId).value.trim();
@@ -2822,7 +2831,9 @@
                     distributionType: distType,
                     typeOfItems: itemType,
                     eventBeginsDate: begins,
+                    eventBeginsTime: beginTime,    // v7.7
                     eventEndsDate: ends,
+                    eventEndsTime: endTime,        // v7.7
                     boxCode: boxCode,
                     numberServed: numServed ? parseInt(numServed) : '',
                     location: location,
@@ -3798,7 +3809,9 @@
                             });
                         }
                         renderLookupTable(result.headers, result.records);
-
+                        if (luCurrentSheetKey === 'DISTRIB_CODES') {
+                            records.sort(function (a, b) { return (a['Code'] || '').localeCompare(b['Code'] || ''); });
+                        }
                     } else {
                         showMessage('luMessage', 'Load failed: ' + result.error, 'error');
                     }
@@ -3834,6 +3847,19 @@
             return val === true || val === 'true' || val === 'TRUE' || val === 'Y' || val === 'YES' || val === 1 || val === '1';
         }
 
+        /**
+         * Returns true for column headers that represent a time of day.
+         * Prevents time values stored as Date objects from rendering as full dates.
+         * v7.7 — New helper for buildLookupRow().
+         * @param {string} h - Column header
+         * @returns {boolean}
+         */
+        function isTimeColumn(h) {
+            return /Time$/i.test(h);
+        }
+
+        function isTimeColumn(h) { return /Time$/i.test(h); }
+
         function buildLookupRow(rec, headers) {
             var rowNum = rec.rowNum || 0;
             var tr = '<tr data-row-num="' + rowNum + '" style="border-bottom:1px solid #eee;">';
@@ -3843,6 +3869,10 @@
                     var checked = isBooleanChecked(val) ? 'checked' : '';
                     var boolType = (h === 'Active') ? 'active' : 'yn';
                     tr += '<td style="padding:5px 10px; text-align:center;"><input type="checkbox" data-col="' + escapeHtml(h) + '" data-bool-type="' + boolType + '" ' + checked + ' style="width:16px;height:16px;"></td>';
+                } else if (isTimeColumn(h)) {
+                    var tv = (val instanceof Date) ? '' : (val || '').toString().trim();
+                    tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) +
+                        '" value="' + escapeHtml(tv) + '" placeholder="e.g. 9:00 AM" style="width:100%;min-width:90px;padding:4px 6px;border:1px solid #ddd;border-radius:3px;font-size:13px;"></td>';
                 } else if (luCurrentSheetKey === 'DISTRIBUTED_PRODUCTS' && h === 'ProductName' && luProductNameOptions.length > 0) {
                     // v7.6: ProductName as dropdown from LU_Products
                     var pSel = '<td style="padding:4px 6px;"><select data-col="' + escapeHtml(h) + '" style="width:100%; min-width:160px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;">';
@@ -3866,6 +3896,11 @@
                         }
                     }
                     tr += '<td style="padding:4px 6px;"><input type="date" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(dateVal) + '" style="width:100%; min-width:130px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
+                } else if (isTimeColumn(h)) {
+                    // v7.7: Time columns render as plain text (e.g. "9:00 AM") not a date picker
+                    tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) +
+                        '" value="' + escapeHtml((val || '').toString()) + '" placeholder="e.g. 9:00 AM"' +
+                        ' style="width:100%; min-width:90px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
                 } else {
                     var minW = (h === 'Raw Header' || h === 'Display Label' || h === 'Notes') ? '180px' : '80px';
                     tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(String(val)) + '" style="width:100%; min-width:' + minW + '; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';

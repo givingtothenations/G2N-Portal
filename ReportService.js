@@ -150,6 +150,11 @@
  *         calls createDistributionReportSpreadsheet() (batch write, v5.21).
  * v5.23 - Added lastRecordId parameter. Non-History rows with rowId > lastRecordId
  *         are highlighted pink (#FFB6C1) after data rows are written.
+ * v5.24 - executeArchiveBatch(): after master rewrite, clears ALL AM row
+ *          backgrounds/bold then re-applies magenta to LU_SchedID lastEndId row.
+ *          File-deletion cutoff changed from 3 months to 1 month.
+ *          New deleteInactiveDistributionReports_(): trashes Distribution folder
+ *          files whose SchedDisbCode is no longer active in LU_SchedDisbCodes.
  */
 
 'use strict';
@@ -2204,7 +2209,7 @@ function previewArchive(cutoffDateStr) {
     
     // Phase 5: File deletion is 3 months from today (except Distribution folder)
     const fileCutoffDate = new Date();
-    fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 3);
+    fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 1);  // v5.24: changed from 3 to 1 month
     
     const sheet = getMasterSheet();
     if (!sheet) {
@@ -2311,12 +2316,22 @@ function previewArchive(cutoffDateStr) {
     const reportsFolderId = CONFIG.REPORTS_FOLDER_ID;
     if (reportsFolderId) {
       try {
-        fileCount = countOldFilesInFolder(reportsFolderId, fileCutoffDate);
+        deletedInBatch = deleteOldFilesInFolder(reportsFolderId, fileCutoffDate, log);
+        if (deletedInBatch === 0) {
+          log.push({ status: 'info', message: 'No files older than 1 month found to delete' });
+        }
       } catch (folderError) {
-        Logger.log('Error counting files: ' + folderError.message);
+        log.push({ status: 'error', message: 'Error deleting files: ' + folderError.message });
       }
     }
-    
+    // v5.24: Delete Distribution Reports whose SchedDisbCode is no longer active
+    try {
+      var drDeleted = deleteInactiveDistributionReports_(log);
+      deletedInBatch += drDeleted;
+    } catch (drErr) {
+      log.push({ status: 'error', message: 'Inactive DR deletion error (non-fatal): ' + drErr.message });
+    }
+
     // Count audit log entries
     let auditLogCount = 0;
     try {
@@ -2550,6 +2565,39 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
       
       log.push({ status: 'success', message: 'Rewrote master sheet: ' + keepRows.length + ' rows remaining' });
     }
+
+      // ===== CLEAR AM ROW FORMATTING & RE-APPLY SCHEDID HIGHLIGHT =====
+      if (archiveRows.length > 0) {
+          try {
+              const amTotalCols = masterSheet.getLastColumn();
+              const amDataRows = masterSheet.getLastRow() - 1;
+              if (amDataRows > 0) {
+                  // Clear all background and bold from data rows
+                  masterSheet.getRange(2, 1, amDataRows, amTotalCols)
+                      .setBackground(null)
+                      .setFontWeight(null);
+                  log.push({ status: 'info', message: 'Cleared AM row highlighting' });
+              }
+
+              // Re-highlight the LU_SchedID lastEndId row magenta
+              var schedIdInfo = getLastSchedId();
+              if (schedIdInfo && schedIdInfo.lastEndId) {
+                  var lastEndId = schedIdInfo.lastEndId;
+                  var idData = masterSheet.getRange(2, 1, Math.max(1, masterSheet.getLastRow() - 1), 1).getValues();
+                  for (var hi = 0; hi < idData.length; hi++) {
+                      if (parseInt(idData[hi][0]) === lastEndId) {
+                          masterSheet.getRange(hi + 2, 1, 1, amTotalCols).setBackground('#FF00FF');
+                          log.push({ status: 'success', message: 'Re-highlighted AM row for ID ' + lastEndId + ' (magenta)' });
+                          break;
+                      }
+                  }
+              }
+          } catch (hlErr) {
+              log.push({ status: 'error', message: 'AM re-highlight error (non-fatal): ' + hlErr.message });
+          }
+          SpreadsheetApp.flush();
+      }
+
     
     // ===== DELETE OLD FILES =====
     let deletedInBatch = 0;
@@ -2710,13 +2758,68 @@ function archiveProductRecords(archiveIdDates, archiveWorkbook, log) {
 }
 
 /**
- * Recursively deletes files older than cutoff date in a Drive folder
- * Phase 5: Skips the Distribution folder
- * @param {string} folderId - Google Drive folder ID
- * @param {Date} cutoffDate - Files older than this are trashed
+ * Deletes Distribution Report files in CONFIG.DISTRIBUTION_FOLDER_ID whose
+ * SchedDisbCode is no longer active in LU_SchedDisbCodes.
+ *
+ * Filename pattern: Distribution_<SchedDisbCode>_yyyy-MM-dd
+ * Extracts the code as everything between the first and last underscore-delimited
+ * date segment (yyyy-MM-dd).  Any file whose extracted code is not in the active
+ * codes list is trashed.
+ *
+ * v5.24 — New function.  Called from executeArchiveBatch() after standard file deletion.
+ *
+ * @private
  * @param {Array} log - Log array for messages
- * @returns {number} Count of deleted files
+ * @returns {number} Count of files deleted
  */
+function deleteInactiveDistributionReports_(log) {
+    var count = 0;
+    try {
+        var folderId = CONFIG.DISTRIBUTION_FOLDER_ID;
+        if (!folderId) {
+            log.push({ status: 'info', message: 'DISTRIBUTION_FOLDER_ID not configured — skipping inactive DR deletion' });
+            return 0;
+        }
+
+        // Build active-code set (uppercase)
+        var activeCodes = new Set();
+        try {
+            var active = getActiveSchedDisbCodes();
+            (active || []).forEach(function (c) {
+                if (c.code) activeCodes.add(c.code.toString().toUpperCase().trim());
+            });
+        } catch (e) {
+            log.push({ status: 'error', message: 'Could not load active SchedDisbCodes for DR cleanup: ' + e.message });
+            return 0;
+        }
+
+        var folder = DriveApp.getFolderById(folderId);
+        var files = folder.getFiles();
+        while (files.hasNext()) {
+            var file = files.next();
+            var name = file.getName();
+            // Expected: Distribution_<CODE>_yyyy-MM-dd  (or similar trailing date)
+            // Extract code = portion between first underscore and the trailing _yyyy-MM-dd segment
+            var m = name.match(/^Distribution_(.+)_\d{4}-\d{2}-\d{2}$/i);
+            if (!m) continue; // Not a standard distribution report filename — skip
+
+            var code = m[1].toString().toUpperCase().trim();
+            if (!activeCodes.has(code)) {
+                file.setTrashed(true);
+                count++;
+                log.push({ status: 'success', message: 'Deleted inactive Distribution Report: ' + name + ' (code: ' + code + ')' });
+            }
+        }
+
+        if (count === 0) {
+            log.push({ status: 'info', message: 'No inactive Distribution Reports found to delete' });
+        }
+    } catch (e) {
+        log.push({ status: 'error', message: 'deleteInactiveDistributionReports_ error: ' + e.message });
+    }
+    return count;
+}
+
 function deleteOldFilesInFolder(folderId, cutoffDate, log) {
   let count = 0;
   

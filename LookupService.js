@@ -1476,7 +1476,10 @@ function getLookupRecords_(sheetName, workbook) {
       for (var j = 0; j < headers.length; j++) {
         var val = row[j];
         if (val instanceof Date && !isNaN(val.getTime())) {
-          val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
+            var hdr = headers[j] || '';
+            val = /Time$/i.test(hdr)
+                ? Utilities.formatDate(val, CONFIG.TIMEZONE, 'h:mm a')
+                : Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
         }
         rec[headers[j]] = (val !== null && val !== undefined) ? val : '';
       }

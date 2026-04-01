@@ -93,6 +93,13 @@
  * v6.2 - REPORT_COLUMNS added to CONFIG.LOOKUPS
  * v6.4 - Added SCHED_ID: 'LU_SchedID' to CONFIG.LOOKUPS for scheduling
  *         report ID range tracking (Start/End of New Records).
+/* v6.4 - backupAndClearAuditLog(): unfreeze row 1, clear data with
+           clearContent() (avoids frozen-row error from deleteRows),
+           then refreeze row 1.
+           runScheduledArchive() + executeTestArchive(): run archiveHealthCheck()
+           and attach result to emailSummary.
+           sendArchiveSummaryEmail(): added Archive Health Check HTML section
+           showing workbook, row counts, date ranges, capacity, and warnings.
  */
 
 // ============ CONFIGURATION ============
@@ -127,6 +134,8 @@ const CONFIG = {
   GRANTS_FOLDER_ID: '10m8w9hfjNLwZvdRV-Bs6gf2pQ-Vq1S-G',
   LOGIN_FOLDER_ID: '17CLCUucnGYeYYKF6Pse_n0VcJEEcsEy7',    
   ARCHIVES_BACKUPS_FOLDER_ID: '1IUXgPfsv1Uxwik5UBOKTPYDqy2q7ffK-', 
+  SPECIAL_FOLDER_ID: '1pjQhfBqBg93E6qphMhSbin2C6kl0XTFw',
+
   
   // Hygiene Box Distribution Stats workbook (Phase 4B)
   HYGIENE_STATS_WORKBOOK_ID: '1tsqS6vfUBYSnZeJVzU5OCpBnrfmABLCUgDGLemymOQk',
@@ -826,6 +835,14 @@ function executeTestArchive() {
     }
 
     // Send admin notification email
+    // v6.4: Health check for email
+    try {
+      emailSummary.healthCheck = archiveHealthCheck();
+    } catch (hcErr) {
+      Logger.log('Health check error (non-fatal): ' + hcErr.message);
+    }
+      //
+    // Send admin notification email
     sendArchiveSummaryEmail(emailSummary);
 
     Logger.log('=== TEST ARCHIVE COMPLETE ===');
@@ -900,6 +917,13 @@ function runScheduledArchive() {
     emailSummary.errors.push('Scheduled archive error: ' + error.message);
   }
   
+  // v6.4: Run health check and include in summary email
+  try {
+    emailSummary.healthCheck = archiveHealthCheck();
+  } catch (hcErr) {
+    Logger.log('Health check error (non-fatal): ' + hcErr.message);
+  }
+    //
   // Send summary email to administrators
   try {
     sendArchiveSummaryEmail(emailSummary);
@@ -980,10 +1004,14 @@ function backupAndClearAuditLog() {
 
     // Flush to commit backup writes before clearing source
     SpreadsheetApp.flush();
-    
-    // Clear AuditLog in master (keep header)
+      //
+    // v6.4: Unfreeze, clear data rows (clearContent is frozen-row safe),
+    //        then refreeze row 1.
     if (auditSheet.getLastRow() > 1) {
-      auditSheet.deleteRows(2, auditSheet.getLastRow() - 1);
+      auditSheet.setFrozenRows(0);
+      auditSheet.getRange(2, 1, auditSheet.getLastRow() - 1, auditSheet.getLastColumn())
+                .clearContent();
+      auditSheet.setFrozenRows(1);
     }
     
     logAudit('AUDIT_BACKUP', null, 'Backed up and cleared ' + dataRows.length + ' audit log entries');
@@ -1117,6 +1145,40 @@ function sendArchiveSummaryEmail(summary) {
     html += '<div style="background:#1a73e8;color:white;padding:16px 20px;border-radius:8px 8px 0 0;">';
     html += '<h2 style="margin:0;font-size:18px;">G2N Archive Summary</h2>';
     html += '<p style="margin:4px 0 0;font-size:13px;opacity:0.9;">' + runDate + '</p>';
+    // v6.4: Archive Health Check section
+    if (summary.healthCheck) {
+        var hc = summary.healthCheck;
+        html += '<h3 style="color:#1a73e8;margin:16px 0 10px;font-size:15px;">🏥 Archive Health Check</h3>';
+        if (!hc.success) {
+          html += '<p style="color:#c5221f;">Health check error: ' + (hc.error || 'Unknown error') + '</p>';
+        } else {
+          html += '<table style="width:100%;border-collapse:collapse;margin-bottom:12px;">';
+          html += '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;">Archive Workbook</td>';
+          html += '<td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;text-align:right;font-weight:bold;">' +
+            (hc.archiveWorkbook || 'N/A') + '</td></tr>';
+          html += '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;">AM Archive Rows</td>';
+          html += '<td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;text-align:right;font-weight:bold;">' +
+            (hc.amArchive ? hc.amArchive.rows : 'N/A') + '</td></tr>';
+          if (hc.amArchive && hc.amArchive.rows > 0) {
+            html += '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;">AM Date Range</td>';
+            html += '<td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;text-align:right;">' +
+                hc.amArchive.minDate + ' – ' + hc.amArchive.maxDate + '</td></tr>';
+            }
+          html += '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;">Product Archive Rows</td>';
+          html += '<td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;text-align:right;font-weight:bold;">' +
+            (hc.prodArchive ? hc.prodArchive.rows : 'N/A') + '</td></tr>';
+          if (hc.capacityPct !== undefined) {
+            var capColor = hc.capacityPct >= 85 ? '#c5221f' : (hc.capacityPct >= 70 ? '#f57c00' : '#137333');
+            html += '<tr><td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;">Archive Capacity</td>';
+            html += '<td style="padding:5px 10px;border-bottom:1px solid #f1f3f4;text-align:right;font-weight:bold;color:' + capColor + ';">' +
+                hc.capacityPct + '%</td></tr>';
+            }
+        html += '</table>';
+          if (hc.warnings && hc.warnings.length > 0) {
+            html += '<p style="color:#b45309;font-size:12px;"><strong>Warnings:</strong> ' + hc.warnings.join('; ') + '</p>';
+            }
+        }
+    }
     html += '</div>';
     html += '<div style="border:1px solid #dadce0;border-top:none;padding:20px;border-radius:0 0 8px 8px;">';
 
