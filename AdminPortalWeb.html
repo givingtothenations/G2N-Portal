@@ -133,6 +133,17 @@
   v7.4 - Manage Dropdowns: added Scheduled Distribution Codes (LU_SchedDisbCodes)
          to luSheetSelector. Allows admin to activate/deactivate SchedDisbCodes
          directly in AP without opening G2N_Lookups spreadsheet.
+  v7.6 - Distribution sub-nav reordered: Add Scheduled Distributions, Process
+         Distribution, Scheduling Report, Schedule Individuals, Distribution Reports.
+         Scheduling Report: removed schedLastId input; server now reads startId
+         from LU_SchedID automatically; result shows new-record ID range.
+         Manage Dropdowns: added EVENT_INFO (LU_EventInfo) and DISTRIB_CODES
+         (LU_DistribCodes) to luSheetSelector and handleDropdownSelect nameMap.
+         buildLookupRow(): DISTRIBUTED_PRODUCTS ProductName renders as <select>
+         from LU_Products active names. SCHED_DISB_CODES StartDate renders as
+         <input type="date">. SCHED_DISB_CODES records sorted alphabetically on load.
+         Distribution code dropdowns (Process Distribution, Distribution Reports)
+         explicitly sorted alphabetically client-side.
 -->
 
 <!DOCTYPE html>
@@ -741,10 +752,10 @@
             <!-- Distribution Sub-Nav -->
             <div id="subNavDistribution" class="sub-nav-tabs">
                 <button class="sub-nav-tab active" onclick="showSubTab('addSched',this)">Add Scheduled Distributions</button>
+                <button class="sub-nav-tab" onclick="showSubTab('process',this)">Process Distribution</button>
                 <button class="sub-nav-tab" onclick="showSubTab('scheduling',this)">Scheduling Report</button>
                 <button class="sub-nav-tab" onclick="showSubTab('schedIndiv',this)">Schedule Individuals</button>
                 <button class="sub-nav-tab" onclick="showSubTab('distribution',this)">Distribution Reports</button>
-                <button class="sub-nav-tab" onclick="showSubTab('process',this)">Process Distribution</button>
             </div>
 
             <!-- Reports Sub-Nav -->
@@ -765,12 +776,6 @@
             <!-- Add Scheduled Distributions Tab -->
             <div id="addSchedTab" class="section">
                 <h3>Add Scheduled Distributions</h3>
-
-                <div class="alert alert-info">
-                    Add one or more scheduled distribution codes. Box codes are from LU_BoxCodes.
-                    Funding Description auto-populates from the selected Funding Source.
-                    All new records are set to Active by default.
-                </div>
 
                 <div class="sched-grid">
                     <table id="schedTable">
@@ -812,17 +817,18 @@
                     LU_FieldMap.
                 </div>
 
-                <div class="form-group" style="max-width:340px; margin-bottom:12px;">
-                    <label for="schedLastId">
-                        Last Record ID from Previous Report
-                        <span style="color:#888; font-size:0.85em;">(optional — new records highlighted pink)</span>
-                    </label>
-                    <input type="number" id="schedLastId" min="0" placeholder="e.g. 1542"
-                           style="width:100%; padding:8px 10px; border:1px solid #dadce0; border-radius:6px; font-size:14px;">
+                <div class="alert alert-info">
+                    <strong>Info:</strong> Generates a Scheduling Report containing
+                    <strong>all records</strong> in Applicants_Master.
+                    New records (IDs since the last report) are highlighted pink/bold with yellow name cells.
+                    History rows are identified by applicant name. Column headers use Report Header values from LU_FieldMap.
                 </div>
+
                 <button class="btn-primary btn-block" onclick="generateSchedulingReport()" id="schedGenerateBtn">
                     Generate Scheduling Report
                 </button>
+
+                <div id="schedIdRange" class="alert alert-info hidden" style="margin-top:8px;"></div>
 
                 <div id="schedMessage" class="alert hidden"></div>
 
@@ -1720,7 +1726,9 @@
                     <optgroup label="Lookup Tables (G2N_Lookups)">
                         <option value="ADDRESS_TYPE">Address Type (LU_AddressType)</option>
                         <option value="BOX_CODES">Box Codes (LU_BoxCodes)</option>
+                        <option value="DISTRIB_CODES">Distribution Codes (LU_DistribCodes)</option>
                         <option value="ETHNICITY">Ethnicity (LU_Ethnicity)</option>
+                        <option value="EVENT_INFO">Event Information (LU_EventInfo)</option>
                         <option value="FIELD_MAP">Field Map (LU_FieldMap)</option>
                         <option value="FUNDING_SOURCES">Funding Sources (LU_FundingSources)</option>
                         <option value="INCOME_LEVELS">Income Levels (LU_IncomeLevels)</option>
@@ -1785,6 +1793,8 @@
         var activeSchedCodesData = []; // Phase 4: cached active SchedDisbCode details
         var editableReportRows = []; // Phase 4: editable report data
         var editableReportHeaders = []; // Phase 4: editable report headers
+        var luProductNameOptions = []; // v7.6: product name list for DISTRIBUTED_PRODUCTS dropdown
+        var luCurrentSheetKey = '';    // v7.6: tracks currently loaded LU sheet key
 
         // ============ EDIT APPLICANT STATE (v6.8) ============
         var ae_currentRecord = null;
@@ -1973,11 +1983,25 @@
                     TITLE_REFERRED: 'Title/Position Referred', MILITARY: 'Military',
                     RACE: 'Race', ETHNICITY: 'Ethnicity', PHONE_TYPE: 'Phone Type',
                     ADDRESS_TYPE: 'Address Type', STATES: 'States',
-                    DISTRIBUTED_PRODUCTS: 'Distributed Products'
-                };
+                    DISTRIBUTED_PRODUCTS: 'Distributed Products',
+                    EVENT_INFO: 'Event Information',
+                    DISTRIB_CODES: 'Distribution Codes',
+                    SCHED_DISB_CODES: 'Scheduled Distribution Codes'                };
                 document.getElementById('luEditorTitle').textContent = nameMap[key] || key;
                 document.getElementById('luEditorContainer').classList.remove('hidden');
-                loadLookupEditor(key);
+                luCurrentSheetKey = key;
+                // v7.6: Pre-load product names for DISTRIBUTED_PRODUCTS ProductName dropdown
+                if (key === 'DISTRIBUTED_PRODUCTS' && luProductNameOptions.length === 0) {
+                    google.script.run
+                        .withSuccessHandler(function (names) {
+                            luProductNameOptions = names || [];
+                            loadLookupEditor(key);
+                        })
+                        .withFailureHandler(function () { loadLookupEditor(key); })
+                        .getLookupValues('PRODUCTS', 'ProductName');
+                } else {
+                    loadLookupEditor(key);
+                }
             }
         }
 
@@ -2362,39 +2386,44 @@
         }
 
         /**
-        * Generates the Scheduling Report for all AM records.
-        * v6.9 - Original version with beginId
-        * v7.1 - parseInt with trim since field was type="text"
-        * v7.3 - Removed beginId entirely; server no longer requires it.
-        * v7.5 - Passes lastIdVal to server for new-record pink highlighting.
-        */
+         * Generates a Scheduling Report. ID range (startId/endId) is determined
+         * server-side from LU_SchedID. No user input needed.
+         * v7.3 - Removed beginId entirely.
+         * v7.5 - Added lastIdVal for pink highlighting (removed in v7.6).
+         * v7.6 - Removed schedLastId input; server determines IDs from LU_SchedID.
+         *        startId/endId shown in success message.
+         */
         function generateSchedulingReport() {
             showMessage('schedMessage', 'Generating scheduling report...', 'info');
             document.getElementById('schedGenerateBtn').disabled = true;
             document.getElementById('schedReportLink').classList.add('hidden');
-
-            var lastIdVal = parseInt(document.getElementById('schedLastId').value.trim()) || 0;
+            document.getElementById('schedIdRange').classList.add('hidden');
 
             google.script.run
                 .withSuccessHandler(function (result) {
                     document.getElementById('schedGenerateBtn').disabled = false;
-
                     if (result.success) {
                         showMessage('schedMessage',
-                            'Report generated with ' + result.recordCount + ' records!',
-                            'success');
+                            'Report generated with ' + result.recordCount + ' records!', 'success');
+                        // Show ID range info
+                        if (result.startId || result.endId) {
+                            var rangeEl = document.getElementById('schedIdRange');
+                            rangeEl.textContent = 'New records: ID ' + (result.startId || 1) +
+                                ' to ' + (result.endId || '?') +
+                                ' (highlighted pink/bold in report)';
+                            rangeEl.classList.remove('hidden');
+                        }
                         document.getElementById('schedReportUrl').href = result.reportUrl;
                         document.getElementById('schedReportLink').classList.remove('hidden');
                     } else {
-                        showMessage('schedMessage', result.error, 'error');
+                        showMessage('schedMessage', 'Error: ' + (result.error || 'Unknown error'), 'error');
                     }
                 })
                 .withFailureHandler(function (error) {
                     document.getElementById('schedGenerateBtn').disabled = false;
-                    showMessage('schedMessage',
-                        'Report generation failed: ' + error.message, 'error');
+                    showMessage('schedMessage', 'Error: ' + error.message, 'error');
                 })
-                .generateSchedulingReport(lastIdVal);
+                .generateSchedulingReport();
         }
 
         // ============ PROCESS DISTRIBUTION ============
@@ -2628,13 +2657,13 @@
                 .saveDistributionReportEdits(foundReportData.reportId, editableReportRows, distribCode);
         }
 
-        // ============ PHASE 4: ACTIVE SCHED DISB CODES DROPDOWN ============
 
         function loadActiveSchedDisbCodes() {
             google.script.run
                 .withSuccessHandler(function (codes) {
                     activeSchedCodesLoaded = true;
-                    activeSchedCodesData = codes || [];
+                    codes = (codes || []).sort(function (a, b) { return (a.code || '').localeCompare(b.code || ''); });
+                    activeSchedCodesData = codes;
                     var selectors = ['distribCode', 'processDistribCode'];
                     selectors.forEach(function (selId) {
                         var select = document.getElementById(selId);
@@ -3730,11 +3759,11 @@
 
         // ============ MANAGE SYSTEM — Generic Lookup Editor ============
 
-        var luCurrentSheetKey = '';
         var luCurrentHeaders = [];
 
         function loadLookupEditor(sheetKey) {
             var key = sheetKey || luCurrentSheetKey;
+            luCurrentSheetKey = key || luCurrentSheetKey;
             if (!key) { document.getElementById('luEditorContainer').classList.add('hidden'); return; }
 
             luCurrentSheetKey = key;
@@ -3760,7 +3789,16 @@
                     loading.classList.add('hidden');
                     document.getElementById('saveLuBtn').disabled = false;
                     if (result.success) {
+                        // v7.6: Sort SCHED_DISB_CODES records alphabetically by first column
+                        if (luCurrentSheetKey === 'SCHED_DISB_CODES' && result.records) {
+                            result.records.sort(function (a, b) {
+                                var av = (a['SchedDisbCode'] || a[result.headers[0]] || '').toString();
+                                var bv = (b['SchedDisbCode'] || b[result.headers[0]] || '').toString();
+                                return av.localeCompare(bv);
+                            });
+                        }
                         renderLookupTable(result.headers, result.records);
+
                     } else {
                         showMessage('luMessage', 'Load failed: ' + result.error, 'error');
                     }
@@ -3805,6 +3843,29 @@
                     var checked = isBooleanChecked(val) ? 'checked' : '';
                     var boolType = (h === 'Active') ? 'active' : 'yn';
                     tr += '<td style="padding:5px 10px; text-align:center;"><input type="checkbox" data-col="' + escapeHtml(h) + '" data-bool-type="' + boolType + '" ' + checked + ' style="width:16px;height:16px;"></td>';
+                } else if (luCurrentSheetKey === 'DISTRIBUTED_PRODUCTS' && h === 'ProductName' && luProductNameOptions.length > 0) {
+                    // v7.6: ProductName as dropdown from LU_Products
+                    var pSel = '<td style="padding:4px 6px;"><select data-col="' + escapeHtml(h) + '" style="width:100%; min-width:160px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;">';
+                    pSel += '<option value="">-- Select Product --</option>';
+                    luProductNameOptions.forEach(function (pn) {
+                        var sel = (String(val) === String(pn)) ? ' selected' : '';
+                        pSel += '<option value="' + escapeHtml(String(pn)) + '"' + sel + '>' + escapeHtml(String(pn)) + '</option>';
+                    });
+                    pSel += '</select></td>';
+                    tr += pSel;
+                } else if (luCurrentSheetKey === 'SCHED_DISB_CODES' && h === 'StartDate') {
+                    // v7.6: StartDate as date picker
+                    // Convert M/D/YYYY → YYYY-MM-DD for input[type=date]
+                    var dateVal = '';
+                    if (val) {
+                        var dp = val.toString().match(/(\d+)\/(\d+)\/(\d+)/);
+                        if (dp) {
+                            dateVal = dp[3] + '-' + dp[1].padStart(2, '0') + '-' + dp[2].padStart(2, '0');
+                        } else {
+                            dateVal = val.toString();
+                        }
+                    }
+                    tr += '<td style="padding:4px 6px;"><input type="date" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(dateVal) + '" style="width:100%; min-width:130px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
                 } else {
                     var minW = (h === 'Raw Header' || h === 'Display Label' || h === 'Notes') ? '180px' : '80px';
                     tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(String(val)) + '" style="width:100%; min-width:' + minW + '; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';

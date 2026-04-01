@@ -1,4 +1,4 @@
-/**
+﻿/**
  * LookupService.gs
  * Manages all reference/lookup data from G2N_Lookups workbook
  * Provides dropdown values for portals, event info, distributed products,
@@ -58,6 +58,14 @@
  *         Added appendLastScheduledId(lastId, reportDate): appends a new row to
  *         LU_LastScheduled with ApplicantId and ReportDate after a Scheduling
  *         Report is successfully generated.
+ * v5.2 - getEventInfoForDate(): added optional timeStr parameter to check
+ *         Event Begins Time / Event Ends Time columns in LU_EventInfo when
+ *         date matches. Added parseTimeToMinutes_() and
+ *         getFundingSourceDescription_() private helpers.
+ *         saveEventInfoRecords(): added eventBeginsTime / eventEndsTime
+ *         to colMap and newRow builder.
+ *         Added getLastSchedId(): reads LU_SchedID last row EndId.
+ *         Added appendSchedId(): appends StartId/EndId/ReportDate to LU_SchedID.
  */
 
 // ============ LOOKUP CACHE ============
@@ -114,76 +122,226 @@ function getLookupValues(lookupKey, valueColumn) {
 }
 
 /**
- * Checks if current date falls within an active event period
- * Delegates to getEventInfoForDate() with today's date.
- * v4.3 - Refactored: was 40 lines of duplicate logic, now a one-liner.
- * @returns {Object} { isActive: boolean, boxCode: string, fundingSource: string }
+ * Checks if a specific date (and optionally time) falls within an active event
+ * period in LU_EventInfo.
+ * v4.2 - New for server-side event detection by date.
+ * v5.2 - Added optional timeStr parameter for time range check.
+ *         If Event Begins Time / Event Ends Time columns exist and timeStr is
+ *         provided, verifies the time falls within the event window.
+ *         Also looks up fundingSourceDescription from LU_FundingSources.
+ * @param {string} dateStr  - Date to check (YYYY-MM-DD or M/D/YYYY format)
+ * @param {string} [timeStr] - Optional time string (HH:MM or H:MM, 24-hr or 12-hr)
+ * @returns {Object} { isActive, boxCode, fundingSource, fundingSourceDescription }
  */
-function getEventInfo() {
-  var today = new Date();
-  var todayStr = today.getFullYear() + '-' +
-    String(today.getMonth() + 1).padStart(2, '0') + '-' +
-    String(today.getDate()).padStart(2, '0');
-  return getEventInfoForDate(todayStr);
+function getEventInfoForDate(dateStr, timeStr) {
+    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getEventInfoForDate(dateStr, timeStr);
+    try {
+        if (!dateStr) return { isActive: false };
+
+        // Parse the date string
+        var checkDate;
+        if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+            var parts = dateStr.split('-');
+            checkDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        } else {
+            checkDate = new Date(dateStr);
+        }
+        if (isNaN(checkDate.getTime())) return { isActive: false };
+        checkDate.setHours(0, 0, 0, 0);
+
+        // Parse the optional time string to minutes since midnight
+        var checkMinutes = -1;
+        if (timeStr && typeof timeStr === 'string') {
+            var tMatch = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+            if (tMatch) {
+                var tHr = parseInt(tMatch[1]);
+                var tMin = parseInt(tMatch[2]);
+                var tAmPm = (tMatch[3] || '').toUpperCase();
+                if (tAmPm === 'PM' && tHr < 12) tHr += 12;
+                if (tAmPm === 'AM' && tHr === 12) tHr = 0;
+                checkMinutes = tHr * 60 + tMin;
+            }
+        }
+
+        var lookups = getLookupsWorkbook();
+        var sheet = lookups.getSheetByName('LU_EventInfo');
+        if (!sheet) return { isActive: false };
+
+        var data = sheet.getDataRange().getValues();
+        if (data.length < 2) return { isActive: false };
+
+        var headers = trimHeaders(data[0]);
+        var beginsCol = headers.indexOf('Event Begins Date');
+        var endsCol = headers.indexOf('Event Ends Date');
+        var beginsTimeCol = headers.indexOf('Event Begins Time');
+        var endsTimeCol = headers.indexOf('Event Ends Time');
+        var boxCodeCol = headers.indexOf('BoxCode');
+        var fundingCol = headers.indexOf('Funding Source');
+
+        if (beginsCol === -1 || endsCol === -1) return { isActive: false };
+
+        for (var i = 1; i < data.length; i++) {
+            var begins = new Date(data[i][beginsCol]);
+            var ends = new Date(data[i][endsCol]);
+            begins.setHours(0, 0, 0, 0);
+            ends.setHours(23, 59, 59, 999);
+
+            if (checkDate < begins || checkDate > ends) continue;
+
+            // Date matches — now check time range if time columns exist and timeStr provided
+            if (checkMinutes >= 0 && beginsTimeCol !== -1 && endsTimeCol !== -1) {
+                var beginTimeStr = (data[i][beginsTimeCol] || '').toString().trim();
+                var endTimeStr = (data[i][endsTimeCol] || '').toString().trim();
+
+                if (beginTimeStr && endTimeStr) {
+                    var beginMin = parseTimeToMinutes_(beginTimeStr);
+                    var endMin = parseTimeToMinutes_(endTimeStr);
+
+                    if (beginMin >= 0 && endMin >= 0) {
+                        if (checkMinutes < beginMin || checkMinutes > endMin) continue; // time outside range
+                    }
+                }
+            }
+
+            // Date (and time if provided) matches — build result
+            var fundingSource = fundingCol !== -1 ? (data[i][fundingCol] || '').toString() : '';
+            var fundingDescription = '';
+
+            if (fundingSource) {
+                fundingDescription = getFundingSourceDescription_(fundingSource);
+            }
+
+            return {
+                isActive: true,
+                boxCode: boxCodeCol !== -1 ? (data[i][boxCodeCol] || '').toString() : '',
+                fundingSource: fundingSource,
+                fundingSourceDescription: fundingDescription
+            };
+        }
+
+        return { isActive: false };
+    } catch (e) {
+        Logger.log('getEventInfoForDate error: ' + e.message);
+        return { isActive: false };
+    }
 }
 
 /**
- * Checks if a specific date falls within an active event period in LU_EventInfo.
- * Used by submitIntakeForm() to auto-detect event mode from signature date.
- * v4.2 - New function for server-side event detection by date
- * @param {string} dateStr - Date to check (YYYY-MM-DD or M/D/YYYY format)
- * @returns {Object} { isActive: boolean, boxCode: string, fundingSource: string }
+ * Parses a time string ("8:00 AM", "14:30", "2:30 PM") to minutes since midnight.
+ * @private
+ * @param {string} timeStr
+ * @returns {number} Minutes since midnight, or -1 if unparseable
  */
-function getEventInfoForDate(dateStr) {
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getEventInfoForDate(dateStr);
-  try {
-    if (!dateStr) return { isActive: false };
-    
-    // Parse the date string
-    var checkDate;
-    if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      var parts = dateStr.split('-');
-      checkDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-    } else {
-      checkDate = new Date(dateStr);
+function parseTimeToMinutes_(timeStr) {
+    if (!timeStr) return -1;
+    var m = timeStr.toString().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+    if (!m) return -1;
+    var hr = parseInt(m[1]);
+    var min = parseInt(m[2]);
+    var ap = (m[3] || '').toUpperCase();
+    if (ap === 'PM' && hr < 12) hr += 12;
+    if (ap === 'AM' && hr === 12) hr = 0;
+    return hr * 60 + min;
+}
+
+/**
+ * Returns the Description for a Funding Source Code from LU_FundingSources.
+ * @private
+ * @param {string} code - Funding source code
+ * @returns {string} Description, or '' if not found
+ */
+function getFundingSourceDescription_(code) {
+    try {
+        var lookups = getLookupsWorkbook();
+        var sheet = lookups.getSheetByName(CONFIG.LOOKUPS.FUNDING_SOURCES);
+        if (!sheet) return '';
+        var data = sheet.getDataRange().getValues();
+        if (data.length < 2) return '';
+        var headers = trimHeaders(data[0]);
+        var codeCol = headers.indexOf('Code');
+        var descCol = headers.indexOf('Description');
+        if (codeCol === -1 || descCol === -1) return '';
+        var searchCode = code.toString().trim().toUpperCase();
+        for (var i = 1; i < data.length; i++) {
+            var rowCode = (data[i][codeCol] || '').toString().trim().toUpperCase();
+            if (rowCode === searchCode) return (data[i][descCol] || '').toString().trim();
+        }
+        return '';
+    } catch (e) {
+        Logger.log('getFundingSourceDescription_ error: ' + e.message);
+        return '';
     }
-    if (isNaN(checkDate.getTime())) return { isActive: false };
-    checkDate.setHours(0, 0, 0, 0);
-    
-    const lookups = getLookupsWorkbook();
-    const sheet = lookups.getSheetByName('LU_EventInfo');
-    if (!sheet) return { isActive: false };
-    
-    const data = sheet.getDataRange().getValues();
-    if (data.length < 2) return { isActive: false };
-    
-    const headers = data[0];
-    const beginsCol = headers.indexOf('Event Begins Date');
-    const endsCol = headers.indexOf('Event Ends Date');
-    const boxCodeCol = headers.indexOf('BoxCode');
-    const fundingCol = headers.indexOf('Funding Source');
-    
-    if (beginsCol === -1 || endsCol === -1) return { isActive: false };
-    
-    for (let i = 1; i < data.length; i++) {
-      const begins = new Date(data[i][beginsCol]);
-      const ends = new Date(data[i][endsCol]);
-      begins.setHours(0, 0, 0, 0);
-      ends.setHours(23, 59, 59, 999);
-      
-      if (checkDate >= begins && checkDate <= ends) {
-        return {
-          isActive: true,
-          boxCode: boxCodeCol !== -1 ? (data[i][boxCodeCol] || '').toString() : '',
-          fundingSource: fundingCol !== -1 ? (data[i][fundingCol] || '').toString() : ''
-        };
-      }
+}
+
+/**
+ * Reads the last row of LU_SchedID and returns the EndId stored there.
+ * Used by generateSchedulingReport() to determine Start of New Records (lastEndId + 1).
+ * Returns 0 if the sheet is empty or not found (first run).
+ * v5.2 - New function; replaces LU_LastScheduled approach.
+ * @returns {{ lastEndId: number }}
+ */
+function getLastSchedId() {
+    try {
+        var key = CONFIG.LOOKUPS.SCHED_ID;
+        if (!key) {
+            Logger.log('getLastSchedId: SCHED_ID not in CONFIG.LOOKUPS');
+            return { lastEndId: 0 };
+        }
+        var lookups = getLookupsWorkbook();
+        var sheet = lookups.getSheetByName(key);
+        if (!sheet || sheet.getLastRow() < 2) return { lastEndId: 0 };
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var endIdCol = headers.indexOf('EndId');
+        if (endIdCol === -1) return { lastEndId: 0 };
+
+        // Return the EndId from the last data row
+        var lastRow = data[data.length - 1];
+        var lastEndId = parseInt(lastRow[endIdCol]) || 0;
+        return { lastEndId: lastEndId };
+    } catch (e) {
+        Logger.log('getLastSchedId error: ' + e.message);
+        return { lastEndId: 0 };
     }
-    return { isActive: false };
-  } catch (e) {
-    Logger.log('getEventInfoForDate error: ' + e.message);
-    return { isActive: false };
-  }
+}
+
+/**
+ * Appends a new row to LU_SchedID recording the ID range and date of a
+ * Scheduling Report run.
+ * v5.2 - New function.
+ * @param {number} startId    - First ID of the new records window (lastEndId + 1)
+ * @param {number} endId      - Last row ID in AM at time of report generation
+ * @param {string} reportDate - Formatted date string of the report run
+ * @returns {boolean} true on success
+ */
+function appendSchedId(startId, endId, reportDate) {
+    try {
+        var key = CONFIG.LOOKUPS.SCHED_ID;
+        if (!key) { Logger.log('appendSchedId: SCHED_ID not in CONFIG.LOOKUPS'); return false; }
+        var lookups = getLookupsWorkbook();
+        var sheet = lookups.getSheetByName(key);
+        if (!sheet) { Logger.log('appendSchedId: LU_SchedID sheet not found'); return false; }
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var startIdCol = headers.indexOf('StartId');
+        var endIdCol = headers.indexOf('EndId');
+        var reportDateCol = headers.indexOf('ReportDate');
+
+        if (endIdCol === -1) { Logger.log('appendSchedId: EndId column not found in LU_SchedID'); return false; }
+
+        var newRow = new Array(headers.length).fill('');
+        if (startIdCol !== -1) newRow[startIdCol] = startId;
+        if (endIdCol !== -1) newRow[endIdCol] = endId;
+        if (reportDateCol !== -1) newRow[reportDateCol] = reportDate;
+
+        sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRow.length).setValues([newRow]);
+        return true;
+    } catch (e) {
+        Logger.log('appendSchedId error: ' + e.message);
+        return false;
+    }
 }
 
 /**
@@ -1014,16 +1172,18 @@ function saveEventInfoRecords(records) {
     
     // Map column indices
     const colMap = {
-      eventYear: headers.indexOf('Event Year'),
+      eventYear:        headers.indexOf('Event Year'),
       distributionType: headers.indexOf('Distribution Type'),
-      typeOfItems: headers.indexOf('Type Of Items Distributed'),
-      eventBeginsDate: headers.indexOf('Event Begins Date'),
-      eventEndsDate: headers.indexOf('Event Ends Date'),
-      boxCode: headers.indexOf('BoxCode'),
-      numberServed: headers.indexOf('Number Served'),
-      location: headers.indexOf('Location'),
-      fundingSource: headers.indexOf('Funding Source'),
-      notes: headers.indexOf('Notes')
+      typeOfItems:      headers.indexOf('Type Of Items Distributed'),
+      eventBeginsDate:  headers.indexOf('Event Begins Date'),
+      eventBeginsTime:  headers.indexOf('Event Begins Time'),  // v5.2
+      eventEndsDate:    headers.indexOf('Event Ends Date'),
+      eventEndsTime:    headers.indexOf('Event Ends Time'),    // v5.2
+      boxCode:          headers.indexOf('BoxCode'),
+      numberServed:     headers.indexOf('Number Served'),
+      location:         headers.indexOf('Location'),
+      fundingSource:    headers.indexOf('Funding Source'),
+      notes:            headers.indexOf('Notes')
     };
     
     var savedCount = 0;

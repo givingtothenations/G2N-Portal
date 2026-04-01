@@ -1,4 +1,4 @@
-/**
+﻿/**
  * IntakeService.gs
  * Handles Applicant Intake form submissions from ApplicantIntake.html
  * Creates new records in Applicants_Master with auto-generated IDs,
@@ -33,6 +33,11 @@
  * v4.2 - submitIntakeForm(): Entered By uses formData.enteredBy when present
  *         (staff code passed from SV via URL param → AI → formData). Falls back
  *         to 'Applicant' for public submissions.
+ * v4.3 - submitIntakeForm(): passes current time (HH:MM) to getEventInfoForDate()
+ *         so event detection respects Event Begins Time / Event Ends Time columns
+ *         in LU_EventInfo in addition to date range.
+ *         Event mode Funding Source now uses fundingSourceDescription (the
+ *         Description from LU_FundingSources) instead of the raw funding code.
  */
 
 /**
@@ -109,19 +114,22 @@ function submitIntakeForm(formData, eventInfo) {
     const next90Formatted = Utilities.formatDate(next90, CONFIG.TIMEZONE, 'M/d/yyyy');
     
     // v3.6: Auto-detect event from signature date if not already in event mode
+    // v4.3: Also pass current time for time-window check against LU_EventInfo
     if (!eventInfo || !eventInfo.isActive) {
       var sigDateStr = formData.signatureDate || '';
       if (sigDateStr) {
-        var detectedEvent = getEventInfoForDate(sigDateStr);
+        // Build current time string (HH:MM) in configured timezone
+        var nowForTime = new Date();
+        var nowTimeStr = Utilities.formatDate(nowForTime, CONFIG.TIMEZONE, 'HH:mm');
+        var detectedEvent = getEventInfoForDate(sigDateStr, nowTimeStr);
         if (detectedEvent && detectedEvent.isActive) {
           eventInfo = detectedEvent;
-          // Also set the outdoor event column to Yes
           setColumnValue(newRow, headers,
             'Are you completing this form at a Giving to the Nations OUTDOOR event?', 'Yes');
         }
       }
     }
-    
+
     if (eventInfo && eventInfo.isActive) {
       // Event mode - set all event-related fields
       setColumnValue(newRow, headers, 'Service Status', 'Picked Up');
@@ -129,7 +137,10 @@ function submitIntakeForm(formData, eventInfo) {
       setColumnValue(newRow, headers, 'Box Code', eventInfo.boxCode || '');
       setColumnValue(newRow, headers, 'Scheduled Box Code 1', eventInfo.boxCode || '');
       setColumnValue(newRow, headers, 'Received Product Code 1', eventInfo.boxCode || '');
-      setColumnValue(newRow, headers, 'Funding Source', eventInfo.fundingSource || '');
+      // v4.3: Use Description from LU_FundingSources, not the raw Code
+      var fundingSrcValue = eventInfo.fundingSourceDescription ||
+                            eventInfo.fundingSource || '';
+      setColumnValue(newRow, headers, 'Funding Source', fundingSrcValue);
       setColumnValue(newRow, headers, 'Last Date Served', todayFormatted);
       setColumnValue(newRow, headers, 'Final Service Contact Date', todayFormatted);
       setColumnValue(newRow, headers, 'Next Service Availability Date', next90Formatted);

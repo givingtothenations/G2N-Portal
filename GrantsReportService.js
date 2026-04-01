@@ -49,6 +49,11 @@
  *         NEW: _getColsWithFallback_()— returns LU cols or v3.9 hardcoded fallback
  *         All 5 report functions: data collection unchanged; header/row output LU-driven
  *         generateGrantSummaryReport() unchanged (narrative Doc — no column structure)
+ * vX.Y - _buildGrantSummaryDoc_(): Income threshold now uses the upper limit
+ *         of the selected income level (parseIncomeHighEnd) instead of the
+ *         lower limit. isBelow check updated: a range is "below" when its
+ *         high end <= threshold. Narrative and doc text updated accordingly.
+ *         Added parseIncomeHighEnd() helper.
  */
 
 'use strict';
@@ -915,6 +920,23 @@ function parseIncomeLowEnd(incomeLabel) {
     return m ? parseInt(m[0]) : 0;
 }
 
+/**
+ * Parses the upper (high) end dollar amount from an income label string.
+ * Example: '$30,000 - $39,999' → 39999
+ * For open-ended labels like '$100,000+' returns the single parsed value.
+ * @param {string} incomeLabel
+ * @returns {number} Upper bound value, or -1 if unparseable
+ */
+function parseIncomeHighEnd(incomeLabel) {
+    var cleaned = incomeLabel.replace(/[$,]/g, '');
+    // Match two numbers separated by a dash/space: "30000 - 39999"
+    var m = cleaned.match(/(\d+)\s*[-–]\s*(\d+)/);
+    if (m) return parseInt(m[2]);
+    // Single number (e.g. "100000+")
+    var s = cleaned.match(/(\d+)/g);
+    if (s && s.length > 0) return parseInt(s[s.length - 1]);
+    return -1;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // v4.0 — GENERIC GRANT REPORT WRITER
@@ -1877,137 +1899,136 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
     householdCount, totalCount, totalChildren, totalAdults, totalSeniors,
     totalProductsDistributed, incomeCounts, totalIncomeRecords) {
 
-    // Determine income threshold from selected income level
+    // Determine income threshold from selected income level (upper limit per requirements)
     var selectedIncomeLevel = incomeLevel || '$30,000 - $39,999';
-    var threshold = parseIncomeLowEnd(selectedIncomeLevel);
-    if (threshold < 0) threshold = 30000;
+    var threshold = parseIncomeHighEnd(selectedIncomeLevel);
+    if (threshold < 0) threshold = parseIncomeLowEnd(selectedIncomeLevel); // fallback to low end
+    if (threshold < 0) threshold = 39999;
     var thresholdFormatted = '$' + threshold.toLocaleString();
-
-    // Determine which income levels fall below the threshold
+    //
+    // Determine which income levels fall at or below the threshold (upper end <= threshold)
     var belowThresholdLevels = [];
     var belowThresholdCount = 0;
     var incomeArr = [];
     for (var k in incomeCounts) {
-      var lowEnd = parseIncomeLowEnd(k);
-      var isBelow = (lowEnd >= 0 && lowEnd < threshold);
-      incomeArr.push({ level: k, count: incomeCounts[k], lowEnd: lowEnd, isBelow: isBelow });
-      if (isBelow) {
-        belowThresholdCount += incomeCounts[k];
-        belowThresholdLevels.push({ level: k, count: incomeCounts[k] });
-      }
-    }
+        var lowEnd = parseIncomeLowEnd(k);
+        var highEnd = parseIncomeHighEnd(k);
+        // isBelow: the entire income range is at or below the threshold
+        var isBelow = (highEnd >= 0 && highEnd <= threshold);
+        incomeArr.push({ level: k, count: incomeCounts[k], lowEnd: lowEnd, isBelow: isBelow });
 
-    // Sort all income levels by low end ascending for display
-    incomeArr.sort(function(a, b) { return a.lowEnd - b.lowEnd; });
-    belowThresholdLevels.sort(function(a, b) {
-      return parseIncomeLowEnd(a.level) - parseIncomeLowEnd(b.level);
-    });
-    
-    // Overall % of households below threshold
-    var belowThresholdPct = householdCount > 0 ? Math.round((belowThresholdCount / householdCount) * 100) : 0;
-    
-    // Build below-threshold breakdown lines
-    var incomeLines = [];
-    for (var j = 0; j < belowThresholdLevels.length; j++) {
-      var pct = belowThresholdCount > 0 ? Math.round((belowThresholdLevels[j].count / belowThresholdCount) * 100) : 0;
-      incomeLines.push(pct + '% ' + belowThresholdLevels[j].level);
+        // Sort all income levels by low end ascending for display
+        incomeArr.sort(function (a, b) { return a.lowEnd - b.lowEnd; });
+        belowThresholdLevels.sort(function (a, b) {
+            return parseIncomeLowEnd(a.level) - parseIncomeLowEnd(b.level);
+        });
+
+        // Overall % of households below threshold
+        var belowThresholdPct = householdCount > 0 ? Math.round((belowThresholdCount / householdCount) * 100) : 0;
+
+        // Build below-threshold breakdown lines
+        var incomeLines = [];
+        for (var j = 0; j < belowThresholdLevels.length; j++) {
+            var pct = belowThresholdCount > 0 ? Math.round((belowThresholdLevels[j].count / belowThresholdCount) * 100) : 0;
+            incomeLines.push(pct + '% ' + belowThresholdLevels[j].level);
+        }
+
+        // Date range description
+        var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM yyyy');
+        var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM yyyy');
+
+        // Geographic filter description
+        var geoFilter = '';
+        if (filterCounty && filterCounty.trim() !== '') geoFilter += filterCounty.trim();
+        if (filterCity && filterCity.trim() !== '') geoFilter += (geoFilter ? ', ' : '') + filterCity.trim();
+        if (filterZip && filterZip.trim() !== '') geoFilter += (geoFilter ? ', Zip ' : 'Zip ') + filterZip.trim();
+        var geoDesc = geoFilter ? ' in ' + geoFilter : '';
+
+        // Build narrative
+        var narrative = 'Assessing the ' + householdCount.toLocaleString() + ' households our Healthy Essentials Pantry has served' +
+            geoDesc + ' from ' + fromDisplay + ' to ' + toDisplay + ', ' +
+            belowThresholdPct + '% of the households served had an annual income of ' + thresholdFormatted + ' or less. ' +
+            (incomeLines.length > 0 ? 'Within these households, ' + incomeLines.join(', ') + '. ' : '') +
+            'We positively impacted the lives of ' + totalChildren.toLocaleString() + ' children, ' +
+            totalAdults.toLocaleString() + ' adults, and ' + totalSeniors.toLocaleString() + ' seniors with ' +
+            totalProductsDistributed.toLocaleString() + ' hygiene products. ' +
+            'We believe each item represents not just cleanliness, but a step toward restoring dignity and promoting health.';
+
+        // Create a Google Doc with the narrative
+        var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var reportName = 'Grant_Summary_' + fromFormatted + '_to_' + toFormatted;
+        var doc = DocumentApp.create(reportName);
+        var body = doc.getBody();
+
+        body.appendParagraph('Giving to the Nations').setHeading(DocumentApp.ParagraphHeading.HEADING1);
+        body.appendParagraph('Grant Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+        body.appendParagraph('Report Period: ' + fromDisplay + ' to ' + toDisplay);
+        if (geoFilter) body.appendParagraph('Filter: ' + geoFilter);
+        body.appendParagraph('Income Threshold: ' + thresholdFormatted + ' or less (from ' + selectedIncomeLevel + ')');
+        body.appendParagraph('');
+        body.appendParagraph(narrative);
+        body.appendParagraph('');
+
+        body.appendParagraph('Summary Data').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+        var table = body.appendTable();
+        var headerRow = table.appendTableRow();
+        headerRow.appendTableCell('Metric').setBackgroundColor('#4a86e8');
+        headerRow.appendTableCell('Value').setBackgroundColor('#4a86e8');
+
+        var metrics = [
+            ['Households Served', householdCount.toLocaleString()],
+            ['Total Requests', totalCount.toLocaleString()],
+            ['Households at or Below ' + thresholdFormatted, belowThresholdCount.toLocaleString() + ' (' + belowThresholdPct + '%)'],
+            ['Children', totalChildren.toLocaleString()],
+            ['Adults', totalAdults.toLocaleString()],
+            ['Seniors', totalSeniors.toLocaleString()],
+            ['Products Distributed', totalProductsDistributed.toLocaleString()]
+        ];
+
+        for (var m = 0; m < metrics.length; m++) {
+            var dataRow = table.appendTableRow();
+            dataRow.appendTableCell(metrics[m][0]);
+            dataRow.appendTableCell(metrics[m][1]);
+        }
+
+        body.appendParagraph('');
+        body.appendParagraph('Income Level Breakdown (threshold: ' + thresholdFormatted + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+        var incTable = body.appendTable();
+        var incHeader = incTable.appendTableRow();
+        incHeader.appendTableCell('Income Level').setBackgroundColor('#4a86e8');
+        incHeader.appendTableCell('Count').setBackgroundColor('#4a86e8');
+        incHeader.appendTableCell('% of All').setBackgroundColor('#4a86e8');
+        incHeader.appendTableCell('% of Below Threshold').setBackgroundColor('#4a86e8');
+
+        for (var j = 0; j < incomeArr.length; j++) {
+            var pctAll = totalIncomeRecords > 0 ? Math.round((incomeArr[j].count / totalIncomeRecords) * 100) : 0;
+            var pctBelow = (incomeArr[j].isBelow && belowThresholdCount > 0)
+                ? Math.round((incomeArr[j].count / belowThresholdCount) * 100) + '%' : '';
+            var iRow = incTable.appendTableRow();
+            iRow.appendTableCell(incomeArr[j].level);
+            iRow.appendTableCell(incomeArr[j].count.toString());
+            iRow.appendTableCell(pctAll + '%');
+            iRow.appendTableCell(pctBelow);
+        }
+
+        doc.saveAndClose();
+        moveToFolder(doc.getId(), CONFIG.GRANTS_FOLDER_ID);
+
+        logAudit('GRANTS_REPORT', null, 'Generated Grant Summary report: ' +
+            fromDisplay + ' to ' + toDisplay + geoDesc + ' (' + householdCount + ' households)');
+
+        var reportUrl = doc.getUrl();
+        var downloadUrl = 'https://docs.google.com/document/d/' + doc.getId() + '/export?format=docx';
+
+        return {
+            success: true,
+            message: 'Grant Summary generated for ' + householdCount + ' households',
+            narrative: narrative,
+            recordCount: totalCount,
+            reportUrl: reportUrl,
+            downloadUrl: downloadUrl,
+            reportId: doc.getId()
+        };
     }
-    
-    // Date range description
-    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM yyyy');
-    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM yyyy');
-    
-    // Geographic filter description
-    var geoFilter = '';
-    if (filterCounty && filterCounty.trim() !== '') geoFilter += filterCounty.trim();
-    if (filterCity   && filterCity.trim()   !== '') geoFilter += (geoFilter ? ', ' : '') + filterCity.trim();
-    if (filterZip    && filterZip.trim()    !== '') geoFilter += (geoFilter ? ', Zip ' : 'Zip ') + filterZip.trim();
-    var geoDesc = geoFilter ? ' in ' + geoFilter : '';
-    
-    // Build narrative
-    var narrative = 'Assessing the ' + householdCount.toLocaleString() + ' households our Healthy Essentials Pantry has served' +
-      geoDesc + ' from ' + fromDisplay + ' to ' + toDisplay + ', ' +
-      belowThresholdPct + '% of the households served had an annual income of less than ' + thresholdFormatted + '. ' +
-      (incomeLines.length > 0 ? 'Within these households, ' + incomeLines.join(', ') + '. ' : '') +
-      'We positively impacted the lives of ' + totalChildren.toLocaleString() + ' children, ' +
-      totalAdults.toLocaleString() + ' adults, and ' + totalSeniors.toLocaleString() + ' seniors with ' +
-      totalProductsDistributed.toLocaleString() + ' hygiene products. ' +
-      'We believe each item represents not just cleanliness, but a step toward restoring dignity and promoting health.';
-    
-    // Create a Google Doc with the narrative
-    var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    var toFormatted   = Utilities.formatDate(toDate,   CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    var reportName    = 'Grant_Summary_' + fromFormatted + '_to_' + toFormatted;
-    var doc  = DocumentApp.create(reportName);
-    var body = doc.getBody();
-    
-    body.appendParagraph('Giving to the Nations').setHeading(DocumentApp.ParagraphHeading.HEADING1);
-    body.appendParagraph('Grant Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
-    body.appendParagraph('Report Period: ' + fromDisplay + ' to ' + toDisplay);
-    if (geoFilter) body.appendParagraph('Filter: ' + geoFilter);
-    body.appendParagraph('Income Threshold: Less than ' + thresholdFormatted + ' (from ' + selectedIncomeLevel + ')');
-    body.appendParagraph('');
-    body.appendParagraph(narrative);
-    body.appendParagraph('');
-    
-    body.appendParagraph('Summary Data').setHeading(DocumentApp.ParagraphHeading.HEADING3);
-    var table = body.appendTable();
-    var headerRow = table.appendTableRow();
-    headerRow.appendTableCell('Metric').setBackgroundColor('#4a86e8');
-    headerRow.appendTableCell('Value').setBackgroundColor('#4a86e8');
-    
-    var metrics = [
-      ['Households Served',                      householdCount.toLocaleString()],
-      ['Total Requests',                         totalCount.toLocaleString()],
-      ['Households Below ' + thresholdFormatted, belowThresholdCount.toLocaleString() + ' (' + belowThresholdPct + '%)'],
-      ['Children',                               totalChildren.toLocaleString()],
-      ['Adults',                                 totalAdults.toLocaleString()],
-      ['Seniors',                                totalSeniors.toLocaleString()],
-      ['Products Distributed',                   totalProductsDistributed.toLocaleString()]
-    ];
-    
-    for (var m = 0; m < metrics.length; m++) {
-      var dataRow = table.appendTableRow();
-      dataRow.appendTableCell(metrics[m][0]);
-      dataRow.appendTableCell(metrics[m][1]);
-    }
-    
-    body.appendParagraph('');
-    body.appendParagraph('Income Level Breakdown (threshold: ' + thresholdFormatted + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
-    var incTable  = body.appendTable();
-    var incHeader = incTable.appendTableRow();
-    incHeader.appendTableCell('Income Level').setBackgroundColor('#4a86e8');
-    incHeader.appendTableCell('Count').setBackgroundColor('#4a86e8');
-    incHeader.appendTableCell('% of All').setBackgroundColor('#4a86e8');
-    incHeader.appendTableCell('% of Below Threshold').setBackgroundColor('#4a86e8');
-    
-    for (var j = 0; j < incomeArr.length; j++) {
-      var pctAll   = totalIncomeRecords > 0 ? Math.round((incomeArr[j].count / totalIncomeRecords) * 100) : 0;
-      var pctBelow = (incomeArr[j].isBelow && belowThresholdCount > 0)
-        ? Math.round((incomeArr[j].count / belowThresholdCount) * 100) + '%' : '';
-      var iRow = incTable.appendTableRow();
-      iRow.appendTableCell(incomeArr[j].level);
-      iRow.appendTableCell(incomeArr[j].count.toString());
-      iRow.appendTableCell(pctAll + '%');
-      iRow.appendTableCell(pctBelow);
-    }
-    
-    doc.saveAndClose();
-    moveToFolder(doc.getId(), CONFIG.GRANTS_FOLDER_ID);
-    
-    logAudit('GRANTS_REPORT', null, 'Generated Grant Summary report: ' + 
-      fromDisplay + ' to ' + toDisplay + geoDesc + ' (' + householdCount + ' households)');
-    
-    var reportUrl   = doc.getUrl();
-    var downloadUrl = 'https://docs.google.com/document/d/' + doc.getId() + '/export?format=docx';
-    
-    return {
-      success:      true,
-      message:      'Grant Summary generated for ' + householdCount + ' households',
-      narrative:    narrative,
-      recordCount:  totalCount,
-      reportUrl:    reportUrl,
-      downloadUrl:  downloadUrl,
-      reportId:     doc.getId()
-    };
 }

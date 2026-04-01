@@ -343,30 +343,34 @@ function getAllDistribCodes_() {
 /**
  * Generate Scheduling Report for ALL Applicants_Master records.
  *
- * Report includes every active AM record — no ID range, no date filter,
- * no archive workbooks. Columns are driven by LU_ReportColumns 'Scheduling'.
+ * ID RANGE TRACKING (v5.23):
+ *   startId = last EndId stored in LU_SchedID + 1 (0 on first run).
+ *   endId   = highest ID in the current AM data set.
+ *   Both values are appended to LU_SchedID; the endId row in AM is highlighted magenta.
  *
- * HISTORY FLAG:
- *   For each unique first+last name, the highest ID = current record.
- *   All lower IDs for the same name are marked 'History' in the first column.
+ * HISTORY FLAG (v5.23 revised):
+ *   For names appearing >1 time:
+ *     - If any record for that name has NO Service Status (open/pending), all
+ *       records WITH a Service Status are marked History.
+ *     - If ALL records for that name have a Service Status, the highest ID is
+ *       current and all lower IDs are History.
+ *   For names appearing exactly once: never History.
+ *
+ * NEW RECORD HIGHLIGHTING (v5.23):
+ *   Rows with rowId >= startId AND rowId <= endId:
+ *     - Entire row: pink background (#FFB6C1), bold.
+ *     - First Name and Last Name cells: yellow (#FFFF00).
+ *   All rows: First Name and Last Name cells yellow (#FFFF00).
  *
  * DATA VALIDATION:
- *   Scheduled Distribution Code column gets a dropdown from LU_DistribCodes.
- *   Service Status column gets a dropdown with standard status values.
+ *   Scheduled Distribution Code: active codes from LU_SchedDisbCodes (alphabetical).
+ *   Service Status: active values from LU_ServiceStatus (not hardcoded).
  *
- * SORT ORDER: Last Name, First Name, ID (ascending).
+ * v5.19 — All AM rows; Learned How; no ID range params.
+ * v5.20 — LU_ReportColumns integration.
+ * v5.23 — LU_SchedID tracking; revised history; dynamic dropdowns; new-record highlights.
  *
- * COLUMN HEADERS: Resolved via LU_FieldMap Report Headers (getReportHeader_()).
- *   processSchedulingReport() also uses getReportHeader_() when reading the
- *   report back, so both functions stay in sync automatically.
- *
- * v5.19 — All AM rows included; Learned How column added; no ID range params
- * v5.20 — Column definitions from LU_ReportColumns 'Scheduling' via
- *          ReportColumnService. _buildSchedRow_() replaces inline row builder.
- *          applyReportColumnFormatting() replaces hardcoded colWidths array.
- *          Falls back to v5.19 hardcoded column set when LU_ReportColumns empty.
- *
- * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount }}
+ * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount, startId, endId }}
  */
 function generateSchedulingReport() {
     try {
@@ -378,6 +382,7 @@ function generateSchedulingReport() {
         var idCol = headers.indexOf(resolveAMField_('ID'));
         var fnCol = headers.indexOf(resolveAMField_('First Name'));
         var lnCol = headers.indexOf(resolveAMField_('Last Name'));
+        var svcStatusCol = headers.indexOf(resolveAMField_('Service Status'));
         if (idCol === -1) return { success: false, error: 'ID column not found in Applicants_Master' };
 
         // ── Get column definitions from LU_ReportColumns (with v5.19 fallback) ──
@@ -387,66 +392,96 @@ function generateSchedulingReport() {
             cols = _getSchedFallbackCols_();
         }
 
-        // ── Build colIndexMap: maps each column key → AM column index ──────────
-        // 'History' skipped (not an AM column).
-        // [Calc] age bracket keys: index their constituent M/F columns instead.
-        // All other keys: look up the resolved raw AM header in the headers array.
+        // ── Determine ID range from LU_SchedID ────────────────────────────────
+        var schedIdInfo = getLastSchedId();
+        var startId = (schedIdInfo.lastEndId || 0) + 1;
+
+        // Find the actual last row ID in AM
+        var endId = 0;
+        var endIdRowNum = -1; // 1-based sheet row of endId record
+        for (var r = 1; r < data.length; r++) {
+            var rowId = parseInt(data[r][idCol]) || 0;
+            if (rowId > endId) {
+                endId = rowId;
+                endIdRowNum = r + 1; // +1 for 1-based sheet row
+            }
+        }
+
+        // ── Build colIndexMap ─────────────────────────────────────────────────
+        var SCHED_AGE_BRACKET_MAP_ = {};
         var colIndexMap = {};
         cols.forEach(function (col) {
             var key = col.key;
-            if (key === 'History') return;          // handled as special case in _buildSchedRow_
-
+            if (key === 'History') return;
             var bracketPair = SCHED_AGE_BRACKET_MAP_[key];
             if (bracketPair) {
-                // Index both constituent columns so _buildSchedRow_ can sum them
-                var mi = headers.indexOf(resolveAMField_(bracketPair.male));
-                var fi = headers.indexOf(resolveAMField_(bracketPair.female));
-                if (mi !== -1) colIndexMap[bracketPair.male] = mi;
-                if (fi !== -1) colIndexMap[bracketPair.female] = fi;
-                return;
+                colIndexMap[bracketPair.male] = headers.indexOf(resolveAMField_(bracketPair.male));
+                colIndexMap[bracketPair.female] = headers.indexOf(resolveAMField_(bracketPair.female));
+            } else {
+                var resolved = resolveAMField_(key);
+                colIndexMap[key] = headers.indexOf(resolved);
             }
-
-            var idx = headers.indexOf(resolveAMField_(key));
-            if (idx !== -1) colIndexMap[key] = idx;
         });
 
-        // ── Collect records (all AM rows, skip blank name rows) ────────────────
+        // ── Build records array ────────────────────────────────────────────────
         var records = [];
         for (var i = 1; i < data.length; i++) {
-            var fn = (data[i][fnCol] || '').toString().trim();
-            var ln = (data[i][lnCol] || '').toString().trim();
-            if (!fn && !ln) continue;
+            var rowId = parseInt(data[i][idCol]) || 0;
+            if (!rowId) continue;
+            var firstName = fnCol !== -1 ? (data[i][fnCol] || '').toString().trim() : '';
+            var lastName = lnCol !== -1 ? (data[i][lnCol] || '').toString().trim() : '';
+            var svcStatus = svcStatusCol !== -1 ? (data[i][svcStatusCol] || '').toString().trim() : '';
             records.push({
-                rowData: data[i],
-                lastName: ln,
-                firstName: fn,
-                rowId: parseInt(data[i][idCol]) || 0,
-                isHistory: false                          // set below
+                rowId: rowId,
+                firstName: firstName,
+                lastName: lastName,
+                svcStatus: svcStatus,
+                isHistory: false,
+                rowData: data[i]
             });
         }
-        if (records.length === 0)
-            return { success: false, error: 'No records found in Applicants_Master' };
 
-        // ── Sort: Last Name, First Name, ID ───────────────────────────────────
+        // ── Sort: Last Name, First Name, ID ascending ──────────────────────────
         records.sort(function (a, b) {
-            var lc = a.lastName.localeCompare(b.lastName); if (lc) return lc;
-            var fc = a.firstName.localeCompare(b.firstName); if (fc) return fc;
-            return a.rowId - b.rowId;
+            var lc = a.lastName.toLowerCase().localeCompare(b.lastName.toLowerCase());
+            if (lc !== 0) return lc;
+            var fc = a.firstName.toLowerCase().localeCompare(b.firstName.toLowerCase());
+            return fc !== 0 ? fc : a.rowId - b.rowId;
         });
 
-        // ── History flag: per-name, highest ID = current ──────────────────────
-        var maxIdPerName = {};
+        // ── History flag (v5.23 revised logic) ────────────────────────────────
+        // Group records by normalized full name
+        var nameGroups = {};
         records.forEach(function (rec) {
             var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
-            maxIdPerName[k] = Math.max(maxIdPerName[k] || 0, rec.rowId);
+            if (!nameGroups[k]) nameGroups[k] = [];
+            nameGroups[k].push(rec);
         });
-        records.forEach(function (rec) {
-            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
-            rec.isHistory = rec.rowId < (maxIdPerName[k] || rec.rowId);
+
+        Object.keys(nameGroups).forEach(function (k) {
+            var group = nameGroups[k];
+            if (group.length <= 1) return; // single record — never History
+
+            // Check if any record in group has NO service status (open/pending)
+            var hasOpenRecord = group.some(function (r) { return !r.svcStatus; });
+
+            if (hasOpenRecord) {
+                // All records WITH a service status are History
+                group.forEach(function (r) {
+                    if (r.svcStatus) r.isHistory = true;
+                });
+            } else {
+                // All have service status — highest ID is current, lower IDs are History
+                var maxId = Math.max.apply(null, group.map(function (r) { return r.rowId; }));
+                group.forEach(function (r) {
+                    if (r.rowId < maxId) r.isHistory = true;
+                });
+            }
         });
 
         // ── Create spreadsheet ─────────────────────────────────────────────────
-        var reportName = 'Scheduling_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var reportDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var reportName = 'Scheduling_' + reportDate;
         var spreadsheet = SpreadsheetApp.create(reportName);
         var reportSheet = spreadsheet.getActiveSheet();
         if (CONFIG.SCHEDULING_FOLDER_ID && CONFIG.SCHEDULING_FOLDER_ID.length > 0) {
@@ -455,7 +490,6 @@ function generateSchedulingReport() {
         }
 
         // ── Write header row ───────────────────────────────────────────────────
-        // Force plain text (@) so values like '5-9' are not interpreted as dates
         var allReportHeaders = cols.map(function (c) { return c.label; });
         reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
         reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
@@ -471,29 +505,42 @@ function generateSchedulingReport() {
         if (dataRows.length > 0) {
             reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
         }
-        // ── Highlight new records pink (rowId > lastRecordId threshold) ────────
-        if (newRecordThreshold > 0 && dataRows.length > 0) {
-            for (var pi = 0; pi < records.length; pi++) {
-                if (!records[pi].isHistory && records[pi].rowId > newRecordThreshold) {
-                    reportSheet.getRange(pi + 2, 1, 1, allReportHeaders.length)
-                        .setBackground('#FFB6C1');
-                }
-            }
-        }
 
-        // ── Apply column widths and wrap from LU_ReportColumns ─────────────────
-        // applyReportColumnFormatting() replaces the v5.19 hardcoded colWidths array
+        // ── Apply column widths and wrap ───────────────────────────────────────
         applyReportColumnFormatting(reportSheet, cols, 2, dataRows.length + 1);
 
+        // ── Find first/last name column positions (1-based) ────────────────────
+        var fnLabel = getReportHeader_('First Name') || 'First Name';
+        var lnLabel = getReportHeader_('Last Name') || 'Last Name';
+        var fnColNum = allReportHeaders.indexOf(fnLabel) + 1;
+        var lnColNum = allReportHeaders.indexOf(lnLabel) + 1;
+
+        // ── Highlight rows and name cells ──────────────────────────────────────
+        for (var pi = 0; pi < records.length; pi++) {
+            var rec = records[pi];
+            var sheetRow = pi + 2; // 1-based, row 1 = header
+            var isNewRecord = (rec.rowId >= startId && rec.rowId <= endId);
+
+            if (isNewRecord) {
+                // Pink background + bold for entire row
+                reportSheet.getRange(sheetRow, 1, 1, allReportHeaders.length)
+                    .setBackground('#FFB6C1')
+                    .setFontWeight('bold');
+            }
+
+            // Yellow name cells for ALL rows
+            if (fnColNum > 0) reportSheet.getRange(sheetRow, fnColNum).setBackground('#FFFF00');
+            if (lnColNum > 0) reportSheet.getRange(sheetRow, lnColNum).setBackground('#FFFF00');
+        }
+
         // ── Data validation dropdowns ──────────────────────────────────────────
-        // Find column numbers by matching the resolved header labels
         var schedCodeLabel = getReportHeader_('Scheduled Distribution Code') || 'Scheduled Distribution Code';
         var svcStatusLabel = getReportHeader_('Service Status') || 'Service Status';
-        var schedCodeColNum = allReportHeaders.indexOf(schedCodeLabel) + 1;   // 1-based
+        var schedCodeColNum = allReportHeaders.indexOf(schedCodeLabel) + 1;
         var svcStatusColNum = allReportHeaders.indexOf(svcStatusLabel) + 1;
 
         if (dataRows.length > 0) {
-            // Scheduled Distribution Code dropdown from LU_DistribCodes
+            // Scheduled Distribution Code — active codes from LU_SchedDisbCodes (alphabetical)
             var distribCodes = getAllDistribCodes_();
             if (schedCodeColNum > 0 && distribCodes.length > 0) {
                 var schedRule = SpreadsheetApp.newDataValidation()
@@ -503,8 +550,11 @@ function generateSchedulingReport() {
                 reportSheet.getRange(2, schedCodeColNum, dataRows.length, 1).setDataValidation(schedRule);
             }
 
-            // Service Status dropdown
-            var statusValues = ['Picked Up', 'Delivered', 'Cancelled', 'Open', 'Pending'];
+            // Service Status — active values from LU_ServiceStatus (not hardcoded)
+            var statusValues = getLookupValues('SERVICE_STATUS', 'Status');
+            if (!statusValues || statusValues.length === 0) {
+                statusValues = ['Picked Up', 'Delivered', 'Cancelled', 'Open', 'Pending'];
+            }
             if (svcStatusColNum > 0) {
                 var statusRule = SpreadsheetApp.newDataValidation()
                     .requireValueInList(statusValues, true)
@@ -518,7 +568,23 @@ function generateSchedulingReport() {
         reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
         reportSheet.setFrozenRows(1);
 
-        logAudit('REPORT', null, 'Generated Scheduling Report — ' + records.length + ' records');
+        // ── Append ID range to LU_SchedID ─────────────────────────────────────
+        appendSchedId(startId, endId,
+            Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy HH:mm'));
+
+        // ── Highlight endId row in AM magenta ─────────────────────────────────
+        if (endIdRowNum > 0) {
+            try {
+                sheet.getRange(endIdRowNum, 1, 1, sheet.getLastColumn())
+                    .setBackground('#FF00FF');
+            } catch (me) {
+                Logger.log('generateSchedulingReport: AM magenta highlight error: ' + me.message);
+            }
+        }
+
+        logAudit('REPORT', null,
+            'Generated Scheduling Report — ' + records.length + ' records' +
+            ' (new records: ID ' + startId + ' to ' + endId + ')');
 
         return {
             success: true,
@@ -526,28 +592,15 @@ function generateSchedulingReport() {
             reportUrl: spreadsheet.getUrl(),
             downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
             reportId: spreadsheet.getId(),
-            recordCount: records.length
+            recordCount: records.length,
+            startId: startId,
+            endId: endId
         };
 
     } catch (e) {
         Logger.log('generateSchedulingReport error: ' + e.message);
         return { success: false, error: 'Report generation failed: ' + e.message };
     }
-}
-
-
-/**
- * Formats a phone number as (XXX) XXX-XXXX for 10-digit values.
- * Returns the raw value unchanged for any other length.
- * @param {string|number} raw - Raw phone number value
- * @returns {string} Formatted phone number string
- */
-function formatPhoneNumber_(raw) {
-  var digits = (raw || '').toString().replace(/\D/g, '');
-  if (digits.length === 10) {
-    return '(' + digits.substring(0, 3) + ') ' + digits.substring(3, 6) + '-' + digits.substring(6);
-  }
-  return (raw || '').toString().trim();
 }
 
 /**
@@ -814,6 +867,7 @@ function generateDistributionReport(distribCode, startDate, endDate, pickupTimes
             schedDistribCode: headers.indexOf(resolveAMField_('Scheduled Distribution Code')),
             babyBox: headers.indexOf(resolveAMField_('Take Baby Box?')),
             schedBoxCode3: headers.indexOf(resolveAMField_('Scheduled Box Code 3'))
+
         };
 
         if (colIdx.schedDistribCode === -1) {
