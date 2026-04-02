@@ -125,33 +125,12 @@
          (SearchService v2.5). Archive results shown with (Archived: source)
          label in ae_displayResults. ae_loadRecord(): archive banner shown and
          Save disabled for archived records (read-only display only).
-  v7.3 - Scheduling Report: removed Beginning ID field, description
-         reference to ID range, and loadLastScheduledId() function.
-         generateSchedulingReport() client function simplified —
-         no beginId validation, passes no arguments to server.
-         Tab-open handler no longer calls loadLastScheduledId().
-  v7.4 - Manage Dropdowns: added Scheduled Distribution Codes (LU_SchedDisbCodes)
-         to luSheetSelector. Allows admin to activate/deactivate SchedDisbCodes
-         directly in AP without opening G2N_Lookups spreadsheet.
-  v7.6 - Distribution sub-nav reordered: Add Scheduled Distributions, Process
-         Distribution, Scheduling Report, Schedule Individuals, Distribution Reports.
-         Scheduling Report: removed schedLastId input; server now reads startId
-         from LU_SchedID automatically; result shows new-record ID range.
-         Manage Dropdowns: added EVENT_INFO (LU_EventInfo) and DISTRIB_CODES
-         (LU_DistribCodes) to luSheetSelector and handleDropdownSelect nameMap.
-         buildLookupRow(): DISTRIBUTED_PRODUCTS ProductName renders as <select>
-         from LU_Products active names. SCHED_DISB_CODES StartDate renders as
-         <input type="date">. SCHED_DISB_CODES records sorted alphabetically on load.
-         Distribution code dropdowns (Process Distribution, Distribution Reports)
-         explicitly sorted alphabetically client-side.
-  v7.7 - Manage Dropdowns: Distribution Codes (LU_DistribCodes) now sorted
-         alphabetically by Code column on load.
-         buildLookupRow(): time columns (header ends in 'Time') now render
-         as plain text inputs with placeholder instead of date pickers —
-         fixes Event Begins/Ends Time displaying as dates.
-         Add Event Information: added Begin Time and End Time text input
-         columns to eventTable; saveEventInfo() passes eventBeginsTime and
-         eventEndsTime to saveEventInfoRecords().
+  v7.3 - loadActiveSchedDisbCodes: codes sorted alphabetically by code value
+         before populating Distribution Reports and Process Distribution dropdowns.
+         showSubTab('addEvent'): ensures a blank row exists on tab entry so
+         the table is never empty on first visit.
+         Manage Dropdowns selector: added SCHED_DISB_CODES and REPORT_COLUMNS entries.
+         handleDropdownSelect nameMap: added SCHED_DISB_CODES and REPORT_COLUMNS.
 -->
 
 <!DOCTYPE html>
@@ -760,10 +739,10 @@
             <!-- Distribution Sub-Nav -->
             <div id="subNavDistribution" class="sub-nav-tabs">
                 <button class="sub-nav-tab active" onclick="showSubTab('addSched',this)">Add Scheduled Distributions</button>
-                <button class="sub-nav-tab" onclick="showSubTab('process',this)">Process Distribution</button>
                 <button class="sub-nav-tab" onclick="showSubTab('scheduling',this)">Scheduling Report</button>
                 <button class="sub-nav-tab" onclick="showSubTab('schedIndiv',this)">Schedule Individuals</button>
                 <button class="sub-nav-tab" onclick="showSubTab('distribution',this)">Distribution Reports</button>
+                <button class="sub-nav-tab" onclick="showSubTab('process',this)">Process Distribution</button>
             </div>
 
             <!-- Reports Sub-Nav -->
@@ -784,6 +763,12 @@
             <!-- Add Scheduled Distributions Tab -->
             <div id="addSchedTab" class="section">
                 <h3>Add Scheduled Distributions</h3>
+
+                <div class="alert alert-info">
+                    Add one or more scheduled distribution codes. Box codes are from LU_BoxCodes.
+                    Funding Description auto-populates from the selected Funding Source.
+                    All new records are set to Active by default.
+                </div>
 
                 <div class="sched-grid">
                     <table id="schedTable">
@@ -818,17 +803,19 @@
                 <h3>Generate Scheduling Report</h3>
 
                 <div class="alert alert-info">
-                    <strong>Info:</strong> Generates a Scheduling Report containing
-                    <strong>all records</strong> in Applicants_Master.
-                    New records (IDs since the last report) are highlighted pink/bold with yellow name cells.
-                    History rows are identified by applicant name. Column headers use Report Header values from LU_FieldMap.
+                    Enter a Beginning ID to generate a scheduling report. The report will include all records from
+                    that ID through the last record in Applicants_Master, searching by First Name and Last Name,
+                    limited to records no more than 1 year old. Out-of-range rows are marked as History.
+                </div>
+
+                <div class="form-group">
+                    <label>Beginning ID (from Applicants_Master Workbook):</label>
+                    <input type="text" id="schedBeginId" placeholder="e.g., 6700" inputmode="numeric">
                 </div>
 
                 <button class="btn-primary btn-block" onclick="generateSchedulingReport()" id="schedGenerateBtn">
                     Generate Scheduling Report
                 </button>
-
-                <div id="schedIdRange" class="alert alert-info hidden" style="margin-top:8px;"></div>
 
                 <div id="schedMessage" class="alert hidden"></div>
 
@@ -1228,9 +1215,7 @@
                                 <th>Distribution Type</th>
                                 <th>Type Of Items</th>
                                 <th>Begins Date</th>
-                                <th>Begin Time</th>
                                 <th>Ends Date</th>
-                                <th>End Time</th>
                                 <th>BoxCode</th>
                                 <th>Number Served</th>
                                 <th>Location</th>
@@ -1726,27 +1711,26 @@
                         <option value="STAFF">Staff / Volunteers (LU_Staff)</option>
                     </optgroup>
                     <optgroup label="Lookup Tables (G2N_Lookups)">
-                        <option value="ADDRESS_TYPE">Address Type (LU_AddressType)</option>
+                        <option value="FIELD_MAP">Field Map (LU_FieldMap)</option>
                         <option value="BOX_CODES">Box Codes (LU_BoxCodes)</option>
                         <option value="DISTRIB_CODES">Distribution Codes (LU_DistribCodes)</option>
-                        <option value="ETHNICITY">Ethnicity (LU_Ethnicity)</option>
-                        <option value="EVENT_INFO">Event Information (LU_EventInfo)</option>
-                        <option value="FIELD_MAP">Field Map (LU_FieldMap)</option>
+                        <option value="SCHED_DISB_CODES">Scheduled Distrib Codes (LU_SchedDisbCodes)</option>
+                        <option value="PRODUCTS">Products (LU_Products)</option>
+                        <option value="REPORT_COLUMNS">Report Columns (LU_ReportColumns)</option>
+                        <option value="SERVICE_STATUS">Service Status (LU_ServiceStatus)</option>
+                        <option value="SERVICE_HOW">Service How (LU_ServiceHow)</option>
                         <option value="FUNDING_SOURCES">Funding Sources (LU_FundingSources)</option>
                         <option value="INCOME_LEVELS">Income Levels (LU_IncomeLevels)</option>
                         <option value="INCOME_SOURCES">Income Sources (LU_IncomeSources)</option>
                         <option value="LEARNED_HOW">Learned How (LU_LearnedHow)</option>
-                        <option value="MILITARY">Military (LU_Military)</option>
                         <option value="PERSON_ORG_REFERRED">Person/Org Referred (LU_PersonOrgReferred)</option>
-                        <option value="PHONE_TYPE">Phone Type (LU_PhoneType)</option>
-                        <option value="PRODUCTS">Products (LU_Products)</option>
-                        <option value="RACE">Race (LU_Race)</option>
-                        <option value="REPORT_COLUMNS">Report Columns (LU_ReportColumns)</option>
-                        <option value="SCHED_DISB_CODES">Scheduled Distribution Codes (LU_SchedDisbCodes)</option>
-                        <option value="SERVICE_HOW">Service How (LU_ServiceHow)</option>
-                        <option value="SERVICE_STATUS">Service Status (LU_ServiceStatus)</option>
-                        <option value="STATES">States (LU_States)</option>
                         <option value="TITLE_REFERRED">Title/Position Referred (LU_TitlePositionReferred)</option>
+                        <option value="MILITARY">Military (LU_Military)</option>
+                        <option value="RACE">Race (LU_Race)</option>
+                        <option value="ETHNICITY">Ethnicity (LU_Ethnicity)</option>
+                        <option value="PHONE_TYPE">Phone Type (LU_PhoneType)</option>
+                        <option value="ADDRESS_TYPE">Address Type (LU_AddressType)</option>
+                        <option value="STATES">States (LU_States)</option>
                     </optgroup>
                     <optgroup label="Data Tables (G2N_Data)">
                         <option value="DISTRIBUTED_PRODUCTS">Distributed Products (Distributed_Products)</option>
@@ -1795,8 +1779,6 @@
         var activeSchedCodesData = []; // Phase 4: cached active SchedDisbCode details
         var editableReportRows = []; // Phase 4: editable report data
         var editableReportHeaders = []; // Phase 4: editable report headers
-        var luProductNameOptions = []; // v7.6: product name list for DISTRIBUTED_PRODUCTS dropdown
-        var luCurrentSheetKey = '';    // v7.6: tracks currently loaded LU sheet key
 
         // ============ EDIT APPLICANT STATE (v6.8) ============
         var ae_currentRecord = null;
@@ -1947,8 +1929,14 @@
 
             if (tabName === 'editStaff' && !staffLoaded) { loadStaffRecords(); }
             if (tabName === 'editApplicant' && !ae_initialized) { ae_init(); }
+            if (tabName === 'scheduling') { loadLastScheduledId(); }
             if ((tabName === 'distribution' || tabName === 'process') && !activeSchedCodesLoaded) { loadActiveSchedDisbCodes(); }
             if (tabName === 'aiReports' && !aiConfigChecked) { aiConfigChecked = true; checkAISetup(); }
+            // v7.3: Ensure Add Event tab always has at least one blank row on entry
+            if (tabName === 'addEvent') {
+                var evtBody = document.getElementById('eventTableBody');
+                if (evtBody && evtBody.querySelectorAll('tr').length === 0) { addEventRow(); }
+            }
 
             // Reset dropdown selection when navigating to manageSystem tab
             if (tabName === 'manageSystem') {
@@ -1985,26 +1973,14 @@
                     TITLE_REFERRED: 'Title/Position Referred', MILITARY: 'Military',
                     RACE: 'Race', ETHNICITY: 'Ethnicity', PHONE_TYPE: 'Phone Type',
                     ADDRESS_TYPE: 'Address Type', STATES: 'States',
-                    DISTRIBUTED_PRODUCTS: 'Distributed Products',
-                    EVENT_INFO: 'Event Information',
                     DISTRIB_CODES: 'Distribution Codes',
-                    SCHED_DISB_CODES: 'Scheduled Distribution Codes'
+                    SCHED_DISB_CODES: 'Scheduled Distribution Codes',  // v7.3
+                    REPORT_COLUMNS: 'Report Columns',                   // v7.3
+                    DISTRIBUTED_PRODUCTS: 'Distributed Products'
                 };
                 document.getElementById('luEditorTitle').textContent = nameMap[key] || key;
                 document.getElementById('luEditorContainer').classList.remove('hidden');
-                luCurrentSheetKey = key;
-                // v7.6: Pre-load product names for DISTRIBUTED_PRODUCTS ProductName dropdown
-                if (key === 'DISTRIBUTED_PRODUCTS' && luProductNameOptions.length === 0) {
-                    google.script.run
-                        .withSuccessHandler(function (names) {
-                            luProductNameOptions = names || [];
-                            loadLookupEditor(key);
-                        })
-                        .withFailureHandler(function () { loadLookupEditor(key); })
-                        .getLookupValues('PRODUCTS', 'ProductName');
-                } else {
-                    loadLookupEditor(key);
-                }
+                loadLookupEditor(key);
             }
         }
 
@@ -2388,45 +2364,77 @@
                 .generateDistributionReport(distribCode, startFormatted, endFormatted, pickupTimes);
         }
 
+        // ============ SCHEDULING REPORT ============
+
         /**
-         * Generates a Scheduling Report. ID range (startId/endId) is determined
-         * server-side from LU_SchedID. No user input needed.
-         * v7.3 - Removed beginId entirely.
-         * v7.5 - Added lastIdVal for pink highlighting (removed in v7.6).
-         * v7.6 - Removed schedLastId input; server determines IDs from LU_SchedID.
-         *        startId/endId shown in success message.
+         * Loads the last ApplicantId from LU_LastScheduled and pre-fills Beginning ID (+1).
+         * Called each time the Scheduling Report tab is opened.
+         * v6.9 - Auto-populate Beginning ID from LU_LastScheduled
+         * v7.0 - Shows loading message in schedMessage; does NOT clear field value
+         *        so generateSchedulingReport() can still read any prior value.
+         * v7.1 - Field changed to type="text" so placeholder is visible in all browsers.
+         */
+        function loadLastScheduledId() {
+            var field = document.getElementById('schedBeginId');
+            field.placeholder = 'Retrieving...';
+            field.disabled = true;
+            showMessage('schedMessage', 'Retrieving last scheduled ID — please wait...', 'info');
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    field.placeholder = 'e.g., 6700';
+                    field.disabled = false;
+                    document.getElementById('schedMessage').classList.add('hidden');
+                    if (result && result.nextId > 0) {
+                        field.value = result.nextId;
+                    }
+                })
+                .withFailureHandler(function () {
+                    field.placeholder = 'e.g., 6700';
+                    field.disabled = false;
+                    document.getElementById('schedMessage').classList.add('hidden');
+                })
+                .getLastScheduledId();
+        }
+
+        /**
+         * Generates the Scheduling Report and appends endId + date to LU_LastScheduled.
+         * v6.9 - Calls appendLastScheduledId after success for Beginning ID tracking
+         * v7.1 - parseInt with trim since field is now type="text"
          */
         function generateSchedulingReport() {
-            showMessage('schedMessage', 'Generating scheduling report...', 'info');
+            var rawVal = document.getElementById('schedBeginId').value.trim();
+            var beginId = parseInt(rawVal);
+
+            if (!rawVal || isNaN(beginId)) {
+                showMessage('schedMessage', 'Please enter a Beginning ID', 'error');
+                return;
+            }
+
+            showMessage('schedMessage', 'Generating scheduling report (auto-detecting ending ID)...', 'info');
             document.getElementById('schedGenerateBtn').disabled = true;
             document.getElementById('schedReportLink').classList.add('hidden');
-            document.getElementById('schedIdRange').classList.add('hidden');
 
             google.script.run
                 .withSuccessHandler(function (result) {
                     document.getElementById('schedGenerateBtn').disabled = false;
+
                     if (result.success) {
-                        showMessage('schedMessage',
-                            'Report generated with ' + result.recordCount + ' records!', 'success');
-                        // Show ID range info
-                        if (result.startId || result.endId) {
-                            var rangeEl = document.getElementById('schedIdRange');
-                            rangeEl.textContent = 'New records: ID ' + (result.startId || 1) +
-                                ' to ' + (result.endId || '?') +
-                                ' (highlighted pink/bold in report)';
-                            rangeEl.classList.remove('hidden');
-                        }
+                        showMessage('schedMessage', 'Report generated with ' + result.recordCount + ' records!', 'success');
                         document.getElementById('schedReportUrl').href = result.reportUrl;
                         document.getElementById('schedReportLink').classList.remove('hidden');
+                        // v6.9: Pre-fill Beginning ID for next run (endId + 1)
+                        if (result.endId) {
+                            document.getElementById('schedBeginId').value = result.endId + 1;
+                        }
                     } else {
-                        showMessage('schedMessage', 'Error: ' + (result.error || 'Unknown error'), 'error');
+                        showMessage('schedMessage', result.error, 'error');
                     }
                 })
                 .withFailureHandler(function (error) {
                     document.getElementById('schedGenerateBtn').disabled = false;
-                    showMessage('schedMessage', 'Error: ' + error.message, 'error');
+                    showMessage('schedMessage', 'Report generation failed: ' + error.message, 'error');
                 })
-                .generateSchedulingReport();
+                .generateSchedulingReport(beginId, 0, '', '');
         }
 
         // ============ PROCESS DISTRIBUTION ============
@@ -2476,9 +2484,9 @@
         }
 
         /**
-        * Phase 4B.4: Loads distribution report data into editable grid
-        * @param {string} reportId - Google Sheets ID
-        */
+         * Phase 4B.4: Loads distribution report data into editable grid
+         * @param {string} reportId - Google Sheets ID
+         */
         function loadEditableReportData(reportId) {
             google.script.run
                 .withSuccessHandler(function (result) {
@@ -2499,8 +2507,8 @@
         }
 
         /**
-             * Phase 4B.4: Renders editable distribution report as HTML table
-             */
+         * Phase 4B.4: Renders editable distribution report as HTML table
+         */
         function renderEditableReport() {
             var container = document.getElementById('editableReportGrid');
             if (!editableReportHeaders.length || !editableReportRows.length) {
@@ -2508,6 +2516,7 @@
                 return;
             }
 
+            // Filter to only show non-empty headers
             var visibleHeaders = editableReportHeaders.filter(function (h) { return h.trim() !== ''; });
 
             var html = '<table><thead><tr>';
@@ -2520,7 +2529,9 @@
                 html += '<tr>';
                 visibleHeaders.forEach(function (h) {
                     var val = row[h] || '';
+                    // Use date picker for Date Picked Up column
                     if (h === 'Date Picked Up') {
+                        // Convert date value to yyyy-MM-dd for date input
                         var dateVal = '';
                         if (val) {
                             var d = new Date(val);
@@ -2535,6 +2546,7 @@
                 });
                 html += '</tr>';
             });
+
             html += '</tbody></table>';
             container.innerHTML = html;
         }
@@ -2547,6 +2559,7 @@
             var col = inputEl.getAttribute('data-col');
             if (editableReportRows[rowIdx]) {
                 var val = inputEl.value;
+                // Convert date input (yyyy-MM-dd) back to M/d/yyyy for backend
                 if (inputEl.type === 'date' && val) {
                     var parts = val.split('-');
                     if (parts.length === 3) {
@@ -2565,8 +2578,10 @@
                 showMessage('processMessage', 'No report loaded.', 'error');
                 return;
             }
+
             showMessage('processMessage', 'Saving changes...', 'info');
             document.getElementById('saveEditsBtn').disabled = true;
+
             google.script.run
                 .withSuccessHandler(function (result) {
                     document.getElementById('saveEditsBtn').disabled = false;
@@ -2593,7 +2608,10 @@
                 showMessage('processMessage', 'No report loaded.', 'error');
                 return;
             }
+
             var distribCode = document.getElementById('processDistribCode').value.trim().toUpperCase();
+
+            // v6.5: Show spinner throughout the full save+process cycle
             document.getElementById('spinnerText').textContent = 'Saving edits...';
             document.getElementById('spinnerOverlay').classList.remove('hidden');
             showMessage('processMessage', 'Saving changes and processing...', 'info');
@@ -2602,6 +2620,7 @@
             document.getElementById('processLog').classList.remove('hidden');
             document.getElementById('processLog').innerHTML = '<div class="log-entry log-info">Saving edits...</div>';
 
+            // Step 1: Save edits
             google.script.run
                 .withSuccessHandler(function (saveResult) {
                     if (!saveResult.success) {
@@ -2611,16 +2630,22 @@
                         showMessage('processMessage', 'Save failed: ' + saveResult.error, 'error');
                         return;
                     }
+
+                    // v6.5: Update spinner text for processing phase
                     document.getElementById('spinnerText').textContent = 'Processing distribution...';
                     document.getElementById('processLog').innerHTML += '<div class="log-entry log-success">Edits saved. Now processing...</div>';
 
+                    // Step 2: Process the distribution sheet
                     google.script.run
                         .withSuccessHandler(function (result) {
                             document.getElementById('spinnerOverlay').classList.add('hidden');
                             document.getElementById('saveProcessBtn').disabled = false;
                             document.getElementById('saveEditsBtn').disabled = false;
+
                             if (result.success) {
                                 showMessage('processMessage', 'Processing complete! Updated ' + result.updatedCount + ' records.', 'success');
+
+                                // v6.5: Render all log entries including per-ID DR/PF product updates
                                 var logHtml = '';
                                 if (result.log && result.log.length > 0) {
                                     result.log.forEach(function (entry) {
@@ -2629,6 +2654,8 @@
                                     });
                                 }
                                 document.getElementById('processLog').innerHTML = logHtml;
+
+                                // Refresh active codes dropdown since code was deactivated
                                 activeSchedCodesLoaded = false;
                                 loadActiveSchedDisbCodes();
                             } else {
@@ -2657,25 +2684,39 @@
                     document.getElementById('saveEditsBtn').disabled = false;
                     showMessage('processMessage', 'Save failed: ' + error.message, 'error');
                 })
-                .saveDistributionReportEdits(foundReportData.reportId, editableReportRows, distribCode);
+                .saveDistributionReportEdits(foundReportData.reportId, editableReportRows,
+                    distribCode); // v6.6
         }
 
+        // ============ PHASE 4: ACTIVE SCHED DISB CODES DROPDOWN ============
 
+        /**
+         * Phase 4B.3: Loads active SchedDisbCodes into both Distribution Reports
+         * and Process Distribution dropdowns, caches full details for auto-fill
+         */
         function loadActiveSchedDisbCodes() {
             google.script.run
                 .withSuccessHandler(function (codes) {
                     activeSchedCodesLoaded = true;
-                    codes = (codes || []).sort(function (a, b) { return (a.code || '').localeCompare(b.code || ''); });
-                    activeSchedCodesData = codes;
+                    activeSchedCodesData = codes || [];
+
+                    // v7.3: Sort alphabetically by code value before populating dropdowns
+                    activeSchedCodesData.sort(function (a, b) {
+                        return (a.code || '').localeCompare(b.code || '');
+                    });
+
+                    // Populate both dropdowns
                     var selectors = ['distribCode', 'processDistribCode'];
                     selectors.forEach(function (selId) {
                         var select = document.getElementById(selId);
                         if (!select) return;
                         select.innerHTML = '<option value="">-- Select Distribution Code --</option>';
+
                         if (!codes || codes.length === 0) {
                             select.innerHTML += '<option value="" disabled>No active codes found</option>';
                             return;
                         }
+
                         codes.forEach(function (item) {
                             var label = item.code;
                             if (item.startDate) label += ' (' + item.startDate + ')';
@@ -2701,6 +2742,11 @@
 
         // ============ PHASE 4: PROCESS SCHEDULING REPORT ============
 
+        /**
+         * Phase 4A.8: Finds latest scheduling report and processes non-History rows
+         * Updates AM: SchedDisbCode present → set Service Status to "Scheduled"
+         * Also writes back any edited Service Status values
+         */
         function processSchedulingReport() {
             showMessage('processSchedMessage', 'Finding and processing latest scheduling report...', 'info');
             document.getElementById('processSchedBtn').disabled = true;
@@ -2710,8 +2756,10 @@
             google.script.run
                 .withSuccessHandler(function (result) {
                     document.getElementById('processSchedBtn').disabled = false;
+
                     if (result.success) {
                         showMessage('processSchedMessage', 'Processing complete! Updated ' + result.updatedCount + ' records.', 'success');
+
                         var logHtml = '';
                         if (result.log && result.log.length > 0) {
                             result.log.forEach(function (entry) {
@@ -2745,8 +2793,8 @@
                             if (item.Code) boxCodesList.push(item.Code);
                         });
                     }
-                    addSchedRow();
-                    addEventRow();
+                    addSchedRow(); // Add initial sched row after box codes loaded
+                    addEventRow(); // Add initial event row after box codes loaded
                 })
                 .withFailureHandler(function (error) {
                     console.error('Failed to load box codes:', error);
@@ -2763,11 +2811,13 @@
             tr.id = 'eventRow_' + eventRowCount;
             var n = eventRowCount;
 
+            // Build BoxCode options
             var boxOptions = '<option value="">-- Select --</option>';
             for (var i = 0; i < boxCodesList.length; i++) {
                 boxOptions += '<option value="' + boxCodesList[i] + '">' + boxCodesList[i] + '</option>';
             }
 
+            // Build Funding Source options
             var fundingOptions = '<option value="">-- Select --</option>';
             for (var code in fundingSourcesMap) {
                 fundingOptions += '<option value="' + code + '">' + code + '</option>';
@@ -2780,9 +2830,7 @@
                 '<td><input type="text" id="eventDistType_' + n + '" placeholder="e.g., Food Box"></td>' +
                 '<td><input type="text" id="eventItemType_' + n + '" placeholder="e.g., Cleaning"></td>' +
                 '<td><input type="date" id="eventBegins_' + n + '"></td>' +
-                '<td><input type="text" id="eventBeginTime_' + rowNum + '" placeholder="9:00 AM" style="padding:4px;border:1px solid #ccc;border-radius:3px;width:90px;"></td>' +
                 '<td><input type="date" id="eventEnds_' + n + '"></td>' +
-                '<td><input type="text" id="eventEndTime_' + rowNum + '" placeholder="12:00 PM" style="padding:4px;border:1px solid #ccc;border-radius:3px;width:90px;"></td>' +
                 '<td><select id="eventBoxCode_' + n + '">' + boxOptions + '</select></td>' +
                 '<td><input type="number" id="eventNumServed_' + n + '" min="0" style="width:80px"></td>' +
                 '<td><input type="text" id="eventLocation_' + n + '" placeholder="Location"></td>' +
@@ -2808,18 +2856,14 @@
                 var distType = document.getElementById('eventDistType_' + rowId).value.trim();
                 var itemType = document.getElementById('eventItemType_' + rowId).value.trim();
                 var begins = document.getElementById('eventBegins_' + rowId).value;
-                var beginTime = document.getElementById('eventBeginTime_' + rowId)
-                    ? document.getElementById('eventBeginTime_' + rowId).value.trim() : '';
                 var ends = document.getElementById('eventEnds_' + rowId).value;
-                var endTime = document.getElementById('eventEndTime_' + rowId)
-                    ? document.getElementById('eventEndTime_' + rowId).value.trim() : '';
                 var boxCode = document.getElementById('eventBoxCode_' + rowId).value;
                 var numServed = document.getElementById('eventNumServed_' + rowId).value;
                 var location = document.getElementById('eventLocation_' + rowId).value.trim();
                 var funding = document.getElementById('eventFunding_' + rowId).value;
                 var notes = document.getElementById('eventNotes_' + rowId).value.trim();
 
-                if (!eventYear && !distType && !begins) continue;
+                if (!eventYear && !distType && !begins) continue; // Skip fully empty rows
 
                 if (!eventYear) {
                     showMessage('addEventMessage', 'Event Year is required for all rows', 'error');
@@ -2831,9 +2875,7 @@
                     distributionType: distType,
                     typeOfItems: itemType,
                     eventBeginsDate: begins,
-                    eventBeginsTime: beginTime,    // v7.7
                     eventEndsDate: ends,
-                    eventEndsTime: endTime,        // v7.7
                     boxCode: boxCode,
                     numberServed: numServed ? parseInt(numServed) : '',
                     location: location,
@@ -2886,7 +2928,9 @@
                 .withSuccessHandler(function (result) {
                     if (result.success) {
                         var records = result.records || [];
-                        records.forEach(function (rec) { addStaffRow(rec); });
+                        records.forEach(function (rec) {
+                            addStaffRow(rec);
+                        });
                         staffLoaded = true;
                         if (records.length === 0) {
                             showMessage('editStaffMessage', 'No ' + label + ' staff records found. Use "+ Add New" to create entries.', 'info');
@@ -2911,7 +2955,9 @@
             var isExisting = existing && existing.rowNum;
 
             tr.id = 'staffRow_' + n;
-            if (isExisting) { tr.dataset.rowNum = existing.rowNum; }
+            if (isExisting) {
+                tr.dataset.rowNum = existing.rowNum;
+            }
 
             var code = existing ? (existing.Code || '') : '';
             var name = existing ? (existing.Name || '') : '';
@@ -2920,6 +2966,7 @@
             var active = existing ? existing.Active : true;
             var isChecked = (active === true || active === 'TRUE') ? 'checked' : '';
 
+            // Phase 5: Role dropdown options
             var roleOptions = ['', 'Administrator', 'Staff', 'Volunteer'];
             var roleSelect = '<select id="staffRole_' + n + '" style="width:100%; padding:6px 8px; border:1px solid #dadce0; border-radius:4px; font-size:13px;">';
             for (var r = 0; r < roleOptions.length; r++) {
@@ -2956,13 +3003,13 @@
             for (var i = 0; i < rows.length; i++) {
                 var rowId = rows[i].id.replace('staffRow_', '');
                 var sheetRowNum = rows[i].dataset.rowNum ? parseInt(rows[i].dataset.rowNum) : null;
-                var code = document.getElementById('staffCode_' + rowId).value.trim().toUpperCase();
+                var code = document.getElementById('staffCode_' + rowId).value.trim().toUpperCase(); // Phase 5: Force uppercase
                 var name = document.getElementById('staffName_' + rowId).value.trim();
                 var email = document.getElementById('staffEmail_' + rowId).value.trim();
                 var role = document.getElementById('staffRole_' + rowId).value.trim();
                 var active = document.getElementById('staffActive_' + rowId).checked;
 
-                if (!code && !sheetRowNum) continue;
+                if (!code && !sheetRowNum) continue; // Skip empty new rows
 
                 if (!code) {
                     showMessage('editStaffMessage', 'Code is required for all rows', 'error');
@@ -2970,8 +3017,13 @@
                 }
 
                 var rec = { code: code, name: name, email: email, role: role, active: active };
-                if (sheetRowNum) { rec.rowNum = sheetRowNum; updates.push(rec); }
-                else { newRecords.push(rec); }
+
+                if (sheetRowNum) {
+                    rec.rowNum = sheetRowNum;
+                    updates.push(rec);
+                } else {
+                    newRecords.push(rec);
+                }
             }
 
             if (updates.length === 0 && newRecords.length === 0) {
@@ -2987,6 +3039,7 @@
                     document.getElementById('saveStaffBtn').disabled = false;
                     if (result.success) {
                         showMessage('editStaffMessage', result.message, 'success');
+                        // Reload to reflect changes and get updated row numbers
                         loadStaffRecords();
                     } else {
                         showMessage('editStaffMessage', result.error, 'error');
@@ -3023,6 +3076,7 @@
                     document.getElementById('loginReportBtn').disabled = false;
                     if (result.success) {
                         showMessage('loginReportMessage', result.message, 'success');
+
                         document.getElementById('loginRecordCount').textContent = result.recordCount;
                         document.getElementById('loginEventCount').textContent = result.eventCount || 0;
                         document.getElementById('loginOpenUrl').href = result.reportUrl;
@@ -3061,6 +3115,7 @@
                         document.getElementById('auditLogCount').textContent = result.auditLogCount || 0;
                         document.getElementById('archivePreview').classList.remove('hidden');
 
+                        // Show product debug info if 0 matches but records exist
                         var debugEl = document.getElementById('productDebugInfo');
                         if (result.productDebug && result.recordCount > 0 && (result.productRecordCount || 0) === 0) {
                             var d = result.productDebug;
@@ -3079,6 +3134,7 @@
                         if (result.recordCount > 0 || result.fileCount > 0) {
                             document.getElementById('executeArchiveBtn').classList.remove('hidden');
                         }
+
                         showMessage('archiveMessage', 'Preview complete. No changes have been made.', 'success');
                     } else {
                         showMessage('archiveMessage', result.error, 'error');
@@ -3096,8 +3152,13 @@
         }
 
         var archiveState = {
-            totalRecords: 0, totalFiles: 0, archivedRecords: 0,
-            deletedFiles: 0, cutoffDate: '', isRunning: false, rolloverResult: null
+            totalRecords: 0,
+            totalFiles: 0,
+            archivedRecords: 0,
+            deletedFiles: 0,
+            cutoffDate: '',
+            isRunning: false,
+            rolloverResult: null
         };
 
         function executeArchive() {
@@ -3112,10 +3173,16 @@
             var includeAuditBackup = document.getElementById('includeAuditBackup').checked;
 
             var confirmMsg = 'Archive ' + recordCount + ' records and delete ' + fileCount + ' files?';
-            if (includeAuditBackup) { confirmMsg += '\n\nAuditLog will also be backed up and cleared.'; }
+            if (includeAuditBackup) {
+                confirmMsg += '\n\nAuditLog will also be backed up and cleared.';
+            }
             confirmMsg += '\n\nThis cannot be undone.';
-            if (!confirm(confirmMsg)) { return; }
 
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+
+            // Initialize archive state
             archiveState.totalRecords = parseInt(recordCount) || 0;
             archiveState.totalFiles = parseInt(fileCount) || 0;
             archiveState.archivedRecords = 0;
@@ -3130,19 +3197,26 @@
             document.getElementById('archiveLog').innerHTML = '<div class="log-entry log-info">Starting archive process...</div>';
 
             updateArchiveProgress(0, archiveState.totalRecords, 'Initializing...');
+
+            // Start the batch process
             runArchiveBatch();
         }
 
         function runArchiveBatch() {
-            if (!archiveState.isRunning) { return; }
+            if (!archiveState.isRunning) {
+                return;
+            }
 
             google.script.run
                 .withSuccessHandler(function (result) {
                     if (result.success) {
                         archiveState.archivedRecords += result.archivedInBatch || 0;
                         archiveState.deletedFiles += result.deletedInBatch || 0;
-                        if (result.rolloverResult) { archiveState.rolloverResult = result.rolloverResult; }
+                        if (result.rolloverResult) {
+                            archiveState.rolloverResult = result.rolloverResult;
+                        }
 
+                        // Update progress log
                         var logEl = document.getElementById('archiveLog');
                         if (result.log && result.log.length > 0) {
                             result.log.forEach(function (entry) {
@@ -3158,9 +3232,11 @@
                         if (result.hasMore) {
                             setTimeout(runArchiveBatch, 100);
                         } else {
+                            // Records done - check if we need to backup audit log
                             if (archiveState.includeAuditBackup) {
                                 logEl.innerHTML += '<div class="log-entry log-info">Backing up AuditLog...</div>';
                                 logEl.scrollTop = logEl.scrollHeight;
+
                                 google.script.run
                                     .withSuccessHandler(function (auditResult) {
                                         if (auditResult.success) {
@@ -3230,9 +3306,13 @@
                     if (result.success) {
                         document.getElementById('hcWorkbookName').textContent = result.archiveWorkbook || 'N/A';
                         document.getElementById('hcAmRows').textContent = result.amArchive.rows;
-                        document.getElementById('hcAmDates').textContent = result.amArchive.rows > 0 ? result.amArchive.minDate + ' – ' + result.amArchive.maxDate : 'No data';
+                        document.getElementById('hcAmDates').textContent = result.amArchive.rows > 0
+                            ? result.amArchive.minDate + ' – ' + result.amArchive.maxDate
+                            : 'No data';
                         document.getElementById('hcProdRows').textContent = result.prodArchive.rows;
-                        document.getElementById('hcProdDates').textContent = result.prodArchive.rows > 0 ? result.prodArchive.minDate + ' – ' + result.prodArchive.maxDate : 'No data';
+                        document.getElementById('hcProdDates').textContent = result.prodArchive.rows > 0
+                            ? result.prodArchive.minDate + ' – ' + result.prodArchive.maxDate
+                            : 'No data';
                         document.getElementById('hcAuditRows').textContent = result.auditBackupRows || 0;
                         document.getElementById('hcTotalRows').textContent = result.archiveWorkbookRows || 0;
                         document.getElementById('hcCapacity').textContent = result.capacityPct || 0;
@@ -3304,7 +3384,9 @@
         }
 
         function performRollover() {
-            if (!confirm('This will split G2N_Archive records into year-based workbooks in Archives_Backups folder and remove them from G2N_Archive.\n\nThis cannot be undone. Continue?')) { return; }
+            if (!confirm('This will split G2N_Archive records into year-based workbooks in Archives_Backups folder and remove them from G2N_Archive.\n\nThis cannot be undone. Continue?')) {
+                return;
+            }
 
             showMessage('rolloverMessage', 'Performing rollover... This may take a minute.', 'info');
             document.getElementById('rolloverBtn').disabled = true;
@@ -3344,8 +3426,12 @@
             testimonials: 'Records where "How will receiving products help" is not blank. Includes Emergency Situation, Current Situation, testimonials, Permission to Share.'
         };
 
+        /**
+         * Handle grants report type dropdown change
+         * Shows/hides description and Grant Summary filter fields
+         * Loads Income Level dropdown when Grant Summary is first selected
+         */
         var incomeLevelsLoaded = false;
-
         function onGrantsReportTypeChange() {
             var reportType = document.getElementById('grantsReportType').value;
             var descEl = document.getElementById('grantsReportDesc');
@@ -3359,9 +3445,12 @@
                 descEl.classList.add('hidden');
             }
 
+            // Show/hide Grant Summary filter fields and load income levels
             if (reportType === 'grantSummary') {
                 summaryFilters.classList.remove('hidden');
-                if (!incomeLevelsLoaded) { loadGrantSummaryIncomeLevels(); }
+                if (!incomeLevelsLoaded) {
+                    loadGrantSummaryIncomeLevels();
+                }
             } else {
                 summaryFilters.classList.add('hidden');
             }
@@ -3370,6 +3459,10 @@
             document.getElementById('grantsMessage').classList.add('hidden');
         }
 
+        /**
+         * Load Income Level options from LU_IncomeLevels for Grant Summary dropdown
+         * Sets default to "$30,000 - $39,999" if available
+         */
         function loadGrantSummaryIncomeLevels() {
             google.script.run
                 .withSuccessHandler(function (levels) {
@@ -3393,55 +3486,106 @@
                 })
                 .withFailureHandler(function (err) {
                     console.error('Failed to load income levels:', err);
-                    document.getElementById('grantSummaryIncomeLevel').innerHTML = '<option value="$30,000 - $39,999">$30,000 - $39,999</option>';
+                    var select = document.getElementById('grantSummaryIncomeLevel');
+                    select.innerHTML = '<option value="$30,000 - $39,999">$30,000 - $39,999</option>';
                 })
                 .getIncomeLevelOptions();
         }
 
+        /**
+         * Generate selected grants report
+         * Routes to appropriate server-side function based on report type
+         * Grant Summary passes additional County/City/Zip filter parameters
+         */
         function generateGrantsReport() {
             var reportType = document.getElementById('grantsReportType').value;
             var fromDate = document.getElementById('grantsFromDate').value;
             var toDate = document.getElementById('grantsToDate').value;
 
-            if (!reportType) { showMessage('grantsMessage', 'Please select a report type', 'error'); return; }
-            if (!fromDate || !toDate) { showMessage('grantsMessage', 'Please enter both From Date and To Date', 'error'); return; }
-            if (fromDate > toDate) { showMessage('grantsMessage', 'From Date must be before To Date', 'error'); return; }
+            if (!reportType) {
+                showMessage('grantsMessage', 'Please select a report type', 'error');
+                return;
+            }
+
+            if (!fromDate || !toDate) {
+                showMessage('grantsMessage', 'Please enter both From Date and To Date', 'error');
+                return;
+            }
+
+            if (fromDate > toDate) {
+                showMessage('grantsMessage', 'From Date must be before To Date', 'error');
+                return;
+            }
 
             showMessage('grantsMessage', 'Generating report... This may take a moment for large date ranges.', 'info');
             document.getElementById('grantsGenerateBtn').disabled = true;
             document.getElementById('grantsReportLinks').classList.add('hidden');
 
+            var gasFunction = null;
             switch (reportType) {
                 case 'applicantsOpenRequests':
-                    google.script.run.withSuccessHandler(handleGrantsReportResult).withFailureHandler(handleGrantsReportError).generateApplicantsOpenRequests(fromDate, toDate); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsReportResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateApplicantsOpenRequests(fromDate, toDate);
+                    break;
                 case 'testimonials':
-                    google.script.run.withSuccessHandler(handleGrantsReportResult).withFailureHandler(handleGrantsReportError).generateTestimonialsReport(fromDate, toDate); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsReportResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateTestimonialsReport(fromDate, toDate);
+                    break;
                 case 'requestFrequency':
-                    google.script.run.withSuccessHandler(handleGrantsReportResult).withFailureHandler(handleGrantsReportError).generateRequestFrequencyReport(fromDate, toDate); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsReportResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateRequestFrequencyReport(fromDate, toDate);
+                    break;
                 case 'households':
-                    google.script.run.withSuccessHandler(handleGrantsReportResult).withFailureHandler(handleGrantsReportError).generateHouseholdsReport(fromDate, toDate); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsReportResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateHouseholdsReport(fromDate, toDate);
+                    break;
                 case 'distributionStats':
-                    google.script.run.withSuccessHandler(handleGrantsReportResult).withFailureHandler(handleGrantsReportError).generateDistributionStatsReport(fromDate, toDate); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsReportResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateDistributionStatsReport(fromDate, toDate);
+                    break;
                 case 'grantSummary':
                     var filterCounty = document.getElementById('grantSummaryCounty').value;
                     var filterCity = document.getElementById('grantSummaryCity').value;
                     var filterZip = document.getElementById('grantSummaryZip').value;
                     var incomeLevel = document.getElementById('grantSummaryIncomeLevel').value;
-                    google.script.run.withSuccessHandler(handleGrantsSummaryResult).withFailureHandler(handleGrantsReportError).generateGrantSummaryReport(fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel); break;
+                    gasFunction = google.script.run
+                        .withSuccessHandler(handleGrantsSummaryResult)
+                        .withFailureHandler(handleGrantsReportError)
+                        .generateGrantSummaryReport(fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel);
+                    break;
                 default:
                     showMessage('grantsMessage', 'Report type not yet implemented', 'error');
                     document.getElementById('grantsGenerateBtn').disabled = false;
             }
         }
 
+        /**
+         * Handle standard grants report result (Google Sheets)
+         * @param {Object} result - Server response with success, reportUrl, downloadUrl
+         */
         function handleGrantsReportResult(result) {
             document.getElementById('grantsGenerateBtn').disabled = false;
+
             if (result.success) {
                 showMessage('grantsMessage', result.message, 'success');
+
                 document.getElementById('grantsRecordCount').textContent = result.recordCount;
                 var breakdown = 'Master: ' + result.masterCount;
-                if (result.archiveCount > 0) { breakdown += ', Archive: ' + result.archiveCount; }
+                if (result.archiveCount > 0) {
+                    breakdown += ', Archive: ' + result.archiveCount;
+                }
                 document.getElementById('grantsSourceBreakdown').textContent = breakdown;
+
                 document.getElementById('grantsOpenUrl').href = result.reportUrl;
                 document.getElementById('grantsOpenUrl').textContent = 'Open in Google Sheets';
                 document.getElementById('grantsDownloadUrl').href = result.downloadUrl;
@@ -3452,14 +3596,24 @@
             }
         }
 
+        /**
+         * Handle Grant Summary result (Google Doc output)
+         * Shows narrative preview and adjusts link labels for Doc format
+         * @param {Object} result - Server response with narrative, reportUrl, downloadUrl
+         */
         function handleGrantsSummaryResult(result) {
             document.getElementById('grantsGenerateBtn').disabled = false;
+
             if (result.success) {
                 showMessage('grantsMessage', result.message, 'success');
+
                 document.getElementById('grantsRecordCount').textContent = result.recordCount;
                 var breakdown = 'Master: ' + result.masterCount;
-                if (result.archiveCount > 0) { breakdown += ', Archive: ' + result.archiveCount; }
+                if (result.archiveCount > 0) {
+                    breakdown += ', Archive: ' + result.archiveCount;
+                }
                 document.getElementById('grantsSourceBreakdown').textContent = breakdown;
+
                 document.getElementById('grantsOpenUrl').href = result.reportUrl;
                 document.getElementById('grantsOpenUrl').textContent = 'Open in Google Docs';
                 document.getElementById('grantsDownloadUrl').href = result.downloadUrl;
@@ -3492,6 +3646,10 @@
 
         var aiFieldGroupsLoaded = false;
 
+        /**
+         * Check AI configuration on tab load and show/hide setup status.
+         * v6.4: Also loads saved report templates into the dropdown.
+         */
         function checkAISetup() {
             google.script.run
                 .withSuccessHandler(function (result) {
@@ -3512,6 +3670,11 @@
             loadSavedReports();
         }
 
+        /**
+         * Loads saved report templates from LU_SavedReports and populates the
+         * Saved Templates optgroup in the aiReportType dropdown.
+         * v6.4 - New function.
+         */
         function loadSavedReports() {
             google.script.run
                 .withSuccessHandler(function (result) {
@@ -3526,21 +3689,33 @@
                         });
                     } else {
                         var opt = document.createElement('option');
-                        opt.value = ''; opt.disabled = true; opt.textContent = '(none saved yet)';
+                        opt.value = '';
+                        opt.disabled = true;
+                        opt.textContent = '(none saved yet)';
                         optgroup.appendChild(opt);
                     }
                 })
-                .withFailureHandler(function () { })
+                .withFailureHandler(function () { /* non-fatal */ })
                 .listSavedDataSheetReports();
         }
 
+        /**
+         * Toggle API setup panel visibility
+         */
         function toggleAISetup() {
-            document.getElementById('aiSetupPanel').classList.toggle('hidden');
+            var panel = document.getElementById('aiSetupPanel');
+            panel.classList.toggle('hidden');
         }
 
+        /**
+         * Save Anthropic API key via backend
+         */
         function saveAIKey() {
             var apiKey = document.getElementById('aiApiKeyInput').value.trim();
-            if (!apiKey) { showMessage('aiSetupMessage', 'Please enter an API key', 'error'); return; }
+            if (!apiKey) {
+                showMessage('aiSetupMessage', 'Please enter an API key', 'error');
+                return;
+            }
             google.script.run
                 .withSuccessHandler(function (result) {
                     if (result.success) {
@@ -3551,29 +3726,47 @@
                         showMessage('aiSetupMessage', result.error, 'error');
                     }
                 })
-                .withFailureHandler(function (err) { showMessage('aiSetupMessage', 'Failed: ' + err.message, 'error'); })
+                .withFailureHandler(function (err) {
+                    showMessage('aiSetupMessage', 'Failed: ' + err.message, 'error');
+                })
                 .saveAIApiKey(apiKey);
         }
 
+        /**
+         * Saves the last Custom Data Sheet spec as a reusable template.
+         * Called from the Save Template panel shown after a successful run.
+         * v6.4 - New function.
+         */
         function saveAITemplate() {
             var name = document.getElementById('aiTemplateName').value.trim();
-            if (!name) { showMessage('aiTemplateMessage', 'Please enter a name for the template', 'error'); return; }
-            if (!aiLastSpec) { showMessage('aiTemplateMessage', 'No report spec available — generate a Custom Data Sheet first', 'error'); return; }
+            if (!name) {
+                showMessage('aiTemplateMessage', 'Please enter a name for the template', 'error');
+                return;
+            }
+            if (!aiLastSpec) {
+                showMessage('aiTemplateMessage', 'No report spec available — generate a Custom Data Sheet first', 'error');
+                return;
+            }
             showMessage('aiTemplateMessage', 'Saving...', 'info');
             google.script.run
                 .withSuccessHandler(function (result) {
                     if (result.success) {
                         showMessage('aiTemplateMessage', result.message, 'success');
                         document.getElementById('aiTemplateName').value = '';
-                        loadSavedReports();
+                        loadSavedReports(); // refresh dropdown
                     } else {
                         showMessage('aiTemplateMessage', result.error || 'Save failed', 'error');
                     }
                 })
-                .withFailureHandler(function (err) { showMessage('aiTemplateMessage', 'Save failed: ' + err.message, 'error'); })
+                .withFailureHandler(function (err) {
+                    showMessage('aiTemplateMessage', 'Save failed: ' + err.message, 'error');
+                })
                 .saveCustomDataSheetSpec(name, aiLastFields, aiLastPrompt, aiLastBracket, aiLastSpec);
         }
 
+        /**
+         * Handle AI report type selection — show/hide field picker and output format
+         */
         function onAIReportTypeChange() {
             var reportType = document.getElementById('aiReportType').value;
             var descEl = document.getElementById('aiReportDesc');
@@ -3588,11 +3781,14 @@
                 descEl.classList.add('hidden');
             }
 
+            // Show/hide field picker, income bracket, and output format based on report type
             if (reportType === 'customDataSheet') {
                 fieldPanel.classList.remove('hidden');
                 formatGroup.classList.add('hidden');
                 document.getElementById('aiIncomeBracketGroup').classList.remove('hidden');
-                if (!aiFieldGroupsLoaded) { loadAIFieldGroups(); }
+                if (!aiFieldGroupsLoaded) {
+                    loadAIFieldGroups();
+                }
             } else {
                 fieldPanel.classList.add('hidden');
                 formatGroup.classList.remove('hidden');
@@ -3603,6 +3799,9 @@
             document.getElementById('aiMessage').classList.add('hidden');
         }
 
+        /**
+         * Load field groups from AM for the field picker checkboxes
+         */
         function loadAIFieldGroups() {
             google.script.run
                 .withSuccessHandler(function (result) {
@@ -3619,6 +3818,11 @@
                 .getAMFieldGroups();
         }
 
+        /**
+         * Render field picker checkboxes organized by group
+         * v1.7: Fields are {value, label} objects; value=raw AM header, label=friendly name
+         * @param {Array} groups - [{name, fields: [{value,label}]}]
+         */
         function renderAIFieldPicker(groups) {
             var container = document.getElementById('aiFieldPickerContent');
             var html = '';
@@ -3626,17 +3830,23 @@
             for (var g = 0; g < groups.length; g++) {
                 var group = groups[g];
                 html += '<div style="margin-bottom:10px;">';
-                html += '<div style="font-weight:bold; font-size:13px; color:#1a73e8; margin-bottom:4px; cursor:pointer;" onclick="toggleFieldGroup(this)">▸ ' + group.name + ' (' + group.fields.length + ')</div>';
+                html += '<div style="font-weight:bold; font-size:13px; color:#1a73e8; margin-bottom:4px; cursor:pointer;" onclick="toggleFieldGroup(this)">';
+                html += '▸ ' + group.name + ' (' + group.fields.length + ')';
+                html += '</div>';
                 html += '<div class="field-group-items hidden" style="padding-left:15px;">';
+
                 for (var f = 0; f < group.fields.length; f++) {
                     var field = group.fields[f];
+                    // v1.7: Support both {value,label} objects and plain strings
                     var fieldValue = (typeof field === 'object') ? field.value : field;
                     var fieldLabel = (typeof field === 'object') ? field.label : field;
                     var shortLabel = fieldLabel.length > 50 ? fieldLabel.substring(0, 47) + '...' : fieldLabel;
                     html += '<label style="display:block; font-size:12px; margin:2px 0; cursor:pointer;" title="' + fieldLabel.replace(/"/g, '&quot;') + '">';
-                    html += '<input type="checkbox" class="ai-field-cb" value="' + fieldValue.replace(/"/g, '&quot;') + '" onchange="updateAIFieldCount()"> ' + shortLabel;
+                    html += '<input type="checkbox" class="ai-field-cb" value="' + fieldValue.replace(/"/g, '&quot;') + '" onchange="updateAIFieldCount()"> ';
+                    html += shortLabel;
                     html += '</label>';
                 }
+
                 html += '</div></div>';
             }
 
@@ -3645,6 +3855,10 @@
             document.getElementById('aiFieldPickerLoading').classList.add('hidden');
         }
 
+        /**
+         * Toggle field group expand/collapse
+         * @param {HTMLElement} header - The clicked group header
+         */
         function toggleFieldGroup(header) {
             var items = header.nextElementSibling;
             if (items.classList.contains('hidden')) {
@@ -3656,10 +3870,18 @@
             }
         }
 
+        /**
+         * Select or clear all field checkboxes
+         * @param {boolean} checked - True to select all, false to clear
+         */
         function aiFieldSelectAll(checked) {
-            document.querySelectorAll('.ai-field-cb').forEach(function (cb) { cb.checked = checked; });
+            var cbs = document.querySelectorAll('.ai-field-cb');
+            cbs.forEach(function (cb) { cb.checked = checked; });
+            // Expand all groups when selecting all
             if (checked) {
-                document.querySelectorAll('.field-group-items').forEach(function (el) { el.classList.remove('hidden'); });
+                document.querySelectorAll('.field-group-items').forEach(function (el) {
+                    el.classList.remove('hidden');
+                });
                 document.querySelectorAll('#aiFieldPickerContent > div > div:first-child').forEach(function (h) {
                     h.textContent = h.textContent.replace('▸', '▾');
                 });
@@ -3667,17 +3889,29 @@
             updateAIFieldCount();
         }
 
+        /**
+         * Update selected field count display
+         */
         function updateAIFieldCount() {
             var count = document.querySelectorAll('.ai-field-cb:checked').length;
             document.getElementById('aiFieldCount').textContent = count + ' field' + (count !== 1 ? 's' : '') + ' selected';
         }
 
+        /**
+         * Get array of selected field names from checkboxes
+         * @returns {string[]} Selected field header names
+         */
         function getSelectedAIFields() {
             var selected = [];
-            document.querySelectorAll('.ai-field-cb:checked').forEach(function (cb) { selected.push(cb.value); });
+            document.querySelectorAll('.ai-field-cb:checked').forEach(function (cb) {
+                selected.push(cb.value);
+            });
             return selected;
         }
 
+        /**
+         * Generate AI report — validates inputs and calls appropriate backend function
+         */
         function generateAIReport() {
             var reportType = document.getElementById('aiReportType').value;
             var fromDate = document.getElementById('aiFromDate').value;
@@ -3685,19 +3919,33 @@
             var outputFormat = document.getElementById('aiOutputFormat').value;
             var customInstructions = document.getElementById('aiCustomInstructions').value.trim();
 
-            if (!reportType) { showMessage('aiMessage', 'Please select a report type', 'error'); return; }
-            if (!fromDate || !toDate) { showMessage('aiMessage', 'Please enter both From Date and To Date', 'error'); return; }
-            if (fromDate > toDate) { showMessage('aiMessage', 'From Date must be before To Date', 'error'); return; }
+            if (!reportType) {
+                showMessage('aiMessage', 'Please select a report type', 'error');
+                return;
+            }
+            if (!fromDate || !toDate) {
+                showMessage('aiMessage', 'Please enter both From Date and To Date', 'error');
+                return;
+            }
+            if (fromDate > toDate) {
+                showMessage('aiMessage', 'From Date must be before To Date', 'error');
+                return;
+            }
 
+            // v6.4: Saved template — no API call
             if (reportType.indexOf('saved__') === 0) {
                 var reportId = reportType.replace('saved__', '');
                 showMessage('aiMessage', 'Running saved report template... Applying to date range (no API tokens used).', 'info');
                 document.getElementById('aiGenerateBtn').disabled = true;
                 document.getElementById('aiReportLinks').classList.add('hidden');
-                google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).runSavedDataSheetReport(reportId, fromDate, toDate);
+                google.script.run
+                    .withSuccessHandler(handleAIReportResult)
+                    .withFailureHandler(handleAIReportError)
+                    .runSavedDataSheetReport(reportId, fromDate, toDate);
                 return;
             }
 
+            // Custom Data Sheet has its own flow
             if (reportType === 'customDataSheet') {
                 var selectedFields = getSelectedAIFields();
                 var incomeBracketRange = document.getElementById('aiIncomeBracketRange').value;
@@ -3705,10 +3953,16 @@
                     showMessage('aiMessage', 'Please select fields and/or provide instructions describing the data sheet you want', 'error');
                     return;
                 }
-                showMessage('aiMessage', 'Generating custom data sheet... Claude is structuring ' + (selectedFields.length > 0 ? selectedFields.length + ' fields' : 'your data') + '. This may take 30-60 seconds.', 'info');
+                showMessage('aiMessage', 'Generating custom data sheet... Claude is structuring ' +
+                    (selectedFields.length > 0 ? selectedFields.length + ' fields' : 'your data') +
+                    '. This may take 30-60 seconds.', 'info');
                 document.getElementById('aiGenerateBtn').disabled = true;
                 document.getElementById('aiReportLinks').classList.add('hidden');
-                google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).generateAIDataSheet(fromDate, toDate, selectedFields, customInstructions, incomeBracketRange);
+
+                google.script.run
+                    .withSuccessHandler(handleAIReportResult)
+                    .withFailureHandler(handleAIReportError)
+                    .generateAIDataSheet(fromDate, toDate, selectedFields, customInstructions, incomeBracketRange);
                 return;
             }
 
@@ -3717,30 +3971,63 @@
             document.getElementById('aiReportLinks').classList.add('hidden');
 
             switch (reportType) {
-                case 'grantNarrative': google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).generateAIGrantNarrative(fromDate, toDate, outputFormat, customInstructions); break;
-                case 'trendAnalysis': google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).generateAITrendAnalysis(fromDate, toDate, outputFormat, customInstructions); break;
-                case 'testimonialSummary': google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).generateAITestimonialSummary(fromDate, toDate, outputFormat, customInstructions); break;
-                case 'executiveSummary': google.script.run.withSuccessHandler(handleAIReportResult).withFailureHandler(handleAIReportError).generateAIExecutiveSummary(fromDate, toDate, outputFormat, customInstructions); break;
+                case 'grantNarrative':
+                    google.script.run
+                        .withSuccessHandler(handleAIReportResult)
+                        .withFailureHandler(handleAIReportError)
+                        .generateAIGrantNarrative(fromDate, toDate, outputFormat, customInstructions);
+                    break;
+                case 'trendAnalysis':
+                    google.script.run
+                        .withSuccessHandler(handleAIReportResult)
+                        .withFailureHandler(handleAIReportError)
+                        .generateAITrendAnalysis(fromDate, toDate, outputFormat, customInstructions);
+                    break;
+                case 'testimonialSummary':
+                    google.script.run
+                        .withSuccessHandler(handleAIReportResult)
+                        .withFailureHandler(handleAIReportError)
+                        .generateAITestimonialSummary(fromDate, toDate, outputFormat, customInstructions);
+                    break;
+                case 'executiveSummary':
+                    google.script.run
+                        .withSuccessHandler(handleAIReportResult)
+                        .withFailureHandler(handleAIReportError)
+                        .generateAIExecutiveSummary(fromDate, toDate, outputFormat, customInstructions);
+                    break;
                 default:
                     showMessage('aiMessage', 'Report type not recognized', 'error');
                     document.getElementById('aiGenerateBtn').disabled = false;
             }
         }
 
+        /**
+         * Handle successful AI report generation — display links and metadata.
+         * v6.4: For customDataSheet, stores spec and shows Save Template panel.
+         * @param {Object} result - { success, reportUrl, downloadUrl, message, tokensUsed, format, rowCount, colCount, savedSpec?, savedFields?, savedPrompt?, savedBracket? }
+         */
         function handleAIReportResult(result) {
             document.getElementById('aiGenerateBtn').disabled = false;
+
             if (result.success) {
                 showMessage('aiMessage', result.message, 'success');
+
                 var formatText = result.format === 'doc' ? 'Google Doc' : 'Google Sheet';
-                if (result.rowCount) { formatText += ' (' + result.rowCount + ' rows × ' + result.colCount + ' cols)'; }
+                if (result.rowCount) {
+                    formatText += ' (' + result.rowCount + ' rows × ' + result.colCount + ' cols)';
+                }
                 document.getElementById('aiReportFormat').textContent = formatText;
                 document.getElementById('aiTokensUsed').textContent = result.tokensUsed || (result.tokensUsed === 0 ? '0 (saved template)' : 'N/A');
+
                 document.getElementById('aiOpenUrl').href = result.reportUrl;
-                document.getElementById('aiOpenUrl').textContent = result.format === 'doc' ? 'Open in Google Docs' : 'Open in Google Sheets';
+                document.getElementById('aiOpenUrl').textContent =
+                    result.format === 'doc' ? 'Open in Google Docs' : 'Open in Google Sheets';
                 document.getElementById('aiDownloadUrl').href = result.downloadUrl;
-                document.getElementById('aiDownloadUrl').textContent = result.format === 'doc' ? 'Download as Word' : 'Download as Excel';
+                document.getElementById('aiDownloadUrl').textContent =
+                    result.format === 'doc' ? 'Download as Word' : 'Download as Excel';
                 document.getElementById('aiReportLinks').classList.remove('hidden');
 
+                // v6.4: Show Save Template panel only after a live Custom Data Sheet run
                 var savePanel = document.getElementById('aiSaveTemplatePanel');
                 if (result.savedSpec) {
                     aiLastSpec = result.savedSpec;
@@ -3758,6 +4045,10 @@
             }
         }
 
+        /**
+         * Handle AI report generation failure
+         * @param {Object} error - Error from google.script.run
+         */
         function handleAIReportError(error) {
             document.getElementById('aiGenerateBtn').disabled = false;
             var errorMsg = error.message || error.toString();
@@ -3767,27 +4058,35 @@
                 showMessage('aiMessage', 'AI report generation failed: ' + errorMsg, 'error');
             }
         }
-
         // ============ MANAGE SYSTEM — Generic Lookup Editor ============
 
+        var luCurrentSheetKey = '';
         var luCurrentHeaders = [];
 
+        /**
+         * Loads records for the given sheet key and renders the editor table.
+         * v6.1 - Now accepts explicit sheetKey param (replaces dropdown selector approach).
+         * @param {string} [sheetKey] - If provided, loads this key; otherwise reloads luCurrentSheetKey.
+         */
         function loadLookupEditor(sheetKey) {
             var key = sheetKey || luCurrentSheetKey;
-            luCurrentSheetKey = key || luCurrentSheetKey;
-            if (!key) { document.getElementById('luEditorContainer').classList.add('hidden'); return; }
+            if (!key) {
+                document.getElementById('luEditorContainer').classList.add('hidden');
+                return;
+            }
 
             luCurrentSheetKey = key;
             var container = document.getElementById('luEditorContainer');
             var loading = document.getElementById('luEditorLoading');
+            // Context-aware description
             var desc = document.getElementById('luEditorDesc');
-
             if (key === 'FIELD_MAP') {
-                desc.innerHTML = 'Edit display labels, report headers, portal visibility, and field flags. <strong>Searchable / Required / Editable / Nullable</strong> are Y/blank checkboxes. Changes take effect immediately — cache is cleared on save.';
+                desc.innerHTML = 'Edit display labels, report headers, portal visibility, and field flags. ' +
+                    '<strong>Searchable / Required / Editable / Nullable</strong> are Y/blank checkboxes. ' +
+                    'Changes take effect immediately — cache is cleared on save.';
             } else {
                 desc.innerHTML = 'All columns are editable. The <strong>Active</strong> column controls visibility in portal dropdowns.';
             }
-
             container.classList.remove('hidden');
             loading.classList.remove('hidden');
             document.getElementById('luTableHead').innerHTML = '';
@@ -3800,18 +4099,7 @@
                     loading.classList.add('hidden');
                     document.getElementById('saveLuBtn').disabled = false;
                     if (result.success) {
-                        // v7.6: Sort SCHED_DISB_CODES records alphabetically by first column
-                        if (luCurrentSheetKey === 'SCHED_DISB_CODES' && result.records) {
-                            result.records.sort(function (a, b) {
-                                var av = (a['SchedDisbCode'] || a[result.headers[0]] || '').toString();
-                                var bv = (b['SchedDisbCode'] || b[result.headers[0]] || '').toString();
-                                return av.localeCompare(bv);
-                            });
-                        }
                         renderLookupTable(result.headers, result.records);
-                        if (luCurrentSheetKey === 'DISTRIB_CODES') {
-                            records.sort(function (a, b) { return (a['Code'] || '').localeCompare(b['Code'] || ''); });
-                        }
                     } else {
                         showMessage('luMessage', 'Load failed: ' + result.error, 'error');
                     }
@@ -3824,8 +4112,15 @@
                 .getLookupRecords(key);
         }
 
+        /**
+         * Renders the editable lookup table from headers and records.
+         * @param {string[]} headers - Column header names
+         * @param {Object[]} records - Row objects with rowNum and column values
+         */
         function renderLookupTable(headers, records) {
             luCurrentHeaders = headers;
+
+            // Build header row
             var thead = document.getElementById('luTableHead');
             var headerRow = '<tr>';
             headers.forEach(function (h) {
@@ -3833,33 +4128,40 @@
             });
             thead.innerHTML = headerRow + '</tr>';
 
+            // Build data rows
             var tbody = document.getElementById('luTableBody');
             var html = '';
-            records.forEach(function (rec) { html += buildLookupRow(rec, headers); });
+            records.forEach(function (rec) {
+                html += buildLookupRow(rec, headers);
+            });
             tbody.innerHTML = html;
         }
 
+        /**
+         * Returns true for columns that should render as checkboxes.
+         * Active stores TRUE/FALSE; Searchable/Required/Editable/Nullable store Y/''.
+         * @param {string} header
+         * @returns {boolean}
+         */
         function isBooleanColumn(header) {
             return ['Active', 'Searchable', 'Required', 'Editable', 'Nullable'].indexOf(header) >= 0;
         }
 
+        /**
+         * Returns the checked state for a boolean column value.
+         * Handles TRUE/FALSE (Active) and Y/YES/'' (Searchable etc.)
+         */
         function isBooleanChecked(val) {
-            return val === true || val === 'true' || val === 'TRUE' || val === 'Y' || val === 'YES' || val === 1 || val === '1';
+            return val === true || val === 'true' || val === 'TRUE'
+                || val === 'Y' || val === 'YES' || val === 1 || val === '1';
         }
 
         /**
-         * Returns true for column headers that represent a time of day.
-         * Prevents time values stored as Date objects from rendering as full dates.
-         * v7.7 — New helper for buildLookupRow().
-         * @param {string} h - Column header
-         * @returns {boolean}
+         * Builds an editable <tr> for a single lookup record.
+         * @param {Object} rec - Record object (has rowNum + header-keyed values)
+         * @param {string[]} headers - Column header names
+         * @returns {string} HTML string for the table row
          */
-        function isTimeColumn(h) {
-            return /Time$/i.test(h);
-        }
-
-        function isTimeColumn(h) { return /Time$/i.test(h); }
-
         function buildLookupRow(rec, headers) {
             var rowNum = rec.rowNum || 0;
             var tr = '<tr data-row-num="' + rowNum + '" style="border-bottom:1px solid #eee;">';
@@ -3867,58 +4169,41 @@
                 var val = rec[h] !== undefined ? rec[h] : '';
                 if (isBooleanColumn(h)) {
                     var checked = isBooleanChecked(val) ? 'checked' : '';
+                    // data-bool-type distinguishes Active (TRUE/FALSE) from Y/N columns
                     var boolType = (h === 'Active') ? 'active' : 'yn';
-                    tr += '<td style="padding:5px 10px; text-align:center;"><input type="checkbox" data-col="' + escapeHtml(h) + '" data-bool-type="' + boolType + '" ' + checked + ' style="width:16px;height:16px;"></td>';
-                } else if (isTimeColumn(h)) {
-                    var tv = (val instanceof Date) ? '' : (val || '').toString().trim();
-                    tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) +
-                        '" value="' + escapeHtml(tv) + '" placeholder="e.g. 9:00 AM" style="width:100%;min-width:90px;padding:4px 6px;border:1px solid #ddd;border-radius:3px;font-size:13px;"></td>';
-                } else if (luCurrentSheetKey === 'DISTRIBUTED_PRODUCTS' && h === 'ProductName' && luProductNameOptions.length > 0) {
-                    // v7.6: ProductName as dropdown from LU_Products
-                    var pSel = '<td style="padding:4px 6px;"><select data-col="' + escapeHtml(h) + '" style="width:100%; min-width:160px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;">';
-                    pSel += '<option value="">-- Select Product --</option>';
-                    luProductNameOptions.forEach(function (pn) {
-                        var sel = (String(val) === String(pn)) ? ' selected' : '';
-                        pSel += '<option value="' + escapeHtml(String(pn)) + '"' + sel + '>' + escapeHtml(String(pn)) + '</option>';
-                    });
-                    pSel += '</select></td>';
-                    tr += pSel;
-                } else if (luCurrentSheetKey === 'SCHED_DISB_CODES' && h === 'StartDate') {
-                    // v7.6: StartDate as date picker
-                    // Convert M/D/YYYY → YYYY-MM-DD for input[type=date]
-                    var dateVal = '';
-                    if (val) {
-                        var dp = val.toString().match(/(\d+)\/(\d+)\/(\d+)/);
-                        if (dp) {
-                            dateVal = dp[3] + '-' + dp[1].padStart(2, '0') + '-' + dp[2].padStart(2, '0');
-                        } else {
-                            dateVal = val.toString();
-                        }
-                    }
-                    tr += '<td style="padding:4px 6px;"><input type="date" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(dateVal) + '" style="width:100%; min-width:130px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
-                } else if (isTimeColumn(h)) {
-                    // v7.7: Time columns render as plain text (e.g. "9:00 AM") not a date picker
-                    tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) +
-                        '" value="' + escapeHtml((val || '').toString()) + '" placeholder="e.g. 9:00 AM"' +
-                        ' style="width:100%; min-width:90px; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
+                    tr += '<td style="padding:5px 10px; text-align:center;">' +
+                        '<input type="checkbox" data-col="' + escapeHtml(h) + '" data-bool-type="' + boolType + '" ' + checked + ' style="width:16px;height:16px;">' +
+                        '</td>';
                 } else {
+                    // Wider inputs for long-value columns in field map
                     var minW = (h === 'Raw Header' || h === 'Display Label' || h === 'Notes') ? '180px' : '80px';
-                    tr += '<td style="padding:4px 6px;"><input type="text" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(String(val)) + '" style="width:100%; min-width:' + minW + '; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;"></td>';
+                    tr += '<td style="padding:4px 6px;">' +
+                        '<input type="text" data-col="' + escapeHtml(h) + '" value="' + escapeHtml(String(val)) + '" ' +
+                        'style="width:100%; min-width:' + minW + '; padding:4px 6px; border:1px solid #ddd; border-radius:3px; font-size:13px;">' +
+                        '</td>';
                 }
             });
             tr += '</tr>';
             return tr;
         }
 
+        /**
+         * Appends a blank editable row to the lookup table for a new record.
+         */
         function addLookupRow() {
             var tbody = document.getElementById('luTableBody');
             var emptyRec = { rowNum: 0 };
             luCurrentHeaders.forEach(function (h) { emptyRec[h] = ''; });
             tbody.insertAdjacentHTML('beforeend', buildLookupRow(emptyRec, luCurrentHeaders));
+            // Scroll to new row
             var wrapper = document.getElementById('luTableWrapper');
             wrapper.scrollTop = wrapper.scrollHeight;
         }
 
+        /**
+         * Collects all edited rows and saves via saveLookupRecords().
+         * Splits rows into updates (existing, rowNum > 0) and newRecords (rowNum === 0).
+         */
         function saveLookupEditor() {
             if (!luCurrentSheetKey) return;
 
@@ -3933,6 +4218,7 @@
                     var input = tr.querySelector('[data-col="' + h + '"]');
                     if (input) {
                         if (input.type === 'checkbox') {
+                            // Active stores true/false; Y/N columns store 'Y'/''
                             var boolType = input.getAttribute('data-bool-type');
                             rec[h] = (boolType === 'yn') ? (input.checked ? 'Y' : '') : input.checked;
                         } else {
@@ -3944,6 +4230,7 @@
                     rec.rowNum = rowNum;
                     updates.push(rec);
                 } else {
+                    // Only append new row if at least one non-Active field has a value
                     var hasValue = luCurrentHeaders.some(function (h) {
                         return h !== 'Active' && rec[h] && rec[h].toString().trim() !== '';
                     });
@@ -3964,7 +4251,10 @@
                     document.getElementById('saveLuBtn').disabled = false;
                     if (result.success) {
                         showMessage('luMessage', result.message, 'success');
-                        if (result.addedCount > 0) { setTimeout(loadLookupEditor, 800); }
+                        // Reload to get fresh rowNums for newly added rows
+                        if (result.addedCount > 0) {
+                            setTimeout(loadLookupEditor, 800);
+                        }
                     } else {
                         showMessage('luMessage', 'Save failed: ' + result.error, 'error');
                     }
@@ -3980,6 +4270,12 @@
         // EDIT APPLICANT FUNCTIONS (v6.8)
         // ============================================================
 
+        /**
+         * Initializes the Edit Applicant tab on first visit.
+         * Loads lookups, dropdown field map, and intake field mapping from server.
+         * Builds ae_reverseMap (AM header → AI field ID) for form population.
+         * Attaches phone formatter to ae_phoneNumber input.
+         */
         function ae_init() {
             ae_initialized = true;
             google.script.run
@@ -3987,8 +4283,11 @@
                     ae_lookups = data.lookups || {};
                     ae_fieldMapping = data.fieldMapping || {};
                     ae_reverseMap = {};
-                    for (var fid in ae_fieldMapping) { ae_reverseMap[ae_fieldMapping[fid]] = fid; }
+                    for (var fid in ae_fieldMapping) {
+                        ae_reverseMap[ae_fieldMapping[fid]] = fid;
+                    }
                     ae_populateDropdowns(data.dropdownFields || {});
+                    // Attach phone formatter
                     var ph = document.getElementById('ae_phoneNumber');
                     if (ph) {
                         ph.addEventListener('input', function (e) {
@@ -4007,12 +4306,20 @@
                 .getApplicantEditData();
         }
 
+        /**
+         * Toggles search input fields between Record ID and Name+Date modes.
+         */
         function ae_onSearchTypeChange() {
             var type = document.getElementById('ae_searchType').value;
             document.getElementById('ae_idField').style.display = (type === 'id') ? '' : 'none';
             document.getElementById('ae_nameDateFields').style.display = (type === 'nameDate') ? '' : 'none';
         }
 
+        /**
+         * Builds search criteria and calls searchRecords().
+         * Single result → ae_loadRecord() directly.
+         * Multiple results → ae_displayResults() for selection.
+         */
         function ae_doSearch() {
             var type = document.getElementById('ae_searchType').value;
             var criteria = { searchType: type };
@@ -4035,6 +4342,10 @@
                 .searchRecords(criteria);
         }
 
+        /**
+         * Routes searchRecords() response: single → load form, multiple → show list.
+         * @param {Object} result - searchRecords() return value
+         */
         function ae_handleSearch(result) {
             if (!result.success) {
                 var msg = result.notFound ? 'No matching record found.' : (result.error || 'Search failed.');
@@ -4043,10 +4354,17 @@
                 document.getElementById('ae_searchMessage').classList.remove('hidden');
                 return;
             }
-            if (result.results) { ae_displayResults(result.results); }
-            else { ae_loadRecord(result.record, result.rowIndex); }
+            if (result.results) {
+                ae_displayResults(result.results);
+            } else {
+                ae_loadRecord(result.record, result.rowIndex);
+            }
         }
 
+        /**
+         * Renders a clickable list of multiple search results for the user to select.
+         * @param {Array} results - Array of { record, rowIndex }
+         */
         function ae_displayResults(results) {
             var list = document.getElementById('ae_resultsList');
             list.innerHTML = '';
@@ -4055,11 +4373,10 @@
                 div.style.cssText = 'padding:10px 14px; border-bottom:1px solid #eee; cursor:pointer;';
                 div.onmouseover = function () { this.style.background = '#f0f4ff'; };
                 div.onmouseout = function () { this.style.background = ''; };
-                div.innerHTML =
-                    '<strong>ID: ' + r.record['ID'] + '</strong> — ' +
+                div.innerHTML = '<strong>ID: ' + r.record['ID'] + '</strong> — ' +
                     (r.record['First Name'] || '') + ' ' + (r.record['Last Name'] || '') +
                     (r.record['_archived'] ? ' <span style="color:#856404;font-size:0.8rem;">(Archived: ' + (r.record['_archiveSource'] || '') + ')</span>' : '') +
-                    '<small style="color:#555;"> | ' + (r.record['City'] || '') + ', ' + (r.record['State'] || '') +
+                    ' <small style="color:#555;"> | ' + (r.record['City'] || '') + ', ' + (r.record['State'] || '') +
                     ' | Request Date: ' + (r.record['Request Date'] || 'N/A') + '</small>';
                 (function (rec, rowIdx) { div.onclick = function () { ae_loadRecord(rec, rowIdx); }; })(r.record, r.rowIndex);
                 list.appendChild(div);
@@ -4068,12 +4385,27 @@
             document.getElementById('ae_resultsPanel').classList.remove('hidden');
         }
 
+        /**
+         * Populates all dropdowns in the edit form.
+         * Uses data-driven dropdownFields map from getApplicantEditData().
+         * Assistance Receiving (assistanceReceiving) is always populated as a dropdown
+         * from the incomeSources lookup — it is excluded from the checkbox path.
+         * Falls back to hardcoded field→lookup map for any fields not in LU_FieldMap.
+         * @param {Object} dropdownFields - { formFieldId: lookupSourceKey }
+         */
         function ae_populateDropdowns(dropdownFields) {
             var keyMap = {
-                'STATES': 'states', 'LEARNED_HOW': 'learnedHow', 'PERSON_ORG_REFERRED': 'personOrgReferred',
-                'TITLE_REFERRED': 'titleReferred', 'MILITARY': 'military', 'RACE': 'race',
-                'ETHNICITY': 'ethnicity', 'INCOME_LEVELS': 'incomeLevels', 'INCOME_SOURCES': 'incomeSources',
-                'PHONE_TYPE': 'phoneType', 'ADDRESS_TYPE': 'addressType'
+                'STATES': 'states',
+                'LEARNED_HOW': 'learnedHow',
+                'PERSON_ORG_REFERRED': 'personOrgReferred',
+                'TITLE_REFERRED': 'titleReferred',
+                'MILITARY': 'military',
+                'RACE': 'race',
+                'ETHNICITY': 'ethnicity',
+                'INCOME_LEVELS': 'incomeLevels',
+                'INCOME_SOURCES': 'incomeSources',
+                'PHONE_TYPE': 'phoneType',
+                'ADDRESS_TYPE': 'addressType'
             };
             var populated = {};
             for (var fldId in dropdownFields) {
@@ -4082,11 +4414,19 @@
                 var vals = ae_lookups[key];
                 if (vals && vals.length) { ae_populateSelect('ae_' + fldId, vals); populated[fldId] = true; }
             }
+            // Hardcoded fallbacks
             var fallbacks = {
-                'learnedHow': 'learnedHow', 'referralInfo': 'personOrgReferred', 'referrerTitle': 'titleReferred',
-                'state': 'states', 'addressType': 'addressType', 'phoneType': 'phoneType',
-                'militaryStatus': 'military', 'racialCategory': 'race', 'ethnicCategory': 'ethnicity',
-                'annualIncome': 'incomeLevels', 'assistanceReceiving': 'incomeSources'
+                'learnedHow': 'learnedHow',
+                'referralInfo': 'personOrgReferred',
+                'referrerTitle': 'titleReferred',
+                'state': 'states',
+                'addressType': 'addressType',
+                'phoneType': 'phoneType',
+                'militaryStatus': 'military',
+                'racialCategory': 'race',
+                'ethnicCategory': 'ethnicity',
+                'annualIncome': 'incomeLevels',
+                'assistanceReceiving': 'incomeSources'
             };
             for (var id in fallbacks) {
                 if (!populated[id]) {
@@ -4096,6 +4436,11 @@
             }
         }
 
+        /**
+         * Clears and repopulates a single select element, preserving the placeholder option.
+         * @param {string} elementId - Select element ID
+         * @param {Array}  values    - Array of option strings
+         */
         function ae_populateSelect(elementId, values) {
             var sel = document.getElementById(elementId);
             if (!sel || !values) return;
@@ -4107,6 +4452,15 @@
             });
         }
 
+        /**
+         * Populates the edit form from the selected applicant record.
+         * Uses ae_reverseMap to translate AM column headers → form element IDs.
+         * Handles text/select/textarea, date inputs, and radio buttons.
+         * Assistance Receiving is set on the dropdown (single value stored in AM).
+         * v6.10 - Shows archive banner and disables Save for archived records.
+         * @param {Object} rec    - Record object keyed by AM column header
+         * @param {number} rowIdx - 1-based sheet row index (null for archive records)
+         */
         function ae_loadRecord(rec, rowIdx) {
             ae_currentRecord = rec;
             ae_currentRowIndex = rowIdx;
@@ -4118,22 +4472,32 @@
                 if (!aiId) continue;
                 var val = (rec[amHeader] !== null && rec[amHeader] !== undefined) ? rec[amHeader].toString() : '';
 
+                // Named input / select / textarea with ae_ prefix
                 var el = document.getElementById('ae_' + aiId);
                 if (el) {
-                    if (el.type === 'date') { el.value = ae_toDateInput(val); }
-                    else if (aiId === 'phoneNumber') { el.value = ae_formatPhone(val); }
-                    else { el.value = val; }
+                    if (el.type === 'date') {
+                        el.value = ae_toDateInput(val);
+                    } else if (aiId === 'phoneNumber') {
+                        el.value = ae_formatPhone(val);
+                    } else {
+                        el.value = val;
+                    }
                     continue;
                 }
 
+                // Radio buttons (grouped by name, no ae_ prefix on individual inputs)
                 var radios = document.querySelectorAll('#ae_editPanel input[type="radio"][name="' + aiId + '"]');
-                if (radios.length > 0) { radios.forEach(function (r) { r.checked = (r.value === val); }); }
+                if (radios.length > 0) {
+                    radios.forEach(function (r) { r.checked = (r.value === val); });
+                }
             }
 
+            // v6.10: Archive flag — show banner, disable Save for archived records
             var isArchived = !!(rec['_archived']);
             document.getElementById('ae_archiveBanner').classList.toggle('hidden', !isArchived);
             document.getElementById('ae_archiveSourceLabel').textContent = rec['_archiveSource'] || '';
             document.getElementById('ae_saveBtn').disabled = isArchived;
+            // Also hide the bottom Save button in Section 6 if archived
             var bottomSave = document.querySelector('#ae_editPanel button.btn-primary:last-of-type');
             if (bottomSave) bottomSave.disabled = isArchived;
 
@@ -4143,6 +4507,11 @@
             document.getElementById('ae_editPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
+        /**
+         * Converts M/d/yyyy or MM/DD/YYYY date strings to YYYY-MM-DD for HTML date inputs.
+         * @param {string} val - Input date string
+         * @returns {string} YYYY-MM-DD or original value
+         */
         function ae_toDateInput(val) {
             if (!val) return '';
             if (val.indexOf('/') !== -1) {
@@ -4155,12 +4524,22 @@
             return val;
         }
 
+        /**
+         * Formats a raw digit string as (xxx) xxx-xxxx for phone display.
+         * @param {string} val - Raw or formatted phone value
+         * @returns {string} Formatted phone string
+         */
         function ae_formatPhone(val) {
             var d = (val || '').replace(/\D/g, '').substring(0, 10);
             if (d.length === 10) return '(' + d.substring(0, 3) + ') ' + d.substring(3, 6) + '-' + d.substring(6);
             return d;
         }
 
+        /**
+         * Collects all named form inputs from ae_editPanel and calls updateIntakeRecord().
+         * Phone stripped to 10 digits; signatureDate mirrored to formDate.
+         * Passes currentUser.code as updatedBy for the 3 audit columns.
+         */
         function ae_saveRecord() {
             var rowIdx = document.getElementById('ae_rowIndex').value;
             if (!rowIdx) { showMessage('ae_searchMessage', 'No record loaded.', 'error'); return; }
@@ -4169,8 +4548,11 @@
             var inputs = document.querySelectorAll('#ae_editPanel input[name], #ae_editPanel select[name], #ae_editPanel textarea[name]');
             inputs.forEach(function (inp) {
                 if (!inp.name) return;
-                if (inp.type === 'radio') { if (inp.checked) formData[inp.name] = inp.value; }
-                else { formData[inp.name] = inp.value; }
+                if (inp.type === 'radio') {
+                    if (inp.checked) formData[inp.name] = inp.value;
+                } else {
+                    formData[inp.name] = inp.value;
+                }
             });
 
             if (formData['phoneNumber']) formData['phoneNumber'] = formData['phoneNumber'].replace(/\D/g, '');
@@ -4179,6 +4561,7 @@
             google.script.run
                 .withSuccessHandler(ae_handleSave)
                 .withFailureHandler(function (e) {
+                    // Show error at search panel after returning
                     ae_backToSearch();
                     showMessage('ae_searchMessage', 'Save failed: ' + e.message, 'error');
                     document.getElementById('ae_searchMessage').classList.remove('hidden');
@@ -4186,6 +4569,11 @@
                 .updateIntakeRecord(parseInt(rowIdx), formData, currentUser ? currentUser.code : '');
         }
 
+        /**
+         * Handles updateIntakeRecord() response.
+         * Always returns to the search panel and shows the result message there.
+         * @param {Object} result - { success, message, changesCount }
+         */
         function ae_handleSave(result) {
             ae_backToSearch();
             if (result.success) {
@@ -4199,6 +4587,9 @@
             document.getElementById('ae_searchMessage').classList.remove('hidden');
         }
 
+        /**
+         * Resets the Edit Applicant tab to the search panel and clears state.
+         */
         function ae_backToSearch() {
             ae_currentRecord = null;
             ae_currentRowIndex = null;
@@ -4206,6 +4597,7 @@
             document.getElementById('ae_resultsPanel').classList.add('hidden');
             document.getElementById('ae_searchPanel').classList.remove('hidden');
         }
+
     </script>
 </body>
 </html>
