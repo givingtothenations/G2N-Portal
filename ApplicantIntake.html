@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   ApplicantIntake.html
   Public-facing applicant intake form for G2N Request Management System
   Collects personal info, address, demographics, age brackets, service preferences,
@@ -34,9 +34,10 @@
   v3.10- cancelForm() and post-submit staff fallback: removed GAS URL navigation
          which caused "You need access" auth error. window.close() always tried
          first; if blocked, shows "Please close this window" message inline.
-  v3.11- Staff mode: reads staffCode URL param (set by SV openIntakeForm()) and
-         passes it as formData.enteredBy so IntakeService writes the staff member's
-         code to the Entered By column instead of "Applicant".
+  v3.12- Staff mode autofill fix: added autocomplete="off" to email and phone
+         fields. Added 300ms delayed clear of email and phone on staff mode load
+         to override browser autofill which fires after DOMContentLoaded and
+         populates those fields with the staff member's own contact info.
 -->
 
 <!DOCTYPE html>
@@ -578,7 +579,7 @@
 
                     <div class="form-group">
                         <label>Phone Number <span class="required req-marker">*</span></label>
-                        <input type="tel" id="phoneNumber" name="phoneNumber" class="req-field" required maxlength="14" placeholder="(555) 555-5555">
+                        <input type="tel" id="phoneNumber" name="phoneNumber" class="req-field" required maxlength="14" placeholder="(555) 555-5555" autocomplete="off">
                         <div class="error-message" id="phoneNumberError">Phone must be 10 digits</div>
                     </div>
 
@@ -589,7 +590,7 @@
 
                     <div class="form-group">
                         <label>Email <span class="required req-marker">*</span></label>
-                        <input type="email" id="email" name="email" class="req-field" required>
+                        <input type="email" id="email" name="email" class="req-field" required autocomplete="off">
                         <div class="error-message" id="emailError">Please enter a valid email address</div>
                     </div>
 
@@ -841,6 +842,16 @@
 
                 // v3.5: Log staff intake session
                 logIntakeSessionToAudit('staff');
+
+                // v3.12: Clear email and phone after a short delay to override browser
+                // autofill which fires after DOMContentLoaded and populates these fields
+                // with the staff member's own contact info instead of the applicant's.
+                setTimeout(function () {
+                    var emailEl = document.getElementById('email');
+                    var phoneEl = document.getElementById('phoneNumber');
+                    if (emailEl) emailEl.value = '';
+                    if (phoneEl) phoneEl.value = '';
+                }, 300);
             } else {
                 // Normal public mode - check event info
                 loadFormData();
@@ -994,24 +1005,24 @@
         function populateDropdowns(dropdownFields) {
             // Translate uppercase LU_FieldMap Lookup Source → getIntakeLookups() keys
             var keyMap = {
-                'STATES':              'states',
-                'LEARNED_HOW':         'learnedHow',
+                'STATES': 'states',
+                'LEARNED_HOW': 'learnedHow',
                 'PERSON_ORG_REFERRED': 'personOrgReferred',
-                'TITLE_REFERRED':      'titleReferred',
-                'MILITARY':            'military',
-                'RACE':                'race',
-                'ETHNICITY':           'ethnicity',
-                'INCOME_LEVELS':       'incomeLevels',
-                'INCOME_SOURCES':      'incomeSources',
-                'PHONE_TYPE':          'phoneType',
-                'ADDRESS_TYPE':        'addressType'
+                'TITLE_REFERRED': 'titleReferred',
+                'MILITARY': 'military',
+                'RACE': 'race',
+                'ETHNICITY': 'ethnicity',
+                'INCOME_LEVELS': 'incomeLevels',
+                'INCOME_SOURCES': 'incomeSources',
+                'PHONE_TYPE': 'phoneType',
+                'ADDRESS_TYPE': 'addressType'
             };
 
             // Data-driven: populate selects from LU_FieldMap
             var populated = {};
             for (var fldId in dropdownFields) {
-                var src  = dropdownFields[fldId];
-                var key  = keyMap[src] || keyMap[src.toUpperCase()] || src;
+                var src = dropdownFields[fldId];
+                var key = keyMap[src] || keyMap[src.toUpperCase()] || src;
                 var vals = lookups[key];
                 if (vals && vals.length) {
                     populateSelect(fldId, vals);
@@ -1021,16 +1032,16 @@
 
             // Hardcoded fallback for any selects not covered by LU_FieldMap
             var fallbacks = {
-                'learnedHow':    'learnedHow',
-                'referralInfo':  'personOrgReferred',
+                'learnedHow': 'learnedHow',
+                'referralInfo': 'personOrgReferred',
                 'referrerTitle': 'titleReferred',
-                'state':         'states',
-                'addressType':   'addressType',
-                'phoneType':     'phoneType',
-                'militaryStatus':'military',
-                'racialCategory':'race',
-                'ethnicCategory':'ethnicity',
-                'annualIncome':  'incomeLevels'
+                'state': 'states',
+                'addressType': 'addressType',
+                'phoneType': 'phoneType',
+                'militaryStatus': 'military',
+                'racialCategory': 'race',
+                'ethnicCategory': 'ethnicity',
+                'annualIncome': 'incomeLevels'
             };
             for (var id in fallbacks) {
                 if (!populated[id]) {
@@ -1543,8 +1554,8 @@
                             var sigDate = document.getElementById('signatureDate').value || '';
                             if (window.opener && !window.opener.closed) {
                                 window.opener.postMessage({
-                                    type:        'newRecord',
-                                    recordId:    result.recordId,
+                                    type: 'newRecord',
+                                    recordId: result.recordId,
                                     requestDate: sigDate
                                 }, '*');
                             }

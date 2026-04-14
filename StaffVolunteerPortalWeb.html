@@ -112,6 +112,63 @@
          direct serverWebAppUrl injection. getWebAppUrlForPortal() called as
          async fallback at login if webAppUrl is still empty after injection.
          Code.gs v5.9: createTemplateFromFile restored for 'staff' doGet case.
+  v4.29- Archive record: Save button always shown and enabled (archive records are
+         editable). Removed display:none toggle that hid the button for archive
+         records. resetSearch() now explicitly resets button to visible/enabled
+         so state is guaranteed correct before the next record load.
+  v4.30- saveRecord(): sessionStorage used to survive GAS page re-evaluation when
+         focus returns from PP tab. openRecord() writes rowIndex, recordId,
+         isArchivedRecord, and archiveSource to sessionStorage. saveRecord() restores
+         all four unconditionally at entry (not gated on rowIndex being empty) so
+         archive records — which have no rowIndex — correctly restore isArchivedRecord.
+         resetSearch() clears sessionStorage keys to prevent stale reuse.
+         Fixes "No record loaded. Row index is: " for both live and archive records.
+  v4.34- Demographics completeness check: after openRecord(), sv_checkDemographics()
+         calls getDemographicsStatus() server-side (RequestService v3.3). If >= 80%
+         of LU_FieldMap Demographics-group fields are blank, an amber warning banner
+         appears in the Information section showing the blank percentage and a
+         "Complete Intake Form" button. Button opens sv_ae_modal — an inline modal
+         reusing the same AP ae_ form structure and the same server functions
+         (getApplicantEditData, updateIntakeRecord). Saves via updateIntakeRecord().
+         Warning hidden on success save and on resetSearch().
+         Note: server-side code (getApplicantEditData, updateIntakeRecord) is already
+         shared in RequestService.js — no SharedUtils change needed for that.
+         SharedUtils is server-side utilities; portal UI code stays in HTML files.
+  v4.35- displayResults(): result card label changed to "Last Service Date"; value
+         reads Last Date Served with fallback to Final Service Contact Date.
+         Date-validity guard: if the stored value does not contain '/' (e.g. a
+         distribution code like "DG2" was mistakenly stored in Last Date Served),
+         falls through to Final Service Contact Date, then the raw value.
+         Added "New Applicant" button in the search results area so staff can
+         open the Intake Form even when search results are found.
+  v4.36- saveRecord() watchdog: on first timeout auto-retries the save once silently
+         (root cause was logAudit appendRow deadlock — fixed in Code.js v6.4, but
+         auto-retry remains as a safety net). Second timeout shows error message
+         with a manual Retry button. Watchdog stays at 45s for all record types.
+  v4.33- Add/Edit Products buttons beside each Received Product Code dropdown.
+         Received Product Code dropdown. Hidden when blank; shown when a value is
+         selected (onchange updatePPButton) or when openRecord finds an existing value.
+         Clicking calls openPPForRecord() which launches PP for the current record
+         (sets ppOpenedMidEdit=true). Cleared by resetSearch() between records.
+         New functions: updatePPButton(btnId,val), openPPForRecord().
+  v4.32- visibilitychange: added ppWasOpened flag (set only in launchProductPortal).
+         Previously the handler fired on ANY browser tab switch — switching to email
+         or another tab and back would reset the portal to search mid-edit.
+         Now only triggers reset/stay logic when PP was actually opened.
+         visibilitychange (ppOpenedMidEdit path): Save button briefly disabled for
+         1.5 seconds on return from PP so the GAS iframe has time to re-initialise.
+         Prevents the silent hang where neither withSuccessHandler nor withFailureHandler
+         fires when google.script.run is called immediately after returning from a
+         backgrounded tab (root cause: Chrome/Edge tab throttling suspends the GAS
+         iframe transport while SV is in background during PP use).
+         saveRecord(): Save button disabled while in-flight (prevents double-click).
+         45-second watchdog hides spinner and shows recoverable error if GAS never
+         responds, so user can retry without a full page reload.
+  v4.31- openRecord(): moved 'var isArchived' declaration to TOP of function, before
+         first use. JavaScript var-hoisting meant isArchived was undefined when
+         isArchivedRecord DOM field and sessionStorage were written (lines ~1532/1540),
+         so archive records always stored '' — making the v4.30 restore permanently
+         ineffective for archive records. Root cause of persistent save error.
 -->
 
 <!DOCTYPE html>
@@ -297,6 +354,23 @@
             .btn-danger:hover {
                 background: #c5221f;
                 transform: translateY(-1px);
+            }
+
+        /* v4.33: Small Add/Edit Products button beside Received Product Code dropdowns */
+        .btn-pp-edit {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+            .btn-pp-edit:hover {
+                background: #1557b0;
             }
 
         .btn-block {
@@ -554,6 +628,9 @@
                 <div id="searchResults" class="hidden">
                     <h3>Search Results (<span id="resultCount">0</span> found)</h3>
                     <div id="resultsList" class="results-list"></div>
+                    <div style="margin-top:12px; text-align:right;">
+                        <button class="btn-success" onclick="openIntakeForm()">+ New Applicant</button>
+                    </div>
                 </div>
             </div>
 
@@ -586,11 +663,14 @@
                 <!-- v4.18: Archive banner — shown only for archived records (read-only) -->
                 <div id="archiveBanner" class="alert hidden" style="background:#fff3cd; border:1px solid #ffc107; color:#856404; margin-bottom:12px;">
                     <strong>📦 Archived Record</strong> — Source: <span id="archiveSourceLabel"></span><br>
-                    <small>This record is in the archive and cannot be edited. Displayed for reference only.</small>
+                    <small>This record is in the archive. Changes will be saved back to the archive workbook.</small>
                 </div>
                 <form id="requestForm">
                     <input type="hidden" id="rowIndex" value="">
                     <input type="hidden" id="recordId" value="">
+                    <!-- v4.29: archive routing fields -->
+                    <input type="hidden" id="isArchivedRecord" value="">
+                    <input type="hidden" id="archiveSource" value="">
 
                     <!-- Information Section (Read-Only) -->
                     <h3>Information</h3>
@@ -621,6 +701,15 @@
                     <div class="form-group" id="adminNotesGroup" style="display:none;">
                         <label>Admin Notes:</label>
                         <textarea id="fld_AdminNotes" class="admin-notes" placeholder="Internal admin notes about this applicant..."></textarea>
+                    </div>
+
+                    <!-- v4.34: Demographics completeness warning — shown when >= 80% of Demographics fields are blank -->
+                    <div id="demographicsWarning" class="hidden" style="background:#fff8e1;border-left:4px solid #f9a825;padding:10px 14px;border-radius:4px;margin-top:10px;">
+                        <strong>⚠ Incomplete Intake Data</strong><br>
+                        <small id="demographicsWarningText" style="color:#5d4037;"></small><br>
+                        <button type="button" onclick="sv_ae_open()" style="margin-top:8px;padding:5px 14px;background:#1a73e8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;">
+                            ✏ Complete Intake Form
+                        </button>
                     </div>
 
                     <!-- Staff Entry Section -->
@@ -693,15 +782,24 @@
                     </div>
                     <div class="form-group">
                         <label>Received Product Code 1:</label>
-                        <select id="fld_ReceivedProductCode1" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <select id="fld_ReceivedProductCode1" onchange="checkReceivedProductCode(this);updatePPButton('ppBtn1',this.value);" style="flex:1;"><option value="">-- Select --</option></select>
+                            <button type="button" id="ppBtn1" class="btn-pp-edit hidden" onclick="openPPForRecord()" title="Add or edit product entries for this record">&#9998; Products</button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Received Product Code 2:</label>
-                        <select id="fld_ReceivedProductCode2" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <select id="fld_ReceivedProductCode2" onchange="checkReceivedProductCode(this);updatePPButton('ppBtn2',this.value);" style="flex:1;"><option value="">-- Select --</option></select>
+                            <button type="button" id="ppBtn2" class="btn-pp-edit hidden" onclick="openPPForRecord()" title="Add or edit product entries for this record">&#9998; Products</button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Received Product Code 3:</label>
-                        <select id="fld_ReceivedProductCode3" onchange="checkReceivedProductCode(this)"><option value="">-- Select --</option></select>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <select id="fld_ReceivedProductCode3" onchange="checkReceivedProductCode(this);updatePPButton('ppBtn3',this.value);" style="flex:1;"><option value="">-- Select --</option></select>
+                            <button type="button" id="ppBtn3" class="btn-pp-edit hidden" onclick="openPPForRecord()" title="Add or edit product entries for this record">&#9998; Products</button>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Funding Source:</label>
@@ -737,6 +835,77 @@
         </div><!-- end mainPortal -->
     </div>
 
+    <!-- v4.34: Intake Edit Modal — Edit Applicants Intake form, triggered from demographics warning -->
+    <div id="sv_ae_modal" class="hidden" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.55);z-index:9000;overflow-y:auto;">
+        <div style="background:white;max-width:720px;margin:30px auto;border-radius:8px;padding:24px;position:relative;">
+            <button type="button" onclick="sv_ae_close()" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:22px;cursor:pointer;color:#555;">✕</button>
+            <h3 style="color:#1a73e8;margin-bottom:4px;">Complete Intake Form</h3>
+            <p style="color:#555;font-size:13px;margin-bottom:16px;">Update missing demographic and intake information. No required-field validation is enforced.</p>
+            <div id="sv_ae_message" class="alert hidden" style="margin-bottom:12px;"></div>
+            <input type="hidden" id="sv_ae_rowIndex">
+
+            <!-- Demographics fields from the AI intake form — mirrors AP Edit Applicant -->
+            <h4 style="color:#1a73e8;border-bottom:2px solid #e8f0fe;padding-bottom:4px;margin:14px 0 8px;">Referral</h4>
+            <div class="form-group">
+                <label>How did you learn about our program?</label>
+                <select id="sv_ae_learnedHow" name="learnedHow" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Person or organization that referred you</label>
+                <select id="sv_ae_referralInfo" name="referralInfo" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Title/position of referrer</label>
+                <select id="sv_ae_referrerTitle" name="referrerTitle" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Referrer's name</label>
+                <input type="text" id="sv_ae_referrerName" name="referrerName" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;">
+            </div>
+
+            <h4 style="color:#1a73e8;border-bottom:2px solid #e8f0fe;padding-bottom:4px;margin:14px 0 8px;">Demographics</h4>
+            <div class="form-group">
+                <label>Military Status</label>
+                <select id="sv_ae_militaryStatus" name="militaryStatus" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Racial Category</label>
+                <select id="sv_ae_racialCategory" name="racialCategory" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Ethnic Category</label>
+                <select id="sv_ae_ethnicCategory" name="ethnicCategory" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Currently Homeless?</label>
+                <div>
+                    <label><input type="radio" name="isHomeless" value="Yes"> Yes</label>&nbsp;&nbsp;
+                    <label><input type="radio" name="isHomeless" value="No"> No</label>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Currently Employed?</label>
+                <div>
+                    <label><input type="radio" name="isEmployed" value="Yes"> Yes</label>&nbsp;&nbsp;
+                    <label><input type="radio" name="isEmployed" value="No"> No</label>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Annual Household Income</label>
+                <select id="sv_ae_annualIncome" name="annualIncome" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+            <div class="form-group">
+                <label>Assistance Received</label>
+                <select id="sv_ae_assistanceReceiving" name="assistanceReceiving" style="width:100%;padding:7px;border:1px solid #ccc;border-radius:4px;"><option value="">-- Select --</option></select>
+            </div>
+
+            <div style="margin-top:18px;display:flex;gap:10px;">
+                <button type="button" onclick="sv_ae_save()" style="padding:10px 24px;background:#34a853;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;">Save Changes</button>
+                <button type="button" onclick="sv_ae_close()" style="padding:10px 20px;background:#f1f3f4;color:#333;border:none;border-radius:6px;cursor:pointer;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Thank You Overlay (shown on exit for Staff/Volunteer) -->
     <div id="thankYouOverlay" class="thank-you-overlay hidden">
         <div class="thank-you-box">
@@ -765,6 +934,7 @@
         var newRecordId = '';
         var newRecordRequestDate = '';
         var ppOpenedMidEdit = false; // v4.3: true when PP opened via ReceivedProductCode onchange (mid-edit)
+        var ppWasOpened = false;     // v4.32: true whenever PP is opened from this session; guards visibilitychange
 
         /**
          * Formats a 10-digit phone number as (XXX) XXX-XXXX.
@@ -805,7 +975,6 @@
                     }
                 })
                 .withFailureHandler(function (e) {
-                    console.error('Session check failed:', e);
                     document.getElementById('loginSection').classList.remove('hidden');
                     document.getElementById('mainPortal').classList.add('hidden');
                 })
@@ -859,10 +1028,27 @@
         // Auto-refresh when tab regains focus (e.g. after PP tab closes)
         // v3.8: After PP closes, reset to search with a brief message
         // v4.3: If PP was opened mid-edit (via ReceivedProductCode onchange), stay in edit mode
+        // v4.32: Only fires reset logic when PP was actually opened (ppWasOpened flag).
+        //        Previously fired on ANY tab switch (email, browser, etc.), resetting to search
+        //        even when the user had simply switched tabs briefly.
         document.addEventListener('visibilitychange', function () {
-            if (!document.hidden && currentUser) {
+            if (!document.hidden && currentUser && ppWasOpened) {
+                ppWasOpened = false;   // consume the flag
                 var editSection = document.getElementById('editSection');
                 if (editSection && !editSection.classList.contains('hidden')) {
+                    // v4.32: Briefly disable Save while GAS iframe re-initialises after
+                    // returning from the PP tab. Prevents a google.script.run call being
+                    // made before the GAS runtime is fully ready, which causes the call
+                    // to silently hang with neither success nor failure handler firing.
+                    var svSaveBtnEl = document.getElementById('svSaveBtn');
+                    if (svSaveBtnEl) {
+                        svSaveBtnEl.disabled = true;
+                        svSaveBtnEl.title = 'Please wait...';
+                        setTimeout(function () {
+                            svSaveBtnEl.disabled = false;
+                            svSaveBtnEl.title = '';
+                        }, 1500);
+                    }
                     if (ppOpenedMidEdit) {
                         ppOpenedMidEdit = false;
                         showMessage('saveMessage', 'Returned from Product Portal. You may continue editing.', 'info');
@@ -929,7 +1115,6 @@
                         document.getElementById('thankYouOverlay').classList.remove('hidden');
                     })
                     .withFailureHandler(function (e) {
-                        console.error('Logout error:', e);
                         currentUser = null;
                         document.getElementById('spinnerOverlay').classList.add('hidden');
                         document.getElementById('mainPortal').classList.add('hidden');
@@ -982,7 +1167,6 @@
                     document.getElementById('newRecordIdDisplay').textContent = nrId;
                 }
             } catch (e) {
-                console.log('URL params not available (expected in iframe):', e);
             }
         }
 
@@ -1030,6 +1214,7 @@
                 + '&recordId=' + encodeURIComponent(recId)
                 + '&requestDate=' + encodeURIComponent(reqDate)
                 + '&t=' + Date.now();
+            ppWasOpened = true;   // v4.32: signal visibilitychange that PP was actually opened
             window.open(ppUrl, '_blank');
         }
 
@@ -1037,8 +1222,7 @@
          * Opens PP in a new tab when DR or PF is selected in any Received Product Code field.
          * v4.1 - New function
          * v4.3 - Sets ppOpenedMidEdit=true so visibilitychange stays in edit mode
-         * v4.22- Reverted v4.17: PF should also launch PP (PP searches DR/PF_Products
-         *        by record ID and presents existing rows or LU_Products list).
+         * v4.22- Reverted v4.17: PF should also launch PP
          * @param {HTMLSelectElement} sel - The changed select element
          */
         function checkReceivedProductCode(sel) {
@@ -1051,6 +1235,38 @@
                 ppOpenedMidEdit = true;
                 launchProductPortal(recId, reqDate);
             }
+        }
+
+        /**
+         * Shows or hides a Products button based on whether a code dropdown has a value.
+         * v4.33: Called from onchange of each Received Product Code dropdown.
+         * @param {string} btnId - ID of the button element (ppBtn1/ppBtn2/ppBtn3)
+         * @param {string} val   - Current dropdown value
+         */
+        function updatePPButton(btnId, val) {
+            var btn = document.getElementById(btnId);
+            if (!btn) return;
+            if (val) {
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Opens the Product Portal for the currently loaded record.
+         * Used by the ✎ Products buttons next to Received Product Code dropdowns.
+         * v4.33: New function. Mirrors launchProductPortal but reads record from DOM.
+         */
+        function openPPForRecord() {
+            var recId = document.getElementById('recordId').value;
+            var reqDate = document.getElementById('fld_RequestDate').value;
+            if (!recId || !reqDate) {
+                showMessage('saveMessage', 'Record ID or Request Date missing — please save the record first.', 'error');
+                return;
+            }
+            ppOpenedMidEdit = true;
+            launchProductPortal(recId, reqDate);
         }
 
         /**
@@ -1155,7 +1371,6 @@
                     if (data.fieldMap && Object.keys(data.fieldMap).length > 0) {
                         FIELD_MAP = data.fieldMap;
                     } else {
-                        console.warn('getPortalData returned empty fieldMap — LU_FieldMap may be missing Editable/Form Section columns');
                     }
 
                     // Update static <label> text from Display Labels in LU_FieldMap.
@@ -1169,7 +1384,6 @@
                     populateDropdowns(data.dropdownFields || {});
                 })
                 .withFailureHandler(function (e) {
-                    console.error('Portal data load error:', e);
                 })
                 .getPortalData();
         }
@@ -1336,7 +1550,6 @@
                     }
                 })
                 .withFailureHandler(function (e) {
-                    console.error('SchedDisbCode lookup error:', e);
                 })
                 .getSchedDisbCodeDetails(code);
         }
@@ -1489,12 +1702,20 @@
                 var archiveLabel = r.record['_archived']
                     ? ' <span style="color:#856404;font-size:0.8rem;font-weight:600;">(Archived: ' + (r.record['_archiveSource'] || '') + ')</span>'
                     : '';
+                var lastServiceRaw = r.record['Last Date Served'] || '';
+                var finalServiceRaw = r.record['Final Service Contact Date'] || '';
+                // Guard: only use Last Date Served if it looks like a date (contains '/')
+                var lastServiceDate = (lastServiceRaw && lastServiceRaw.toString().indexOf('/') !== -1)
+                    ? lastServiceRaw
+                    : (finalServiceRaw && finalServiceRaw.toString().indexOf('/') !== -1)
+                        ? finalServiceRaw
+                        : (lastServiceRaw || finalServiceRaw || 'N/A');
                 div.innerHTML = '<strong>ID: ' + r.record['ID'] + '</strong> - ' +
                     (r.record['First Name'] || '') + ' ' + (r.record['Last Name'] || '') +
                     archiveLabel +
                     '<small>' + (r.record['City'] || '') + ', ' + (r.record['State'] || '') +
                     ' | Request Date: ' + (r.record['Request Date'] || 'N/A') +
-                    ' | Final Service Date: ' + (r.record['Final Service Contact Date'] || 'N/A') +
+                    ' | Last Service Date: ' + lastServiceDate +
                     ' | Status: ' + (r.record['Service Status'] || 'N/A') + '</small>';
                 div.onclick = function () {
                     openRecord(r.record, r.rowIndex);
@@ -1517,9 +1738,26 @@
             document.getElementById('notFoundSection').classList.add('hidden');
             document.getElementById('editSection').classList.remove('hidden');
 
+            // v4.31: declare isArchived BEFORE any use — var hoisting caused it to be
+            // undefined at lines 1532/1540, so isArchivedRecord and sessionStorage
+            // always stored '' for archive records, making the save restore fail.
+            var isArchived = !!(rec && rec['_archived']);
+
             // Set hidden fields
             document.getElementById('rowIndex').value = rowIdx;
             document.getElementById('recordId').value = rec['ID'];
+            // v4.29: store archive routing info for saveRecord()
+            document.getElementById('isArchivedRecord').value = isArchived ? '1' : '';
+            document.getElementById('archiveSource').value = (rec && rec['_archiveSource']) || '';
+
+            // v4.30: persist rowIndex/recordId in sessionStorage so they survive
+            // a GAS page re-evaluation when focus returns from the PP tab
+            try {
+                sessionStorage.setItem('sv_rowIndex', rowIdx != null ? String(rowIdx) : '');
+                sessionStorage.setItem('sv_recordId', rec['ID'] != null ? String(rec['ID']) : '');
+                sessionStorage.setItem('sv_isArchived', isArchived ? '1' : '');
+                sessionStorage.setItem('sv_archiveSrc', (rec && rec['_archiveSource']) || '');
+            } catch (e) { /* sessionStorage not available — non-fatal */ }
 
             // Populate Request Date — not in FIELD_MAP (read-only display),
             // keyed as 'Request Date' on Sheets path, 'signature_date' on MySQL fallback.
@@ -1542,13 +1780,13 @@
 
             // Populate Information Section (read-only)
             // v4.12/v4.18: archive banner, Admin Notes visibility, Save button — all null-guarded
-            var isArchived = !!(rec && rec['_archived']);
+            // v4.31: isArchived moved to top of function — declaration removed here
             var archiveBannerEl = document.getElementById('archiveBanner');
             if (archiveBannerEl) archiveBannerEl.classList.toggle('hidden', !isArchived);
             var archiveSourceEl = document.getElementById('archiveSourceLabel');
             if (archiveSourceEl) archiveSourceEl.textContent = (rec && rec['_archiveSource']) || '';
             var svSaveBtnEl = document.getElementById('svSaveBtn');
-            if (svSaveBtnEl) svSaveBtnEl.style.display = isArchived ? 'none' : '';
+            if (svSaveBtnEl) { svSaveBtnEl.disabled = false; svSaveBtnEl.title = ''; svSaveBtnEl.style.display = ''; }
             var adminNotesGroupEl = document.getElementById('adminNotesGroup');
             if (adminNotesGroupEl) {
                 adminNotesGroupEl.style.display = (currentUser && currentUser.isAdmin) ? '' : 'none';
@@ -1608,23 +1846,63 @@
                 var completionFundingSel = document.getElementById('fld_FundingSource');
                 if (completionFundingSel) completionFundingSel.value = fundingCodeVal;
             }
+
+            // v4.33: Show/hide the ✎ Products buttons based on existing code values
+            updatePPButton('ppBtn1', (document.getElementById('fld_ReceivedProductCode1') || {}).value || '');
+            updatePPButton('ppBtn2', (document.getElementById('fld_ReceivedProductCode2') || {}).value || '');
+            updatePPButton('ppBtn3', (document.getElementById('fld_ReceivedProductCode3') || {}).value || '');
+
+            // v4.34: Demographic completeness check — async, non-blocking
+            var archSrcForDemo = (rec && rec['_archiveSource']) ? rec['_archiveSource'] : '';
+            sv_checkDemographics(rec['ID'], archSrcForDemo);
         }
 
         // ============ SAVE ============
 
         function saveRecord() {
+            // v4.30 (fix): unconditionally restore hidden field state from sessionStorage
+            // if lost when the browser returned focus from the PP tab.
+            // Must run before any checks — archive records have no rowIndex so the
+            // previous conditional restore never fired, leaving isArchivedRecord blank.
+            try {
+                var rowEl = document.getElementById('rowIndex');
+                var archEl = document.getElementById('isArchivedRecord');
+                var srcEl = document.getElementById('archiveSource');
+                var recIdEl = document.getElementById('recordId');
+                // Only restore when state appears lost (both rowIndex and isArchivedRecord empty)
+                if (!rowEl.value && !archEl.value) {
+                    var storedIdx = sessionStorage.getItem('sv_rowIndex') || '';
+                    var storedRecId = sessionStorage.getItem('sv_recordId') || '';
+                    var storedIsArch = sessionStorage.getItem('sv_isArchived') || '';
+                    var storedArchSrc = sessionStorage.getItem('sv_archiveSrc') || '';
+                    if (storedRecId || storedIdx || storedIsArch) {
+                        rowEl.value = storedIdx;
+                        recIdEl.value = storedRecId;
+                        archEl.value = storedIsArch;
+                        srcEl.value = storedArchSrc;
+                    }
+                }
+            } catch (e) { /* sessionStorage not available — non-fatal */ }
+
             var rowIdx = document.getElementById('rowIndex').value;
 
-            // Use currentRowIndex if hidden field is empty
+            // Use currentRowIndex if hidden field is still empty after sessionStorage restore
             if (!rowIdx && currentRowIndex) {
                 rowIdx = currentRowIndex;
             }
 
-            // v4.9: accept G2N-NNNNN (MySQL path) as a valid rowIndex
-            var isG2N = typeof rowIdx === 'string' && rowIdx.startsWith('G2N-');
-            if (!rowIdx || (!isG2N && isNaN(parseInt(rowIdx)))) {
-                showMessage('saveMessage', 'Error: No record loaded. Row index is: ' + rowIdx, 'error');
-                return;
+            // v4.29: archive records route to updateArchiveRecord() — no rowIndex needed
+            var isArchivedRec = document.getElementById('isArchivedRecord').value === '1';
+            var archiveSrc = document.getElementById('archiveSource').value;
+            var recId = document.getElementById('recordId').value;
+
+            if (!isArchivedRec) {
+                // v4.9: accept G2N-NNNNN (MySQL path) as a valid rowIndex
+                var isG2N = typeof rowIdx === 'string' && rowIdx.startsWith('G2N-');
+                if (!rowIdx || (!isG2N && isNaN(parseInt(rowIdx)))) {
+                    showMessage('saveMessage', 'Error: No record loaded. Row index is: ' + rowIdx, 'error');
+                    return;
+                }
             }
 
             var data = {};
@@ -1662,24 +1940,234 @@
             setSpinnerText('Saving...');
             document.getElementById('spinnerOverlay').classList.remove('hidden');
 
+            // v4.32: Disable Save button while save is in-flight (prevent double-click / re-entry).
+            // Re-enabled in both success and failure handlers.
+            var svSaveBtnEl = document.getElementById('svSaveBtn');
+            if (svSaveBtnEl) { svSaveBtnEl.disabled = true; }
+
+            // v4.32: Watchdog — if GAS never responds within 45s, auto-retry once.
+            // v4.36: On first timeout, silently re-fires saveRecord(). If it times out
+            // again, shows error with a manual Retry button. Root cause (logAudit
+            // appendRow deadlock) fixed in Code.js v6.4; auto-retry is a safety net.
+            var saveAttempt = (saveRecord._attempt || 0) + 1;
+            saveRecord._attempt = saveAttempt;
+            var saveWatchdog = setTimeout(function () {
+                if (!document.getElementById('spinnerOverlay').classList.contains('hidden')) {
+                    document.getElementById('spinnerOverlay').classList.add('hidden');
+                    if (svSaveBtnEl) { svSaveBtnEl.disabled = false; }
+                    if (saveAttempt < 2) {
+                        // First timeout — auto-retry silently
+                        showMessage('saveMessage', 'Server slow to respond — retrying save...', 'info');
+                        saveRecord();
+                    } else {
+                        // Second timeout — show error with manual retry button
+                        saveRecord._attempt = 0;
+                        showMessage('saveMessage',
+                            'Save timed out after two attempts. Your changes may or may not have been saved. ' +
+                            'Please search for the record to verify, then ' +
+                            '<button class="btn-secondary" style="margin-left:6px;padding:4px 12px;" onclick="saveRecord._attempt=0;saveRecord()">Retry Save</button>',
+                            'error');
+                    }
+                }
+            }, 45000);
+
+            function finishSave() {
+                clearTimeout(saveWatchdog);
+                saveRecord._attempt = 0; // v4.36: reset retry counter on any real response
+                document.getElementById('spinnerOverlay').classList.add('hidden');
+                if (svSaveBtnEl) { svSaveBtnEl.disabled = false; }
+            }
+
+            // v4.29: Route to correct server function based on archive flag
+            if (isArchivedRec) {
+                // v4.36 diagnostic: log to browser console to verify params before server call
+                try {
+                    console.log('[SV save] updateArchiveRecord: recId=' + recId +
+                        ' archiveSrc="' + archiveSrc + '" dataKeys=' + Object.keys(data).length);
+                } catch (logErr) { /* non-fatal */ }
+                google.script.run
+                    .withSuccessHandler(function (result) {
+                        finishSave();
+                        if (result.success) {
+                            showMessage('saveMessage', result.message + ' (' + result.changesCount + ' fields updated) — Returning to search...', 'success');
+                            setTimeout(function () { resetSearch(); }, 2000);
+                        } else {
+                            showMessage('saveMessage', 'Error: ' + result.error, 'error');
+                        }
+                    })
+                    .withFailureHandler(function (e) {
+                        finishSave();
+                        showMessage('saveMessage', 'Error: ' + e.message, 'error');
+                    })
+                    .updateArchiveRecord(recId, archiveSrc, data);
+            } else {
+                var isG2N = typeof rowIdx === 'string' && rowIdx.startsWith('G2N-');
+                google.script.run
+                    .withSuccessHandler(function (result) {
+                        finishSave();
+                        if (result.success) {
+                            showMessage('saveMessage', result.message + ' (' + result.changesCount + ' fields updated) — Returning to search...', 'success');
+                            setTimeout(function () { resetSearch(); }, 2000);
+                        } else {
+                            showMessage('saveMessage', 'Error: ' + result.error, 'error');
+                        }
+                    })
+                    .withFailureHandler(function (e) {
+                        finishSave();
+                        showMessage('saveMessage', 'Error: ' + e.message, 'error');
+                    })
+                    .updateRequest(isG2N ? rowIdx : parseInt(rowIdx), data);
+            }
+        }
+
+        // ============ DEMOGRAPHICS CHECK & INTAKE EDIT ============
+
+        var sv_ae_lookups = null;
+        var sv_ae_reverseMap = {};
+
+        /**
+         * Called from openRecord() after populating fields.
+         * Fires getDemographicsStatus() and shows the warning banner if >= 80% blank.
+         * v4.34 - New function.
+         */
+        function sv_checkDemographics(recordId, archiveSource) {
+            document.getElementById('demographicsWarning').classList.add('hidden');
             google.script.run
                 .withSuccessHandler(function (result) {
-                    document.getElementById('spinnerOverlay').classList.add('hidden');
+                    if (!result || !result.success) return;
+                    if (result.isMostlyBlank) {
+                        var pct = result.blankPct || 0;
+                        document.getElementById('demographicsWarningText').textContent =
+                            pct + '% of demographics fields are blank (' + result.blankCount +
+                            ' of ' + result.totalCount + ' fields missing). ' +
+                            'Click below to complete the intake form.';
+                        document.getElementById('demographicsWarning').classList.remove('hidden');
+                    }
+                })
+                .withFailureHandler(function () { /* non-fatal */ })
+                .getDemographicsStatus(recordId, archiveSource || '');
+        }
+
+        /**
+         * Opens the intake edit modal for the currently loaded record.
+         * Lazy-loads lookups + field mapping on first open.
+         * v4.34 - New function.
+         */
+        function sv_ae_open() {
+            var recId = document.getElementById('recordId').value;
+            var rowIdx = document.getElementById('rowIndex').value;
+            if (!recId) return;
+            document.getElementById('sv_ae_rowIndex').value = rowIdx || '';
+            document.getElementById('sv_ae_message').classList.add('hidden');
+
+            // Populate dropdowns if not yet loaded
+            if (!sv_ae_lookups) {
+                google.script.run
+                    .withSuccessHandler(function (data) {
+                        sv_ae_lookups = data.lookups || {};
+                        sv_ae_reverseMap = {};
+                        for (var fid in (data.fieldMapping || {})) {
+                            sv_ae_reverseMap[data.fieldMapping[fid]] = fid;
+                        }
+                        sv_ae_populateDropdowns(data.dropdownFields || {}, sv_ae_lookups);
+                        sv_ae_fillFromRecord();
+                    })
+                    .withFailureHandler(function (e) {
+                        document.getElementById('sv_ae_message').textContent = 'Error loading form: ' + e.message;
+                        document.getElementById('sv_ae_message').className = 'alert alert-error';
+                        document.getElementById('sv_ae_message').classList.remove('hidden');
+                    })
+                    .getApplicantEditData();
+            } else {
+                sv_ae_fillFromRecord();
+            }
+            document.getElementById('sv_ae_modal').classList.remove('hidden');
+        }
+
+        /** Populates dropdowns in the modal from lookups data. */
+        function sv_ae_populateDropdowns(dropdownFields, lookups) {
+            var keyMap = {
+                'LEARNED_HOW': 'learnedHow', 'PERSON_ORG_REFERRED': 'personOrgReferred',
+                'TITLE_REFERRED': 'titleReferred', 'MILITARY': 'military',
+                'RACE': 'race', 'ETHNICITY': 'ethnicity',
+                'INCOME_LEVELS': 'incomeLevels', 'INCOME_SOURCES': 'incomeSources'
+            };
+            var fallbacks = {
+                'learnedHow': 'learnedHow', 'referralInfo': 'personOrgReferred',
+                'referrerTitle': 'titleReferred', 'militaryStatus': 'military',
+                'racialCategory': 'race', 'ethnicCategory': 'ethnicity',
+                'annualIncome': 'incomeLevels', 'assistanceReceiving': 'incomeSources'
+            };
+            for (var id in fallbacks) {
+                var vals = lookups[fallbacks[id]];
+                if (vals) sv_ae_fillSelect('sv_ae_' + id, vals);
+            }
+        }
+
+        function sv_ae_fillSelect(elId, values) {
+            var sel = document.getElementById(elId);
+            if (!sel || !values) return;
+            while (sel.options.length > 1) sel.remove(1);
+            values.forEach(function (v) {
+                var opt = document.createElement('option');
+                opt.value = v; opt.textContent = v; sel.appendChild(opt);
+            });
+        }
+
+        /** Fills modal inputs from the currently loaded currentRecord. */
+        function sv_ae_fillFromRecord() {
+            if (!currentRecord) return;
+            for (var amHeader in currentRecord) {
+                var aiId = sv_ae_reverseMap[amHeader];
+                if (!aiId) continue;
+                var val = (currentRecord[amHeader] !== null && currentRecord[amHeader] !== undefined)
+                    ? currentRecord[amHeader].toString() : '';
+                var el = document.getElementById('sv_ae_' + aiId);
+                if (el) { el.value = val; continue; }
+                var radios = document.querySelectorAll('#sv_ae_modal input[type="radio"][name="' + aiId + '"]');
+                if (radios.length > 0) radios.forEach(function (r) { r.checked = (r.value === val); });
+            }
+        }
+
+        /** Saves the intake edit form via updateIntakeRecord(). */
+        function sv_ae_save() {
+            var rowIdx = document.getElementById('sv_ae_rowIndex').value;
+            if (!rowIdx) {
+                document.getElementById('sv_ae_message').textContent = 'No row index — record may be archived. Archive edit not supported here.';
+                document.getElementById('sv_ae_message').className = 'alert alert-error';
+                document.getElementById('sv_ae_message').classList.remove('hidden');
+                return;
+            }
+            var formData = {};
+            var inputs = document.querySelectorAll('#sv_ae_modal input[name], #sv_ae_modal select[name], #sv_ae_modal textarea[name]');
+            inputs.forEach(function (inp) {
+                if (!inp.name) return;
+                if (inp.type === 'radio') { if (inp.checked) formData[inp.name] = inp.value; }
+                else { formData[inp.name] = inp.value; }
+            });
+            google.script.run
+                .withSuccessHandler(function (result) {
                     if (result.success) {
-                        // v4.4: PP launched only via checkReceivedProductCode onchange.
-                        // Save always returns to search — no PP launch on submit.
-                        showMessage('saveMessage', result.message + ' (' + result.changesCount + ' fields updated) — Returning to search...', 'success');
-                        setTimeout(function () { resetSearch(); }, 2000);
+                        sv_ae_close();
+                        document.getElementById('demographicsWarning').classList.add('hidden');
+                        showMessage('saveMessage', 'Intake form saved — ' + (result.changesCount || 0) + ' field(s) updated.', 'success');
                     } else {
-                        showMessage('saveMessage', 'Error: ' + result.error, 'error');
+                        document.getElementById('sv_ae_message').textContent = result.error || 'Save failed.';
+                        document.getElementById('sv_ae_message').className = 'alert alert-error';
+                        document.getElementById('sv_ae_message').classList.remove('hidden');
                     }
                 })
                 .withFailureHandler(function (e) {
-                    document.getElementById('spinnerOverlay').classList.add('hidden');
-                    console.error('Save failed:', e);
-                    showMessage('saveMessage', 'Error: ' + e.message, 'error');
+                    document.getElementById('sv_ae_message').textContent = 'Error: ' + e.message;
+                    document.getElementById('sv_ae_message').className = 'alert alert-error';
+                    document.getElementById('sv_ae_message').classList.remove('hidden');
                 })
-                .updateRequest(isG2N ? rowIdx : parseInt(rowIdx), data);
+                .updateIntakeRecord(parseInt(rowIdx), formData, currentUser ? currentUser.code : '');
+        }
+
+        /** Closes the modal. */
+        function sv_ae_close() {
+            document.getElementById('sv_ae_modal').classList.add('hidden');
         }
 
         // ============ RESET / UTILITIES ============
@@ -1697,8 +2185,29 @@
             document.getElementById('searchFirstName').value = '';
             document.getElementById('searchLastName').value = '';
             document.getElementById('searchDate').value = '';
+            // v4.29: reset save button state so it's correct when next record opens
+            var svSaveBtnEl = document.getElementById('svSaveBtn');
+            if (svSaveBtnEl) { svSaveBtnEl.disabled = false; svSaveBtnEl.title = ''; svSaveBtnEl.style.display = ''; }
+            // v4.29: reset archive routing fields
+            document.getElementById('isArchivedRecord').value = '';
+            document.getElementById('archiveSource').value = '';
+            // v4.33: hide PP buttons so they don't persist to the next record
+            ['ppBtn1', 'ppBtn2', 'ppBtn3'].forEach(function (id) {
+                var btn = document.getElementById(id);
+                if (btn) btn.classList.add('hidden');
+            });
+            // v4.34: hide demographics warning
+            var demoWarn = document.getElementById('demographicsWarning');
+            if (demoWarn) demoWarn.classList.add('hidden');
             currentRecord = null;
             currentRowIndex = null;
+            // v4.30: clear sessionStorage so a stale rowIndex cannot be reused for the next record
+            try {
+                sessionStorage.removeItem('sv_rowIndex');
+                sessionStorage.removeItem('sv_recordId');
+                sessionStorage.removeItem('sv_isArchived');
+                sessionStorage.removeItem('sv_archiveSrc');
+            } catch (e) { /* non-fatal */ }
         }
 
         function showMessage(id, msg, type) {

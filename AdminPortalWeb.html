@@ -131,6 +131,9 @@
          the table is never empty on first visit.
          Manage Dropdowns selector: added SCHED_DISB_CODES and REPORT_COLUMNS entries.
          handleDropdownSelect nameMap: added SCHED_DISB_CODES and REPORT_COLUMNS.
+  v7.4 - Edit Applicant email field: added autocomplete="off" to prevent browser
+         autofill from populating the applicant's email field with the admin's
+         own email address when creating or editing a record.
 -->
 
 <!DOCTYPE html>
@@ -1577,7 +1580,7 @@
                 </div>
                 <div class="form-group">
                     <label>Email</label>
-                    <input type="email" id="ae_email" name="email" style="width:100%; padding:7px; border:1px solid #ccc; border-radius:4px;">
+                    <input type="email" id="ae_email" name="email" style="width:100%; padding:7px; border:1px solid #ccc; border-radius:4px;" autocomplete="off">
                 </div>
                 <div class="form-group">
                     <label>Best Contact Method</label>

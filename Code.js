@@ -95,6 +95,11 @@
  *         appendLastScheduledId/getLastScheduledId in LookupService) and
  *         REPORT_COLUMNS → 'LU_ReportColumns' (required by ReportColumnService).
  *         Removed One-Time Data Fixes submenu from onOpen() — macros no longer needed.
+ * v6.4 - logAudit(): replaced appendRow() with getLastRow()+1 + setValues() per
+ *         coding standards. appendRow() holds a spreadsheet-wide write lock which
+ *         caused updateArchiveRecord() to deadlock — archive setValues() + AM
+ *         appendRow() would both wait for each other's lock, hanging GAS indefinitely
+ *         and triggering the SV 45-second save watchdog.
  */
 
 // ============ CONFIGURATION ============
@@ -425,13 +430,17 @@ function logAudit(action, recordId, details) {
 
         if (auditSheet) {
             const user = Session.getActiveUser().getEmail() || 'System';
-            auditSheet.appendRow([
+            // v6.4: Use getLastRow()+1 + setValues() — appendRow() holds a spreadsheet-wide
+            // write lock which caused archive saves to deadlock (archive setValues running
+            // concurrently with appendRow on AM). setValues on a new row is lock-free.
+            const newRow = auditSheet.getLastRow() + 1;
+            auditSheet.getRange(newRow, 1, 1, 5).setValues([[
                 new Date(),
                 action,
                 recordId || '',
                 details,
                 user
-            ]);
+            ]]);
         }
     } catch (e) {
         Logger.log('Audit log error: ' + e.message);
