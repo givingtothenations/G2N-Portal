@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AuthService.gs
  * Role-based authentication and session management for G2N portals
  * Validates staff codes against LU_Staff in G2N_Lookups,
@@ -21,51 +21,39 @@
  * @returns {Object} { success: boolean, role: string, name: string }
  */
 function authenticateUser(code) {
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-    var dbResult = DbService.authenticateUser(code);
-    if (dbResult.success) {
-      var props = PropertiesService.getUserProperties();
-      props.setProperty('G2N_USER_CODE',  dbResult.user.code);
-      props.setProperty('G2N_USER_NAME',  dbResult.user.name);
-      props.setProperty('G2N_USER_ROLE',  dbResult.user.role);
-      props.setProperty('G2N_LOGIN_TIME', new Date().toISOString());
-      logAudit('LOGIN', null, 'User logged in: ' + dbResult.user.code + ' (' + dbResult.user.name + ')');
+    if (!code || code.trim() === '') {
+        return { success: false, error: 'Please enter your staff code' };
     }
-    return dbResult;
-  }
-  if (!code || code.trim() === '') {
-    return { success: false, error: 'Please enter your staff code' };
-  }
-  
-  const staffData = getStaffMember(code.trim().toUpperCase());
-  
-  if (!staffData) {
-    return { success: false, error: 'Staff code not found' };
-  }
-  
-  if (!staffData.active) {
-    return { success: false, error: 'This account is inactive. Please contact an administrator.' };
-  }
-  
-  // Store session
-  const userProperties = PropertiesService.getUserProperties();
-  userProperties.setProperty('G2N_USER_CODE', staffData.code);
-  userProperties.setProperty('G2N_USER_NAME', staffData.name);
-  userProperties.setProperty('G2N_USER_ROLE', staffData.role);
-  userProperties.setProperty('G2N_LOGIN_TIME', new Date().toISOString());
-  
-  // Log the login
-  logAudit('LOGIN', null, 'User logged in: ' + staffData.code + ' (' + staffData.name + ')');
-  
-  return {
-    success: true,
-    user: {
-      code: staffData.code,
-      name: staffData.name,
-      role: staffData.role,
-      isAdmin: staffData.role === 'Administrator'
+
+    const staffData = getStaffMember(code.trim().toUpperCase());
+
+    if (!staffData) {
+        return { success: false, error: 'Staff code not found' };
     }
-  };
+
+    if (!staffData.active) {
+        return { success: false, error: 'This account is inactive. Please contact an administrator.' };
+    }
+
+    // Store session
+    const userProperties = PropertiesService.getUserProperties();
+    userProperties.setProperty('G2N_USER_CODE', staffData.code);
+    userProperties.setProperty('G2N_USER_NAME', staffData.name);
+    userProperties.setProperty('G2N_USER_ROLE', staffData.role);
+    userProperties.setProperty('G2N_LOGIN_TIME', new Date().toISOString());
+
+    // Log the login
+    logAudit('LOGIN', null, 'User logged in: ' + staffData.code + ' (' + staffData.name + ')');
+
+    return {
+        success: true,
+        user: {
+            code: staffData.code,
+            name: staffData.name,
+            role: staffData.role,
+            isAdmin: staffData.role === 'Administrator'
+        }
+    };
 }
 
 /**
@@ -73,20 +61,20 @@ function authenticateUser(code) {
  * @returns {Object|null} { code, name, role } or null if not authenticated
  */
 function getCurrentUser() {
-  const userProperties = PropertiesService.getUserProperties();
-  const code = userProperties.getProperty('G2N_USER_CODE');
-  
-  if (!code) {
-    return null;
-  }
-  
-  return {
-    code: code,
-    name: userProperties.getProperty('G2N_USER_NAME'),
-    role: userProperties.getProperty('G2N_USER_ROLE'),
-    isAdmin: userProperties.getProperty('G2N_USER_ROLE') === 'Administrator',
-    loginTime: userProperties.getProperty('G2N_LOGIN_TIME')
-  };
+    const userProperties = PropertiesService.getUserProperties();
+    const code = userProperties.getProperty('G2N_USER_CODE');
+
+    if (!code) {
+        return null;
+    }
+
+    return {
+        code: code,
+        name: userProperties.getProperty('G2N_USER_NAME'),
+        role: userProperties.getProperty('G2N_USER_ROLE'),
+        isAdmin: userProperties.getProperty('G2N_USER_ROLE') === 'Administrator',
+        loginTime: userProperties.getProperty('G2N_LOGIN_TIME')
+    };
 }
 
 /**
@@ -94,19 +82,19 @@ function getCurrentUser() {
  * @returns {Object} { success: boolean }
  */
 function logoutUser() {
-  const user = getCurrentUser();
-  
-  if (user) {
-    logAudit('LOGOUT', null, 'User logged out: ' + user.code);
-  }
-  
-  const userProperties = PropertiesService.getUserProperties();
-  userProperties.deleteProperty('G2N_USER_CODE');
-  userProperties.deleteProperty('G2N_USER_NAME');
-  userProperties.deleteProperty('G2N_USER_ROLE');
-  userProperties.deleteProperty('G2N_LOGIN_TIME');
-  
-  return { success: true };
+    const user = getCurrentUser();
+
+    if (user) {
+        logAudit('LOGOUT', null, 'User logged out: ' + user.code);
+    }
+
+    const userProperties = PropertiesService.getUserProperties();
+    userProperties.deleteProperty('G2N_USER_CODE');
+    userProperties.deleteProperty('G2N_USER_NAME');
+    userProperties.deleteProperty('G2N_USER_ROLE');
+    userProperties.deleteProperty('G2N_LOGIN_TIME');
+
+    return { success: true };
 }
 
 /**
@@ -114,7 +102,7 @@ function logoutUser() {
  * @returns {boolean}
  */
 function isAuthenticated() {
-  return getCurrentUser() !== null;
+    return getCurrentUser() !== null;
 }
 
 /**
@@ -123,17 +111,8 @@ function isAuthenticated() {
  * @returns {boolean}
  */
 function isStaff() {
-  const user = getCurrentUser();
-  return user !== null && (user.role === 'Staff' || user.role === 'Administrator');
-}
-
-/**
- * Checks if the current user has Admin role
- * @returns {boolean}
- */
-function isAdmin() {
-  const user = getCurrentUser();
-  return user !== null && user.isAdmin;
+    const user = getCurrentUser();
+    return user !== null && (user.role === 'Staff' || user.role === 'Administrator');
 }
 
 /**
@@ -143,21 +122,21 @@ function isAdmin() {
  * @returns {Object|null} Staff data or null if not found
  */
 function getStaffMember(code) {
-  var result = getStaffRecords(true); // Include inactive to check active status
-  if (!result.success || !result.records) return null;
-  var upperCode = code.toUpperCase();
-  for (var i = 0; i < result.records.length; i++) {
-    var rec = result.records[i];
-    if (rec.Code.toUpperCase() === upperCode) {
-      return {
-        code: rec.Code,
-        name: rec.Name,
-        role: rec.Role || 'Staff',
-        active: rec.Active
-      };
+    var result = getStaffRecords(true); // Include inactive to check active status
+    if (!result.success || !result.records) return null;
+    var upperCode = code.toUpperCase();
+    for (var i = 0; i < result.records.length; i++) {
+        var rec = result.records[i];
+        if (rec.Code.toUpperCase() === upperCode) {
+            return {
+                code: rec.Code,
+                name: rec.Name,
+                role: rec.Role || 'Staff',
+                active: rec.Active
+            };
+        }
     }
-  }
-  return null;
+    return null;
 }
 
 /**
@@ -166,19 +145,11 @@ function getStaffMember(code) {
  * @returns {Array} Array of staff objects
  */
 function getAllStaff() {
-  var result = getStaffRecords(false); // Active only
-  if (!result.success || !result.records) return [];
-  return result.records.map(function(r) {
-    return { code: r.Code, name: r.Name, role: r.Role || 'Staff' };
-  });
-}
-
-/**
- * Get all administrators
- * @returns {Array} Array of admin staff objects
- */
-function getAdministrators() {
-  return getAllStaff().filter(s => s.role === 'Administrator');
+    var result = getStaffRecords(false); // Active only
+    if (!result.success || !result.records) return [];
+    return result.records.map(function (r) {
+        return { code: r.Code, name: r.Name, role: r.Role || 'Staff' };
+    });
 }
 
 /**
@@ -187,41 +158,8 @@ function getAdministrators() {
  * @throws {Error} If not authenticated
  */
 function requireAuth() {
-  if (!isAuthenticated()) {
-    throw new Error('Authentication required. Please log in.');
-  }
-  return getCurrentUser();
-}
-
-/**
- * Throws an error if the user is not an Admin
- * Use as a guard at the start of admin-only functions
- * @throws {Error} If not Admin role
- */
-function requireAdmin() {
-  const user = requireAuth();
-  if (!user.isAdmin) {
-    throw new Error('Administrator access required.');
-  }
-  return user;
-}
-
-/**
- * Re-validates the current session against LU_Staff
- * Used for long-running sessions to confirm role hasn't changed
- * @returns {Object} { valid: boolean, role: string }
- */
-function validateSession() {
-  const user = getCurrentUser();
-  if (!user) {
-    return { valid: false, error: 'No active session' };
-  }
-  
-  const staffData = getStaffMember(user.code);
-  if (!staffData || !staffData.active) {
-    logoutUser();
-    return { valid: false, error: 'Your account has been deactivated' };
-  }
-  
-  return { valid: true, user: user };
+    if (!isAuthenticated()) {
+        throw new Error('Authentication required. Please log in.');
+    }
+    return getCurrentUser();
 }

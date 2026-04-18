@@ -19,87 +19,6 @@
  * v4.3 - Added createAuditLog() — was called by logAudit() but never defined.
  *         Creates AuditLog sheet with styled headers if missing from AM.
  *         Fixed getSheetHeaders() to trim whitespace — matches all other header reads.
- * v4.4 - Performance: Per-execution caching for getMasterWorkbook(),
- *         getLookupsWorkbook(), getDataWorkbook() — eliminates redundant
- *         SpreadsheetApp.openById() calls (19x for getAllLookups alone).
- *         Optimized getNextId() to read only ID column instead of full sheet.
- *         Added shared utilities: trimHeaders(), htmlDateToSheet().
- *         Consolidated 3 showXxxUrl() functions into showPortalUrlDialog_() helper.
- * v4.5 - Added testScheduledArchive() — prompts for cutoff date in Apps Script
- *         editor UI, runs full archive cycle with email notification for testing.
- * v4.6 - Simplified runScheduledArchive() and testScheduledArchive() — removed
- *         unnecessary while loop since executeArchiveBatch is single-pass.
- *         Added try/catch around getUi() in testScheduledArchive with helpful
- *         error when run outside spreadsheet context.
- * v4.7 - Split testScheduledArchive into two phases: UI prompts save cutoff
- *         to ScriptProperties, then a chained 1-second trigger fires
- *         executeTestArchive() in a fresh 6-minute window. Prevents user
- *         think-time from burning the execution clock.
- * v4.8 - Removed preview/confirm dialogs from testScheduledArchive UI phase
- *         to prevent timeout. Preview now logged in executeTestArchive().
- * v4.9 - Added extractYear(dateVal) — replaces 6+ inline date-year extraction
- *         patterns across archive functions. Added isRowActive(row, activeCol)
- *         — replaces 10+ inline Active column checks. Added
- *         getArchiveWorkbooksForRange(fromDate, toDate) — iterates G2N_Archive
- *         plus year-based G2N_Archive_YYYY workbooks from ARCHIVES_BACKUPS_FOLDER_ID.
- *         Fixes critical gap where getCombinedData() and loadProductLookupData()
- * v5.0 - Moved DISTRIBUTED_PRODUCTS from CONFIG.LOOKUPS to CONFIG.DATA_SHEETS.
- *         Distributed_Products lives in G2N_Data and is only read during
- *         reporting; it should not be in the preloaded lookup cache.
- *         missed rolled-over year archives in grant/AI reports.
- * v4.10 - Adopted extractYear() in performArchiveRollover and previewArchiveRollover
- *          (replaces 4 inline date-year extraction blocks).
- *          Adopted trimHeaders() in archiveHealthCheck, performArchiveRollover,
- *          previewArchiveRollover (replaces 6 inline header trim calls).
- * v4.11 - Added onEdit trigger: clears lookup cache when any sheet
- *          in G2N_Lookups is edited directly (covers manual edits outside portals).
- *          Added Setup menu items for trigger management and manual cache clear.
- * v4.12 - Added CONFIG.TIMEZONE constant; replaces 81 hardcoded 'America/Chicago'
- *          strings across all .gs files (#8). Extracted trimHeaders(), htmlDateToSheet(),
- *          extractYear(), isRowActive() to SharedUtils.gs (#15). Replaced inline
- *          folder-move in archive rollover with shared moveToFolder() (#4).
- *          Updated onLookupSheetEdit() to also clear FieldMapService cache (#16).
- *          Deprecated getSheetHeaders() (#14).
- * v5.2 - Added CONFIG.LOOKUPS.SAVED_REPORTS → 'LU_SavedReports' sheet.
- *         Stores saved Custom Data Sheet specs for API-free re-run.
- * v5.3 - Added CONFIG.DEV_URL for Test Deployment (/dev) environment.
- *         Added Dev Environment submenu with dev portal URL dialogs.
- *         Added showStaffPortalDevUrl(), showAdminPortalDevUrl(),
- *         showIntakeFormDevUrl() functions.
- * v5.4 - Setup submenu now owner-only: compares Session.getActiveUser()
- *         to spreadsheet owner; Setup items hidden from non-owners.
- *         Added "Validate Addresses (Skip HIGH)" and
- *         "Continue Address Validation" to Setup submenu.
- * v5.5 - Added CONFIG.DB ({ USE_MYSQL }), CONFIG.CLOUD_RUN_URL, and
- *         CONFIG.BRIDGE_API_KEY. DB/CLOUD_RUN_URL were referenced by DbService
- *         but missing from CONFIG (USE_MYSQL guards always false → writes went
- *         to AM). BRIDGE_API_KEY replaces OIDC identity token auth — Cloud Run
- *         must allow unauthenticated; key validated by Program.cs middleware.
- * v5.6 - getWebAppUrl() now auto-detects dev vs production deployment using
- *         ScriptApp.getService().getUrl(). Returns CONFIG.DEV_URL when running
- *         under the /dev test deployment, CONFIG.WEB_APP_URL for production.
- *         Fixes PP always opening on production Version 46 when launched from
- *         the dev SV portal — PP now runs in the same environment as its caller.
- * v5.7 - doGet() 'staff' and 'admin' cases: changed from createHtmlOutputFromFile
- *         to createTemplateFromFile and inject serverWebAppUrl = getWebAppUrl().
- *         REVERTED in v5.8 — SV now pre-fetches webAppUrl client-side via
- *         getWebAppUrlForPortal() (same pattern as AP), no template injection needed.
- * v5.8 - doGet() 'staff' and 'admin' reverted to createHtmlOutputFromFile.
- * v5.9 - Restored createTemplateFromFile + serverWebAppUrl for 'staff' case.
- *         'admin' remains createHtmlOutputFromFile (AP fetches URL client-side).
- * v6.0 - One-time data fix macros added under 'One-Time Data Fixes' menu.
- * v6.1 - Macros read source sheets from G2N_Lookups (no external openById).
- *         Test run skips archive scan — only AM searched in dryRun mode.
- * v6.2 - Removed one-time data fix macros from Setup menu (work complete).
- * v6.3 - CONFIG.LOOKUPS: added SAVED_SCHEDULE_ID → 'LU_LastScheduled' (required by
- *         appendLastScheduledId/getLastScheduledId in LookupService) and
- *         REPORT_COLUMNS → 'LU_ReportColumns' (required by ReportColumnService).
- *         Removed One-Time Data Fixes submenu from onOpen() — macros no longer needed.
- * v6.4 - logAudit(): replaced appendRow() with getLastRow()+1 + setValues() per
- *         coding standards. appendRow() holds a spreadsheet-wide write lock which
- *         caused updateArchiveRecord() to deadlock — archive setValues() + AM
- *         appendRow() would both wait for each other's lock, hanging GAS indefinitely
- *         and triggering the SV 45-second save watchdog.
  */
 
 // ============ CONFIGURATION ============
@@ -168,15 +87,6 @@ const CONFIG = {
     // Data sheet names (in G2N_Data workbook — loaded on demand, not preloaded)
     DATA_SHEETS: {
         DISTRIBUTED_PRODUCTS: 'Distributed_Products'
-    },
-
-    // MySQL / Cloud Run bridge configuration
-    // Set USE_MYSQL: true to route all data operations through the G2N Bridge API
-    // instead of reading/writing Google Sheets directly.
-    CLOUD_RUN_URL: 'https://g2n-bridge-oa4nu3c2sa-uc.a.run.app',  // Replace with deployed Cloud Run URL
-    BRIDGE_API_KEY: '92df8beb2a3e48bfb763c688ca267d375673a11eac5b46d28f10b7435aa96544',                  // Must match Bridge:ApiKey in appsettings.json
-    DB: {
-        USE_MYSQL: false  // Set to true to activate MySQL path
     }
 };
 
@@ -320,56 +230,6 @@ function showPortalUrlDialog_(title, url, color, hoverColor, footnote) {
     SpreadsheetApp.getUi().showModalDialog(html, title + ' URL');
 }
 
-/**
- * Displays the deployed web app URL for the Staff/Volunteer portal
- * Called from the custom spreadsheet menu
- */
-function showStaffPortalUrl() {
-    showPortalUrlDialog_('Staff/Volunteer Portal', getWebAppUrl() + '?page=staff', '#1a73e8', '#1557b0', 'Tip: Bookmark this URL for quick access!');
-}
-
-/**
- * Displays the deployed web app URL for the Admin portal
- * Called from the custom spreadsheet menu
- */
-function showAdminPortalUrl() {
-    showPortalUrlDialog_('Administrator Portal', getWebAppUrl() + '?page=admin', '#ea4335', '#c5221f', 'Tip: Bookmark this URL for quick access!');
-}
-
-/**
- * Displays the deployed web app URL for the Applicant Intake portal
- * Called from the custom spreadsheet menu
- */
-function showIntakeFormUrl() {
-    showPortalUrlDialog_('Applicant Intake Form', getWebAppUrl(), '#34a853', '#2d8f47', 'Share this URL with applicants!');
-}
-
-/**
- * Displays the DEV (Test Deployment) URL for the Staff/Volunteer portal
- * Accessible by script owner only — do not share externally
- * v5.3 - Added for dev/test environment access
- */
-function showStaffPortalDevUrl() {
-    showPortalUrlDialog_('Staff/Volunteer Portal [DEV]', CONFIG.DEV_URL + '?page=staff', '#e37400', '#b35a00', '⚠ DEV only — accessible by script owner account only.');
-}
-
-/**
- * Displays the DEV (Test Deployment) URL for the Admin portal
- * Accessible by script owner only — do not share externally
- * v5.3 - Added for dev/test environment access
- */
-function showAdminPortalDevUrl() {
-    showPortalUrlDialog_('Administrator Portal [DEV]', CONFIG.DEV_URL + '?page=admin', '#e37400', '#b35a00', '⚠ DEV only — accessible by script owner account only.');
-}
-
-/**
- * Displays the DEV (Test Deployment) URL for the Applicant Intake portal
- * Accessible by script owner only — do not share externally
- * v5.3 - Added for dev/test environment access
- */
-function showIntakeFormDevUrl() {
-    showPortalUrlDialog_('Applicant Intake Form [DEV]', CONFIG.DEV_URL, '#e37400', '#b35a00', '⚠ DEV only — accessible by script owner account only.');
-}
 /**
  * Returns a cached reference to the Applicants_Master workbook
  * Per-execution cache avoids repeated SpreadsheetApp.openById() calls
@@ -572,29 +432,6 @@ function getArchiveWorkbooksForRange(fromDate, toDate) {
 }
 
 /**
- * Sets up the monthly archive trigger (1st of each month)
- * Called from Admin Portal; removes any existing archive trigger first
- * @returns {Object} Result with trigger ID
- */
-function setupMonthlyArchiveTrigger() {
-    // First remove any existing archive triggers
-    removeArchiveTrigger();
-
-    // Create new monthly trigger
-    ScriptApp.newTrigger('runScheduledArchive')
-        .timeBased()
-        .onMonthDay(1)
-        .atHour(1)
-        .create();
-
-    try {
-        SpreadsheetApp.getUi().alert('Monthly archive trigger created.\n\nArchive will run automatically at 1:00 AM on the 1st of each month.');
-    } catch (e) {
-        Logger.log('Monthly archive trigger created');
-    }
-}
-
-/**
  * Removes the monthly archive trigger if it exists
  * @returns {Object} Result with removal status
  */
@@ -623,32 +460,6 @@ function removeArchiveTrigger() {
 // ============ LOOKUP CACHE TRIGGER ============
 
 /**
- * Creates an installable onEdit trigger on G2N_Lookups workbook.
- * When any cell in G2N_Lookups is edited directly (outside portals),
- * onLookupSheetEdit fires and clears the CacheService lookup cache.
- * Run once from G2N Management > Setup > Setup Lookup Cache Trigger.
- * v4.11 - New function
- */
-function setupLookupCacheTrigger() {
-    removeLookupCacheTrigger();
-
-    ScriptApp.newTrigger('onLookupSheetEdit')
-        .forSpreadsheet(CONFIG.LOOKUPS_WORKBOOK_ID)
-        .onEdit()
-        .create();
-
-    try {
-        SpreadsheetApp.getUi().alert(
-            'Lookup cache trigger created.\n\n' +
-            'The lookup cache will now auto-clear when G2N_Lookups is edited directly.\n' +
-            'Portal-based edits already clear the cache automatically.'
-        );
-    } catch (e) {
-        Logger.log('Lookup cache trigger created for G2N_Lookups');
-    }
-}
-
-/**
  * Removes the installable onEdit trigger for G2N_Lookups if it exists.
  * v4.11 - New function
  */
@@ -672,19 +483,6 @@ function removeLookupCacheTrigger() {
     } catch (e) {
         Logger.log('Removed ' + removed + ' lookup cache triggers');
     }
-}
-
-/**
- * Installable onEdit handler for G2N_Lookups workbook.
- * Fires when any cell is edited directly in the Lookups workbook,
- * clearing the CacheService lookup cache and FieldMapService cache so portals get fresh data.
- * v4.11 - New function
- * v4.12 - Added clearFieldMapCache() call (#16)
- * @param {Object} e - Edit event object (unused but required by trigger)
- */
-function onLookupSheetEdit(e) {
-    invalidateLookupCache();
-    clearFieldMapCache();
 }
 
 /**
@@ -1680,89 +1478,8 @@ function previewArchiveRollover() {
     }
 }
 
-/**
- * Syncs responses from the linked Google Form to Applicants_Master
- * MANUAL UTILITY â€” can be removed if form trigger is automated
- */
-function syncFormResponses() {
-    const ss = getMasterWorkbook();
-    const responsesSheet = ss.getSheetByName('Form Responses 1');
-    const masterSheet = ss.getSheetByName(CONFIG.MASTER_SHEET);
-
-    if (!responsesSheet) {
-        Logger.log('Form Responses sheet not found');
-        return { synced: 0, error: 'Responses sheet not found' };
-    }
-
-    if (!masterSheet) {
-        Logger.log('Master sheet not found');
-        return { synced: 0, error: 'Master sheet not found' };
-    }
-
-    const responsesData = responsesSheet.getDataRange().getValues();
-    const masterData = masterSheet.getDataRange().getValues();
-    const masterHeaders = masterData[0];
-
-    const timestampCol = masterHeaders.indexOf('Timestamp');
-    const existingTimestamps = new Set();
-
-    for (let i = 1; i < masterData.length; i++) {
-        if (masterData[i][timestampCol]) {
-            existingTimestamps.add(masterData[i][timestampCol].toString());
-        }
-    }
-
-    let nextId = getNextId();
-    const responseHeaders = responsesData[0];
-    const newRows = [];
-
-    for (let i = 1; i < responsesData.length; i++) {
-        const timestamp = responsesData[i][0];
-        if (timestamp && !existingTimestamps.has(timestamp.toString())) {
-            const newRow = new Array(masterHeaders.length).fill('');
-            newRow[0] = nextId++;
-
-            for (let j = 0; j < responseHeaders.length; j++) {
-                const responseHeader = responseHeaders[j];
-                const masterColIndex = masterHeaders.indexOf(responseHeader);
-                if (masterColIndex !== -1) {
-                    newRow[masterColIndex] = responsesData[i][j];
-                }
-            }
-
-            newRows.push(newRow);
-        }
-    }
-
-    if (newRows.length > 0) {
-        masterSheet.getRange(masterSheet.getLastRow() + 1, 1, 1, 1).setNumberFormat('0');
-        masterSheet.getRange(
-            masterSheet.getLastRow() + 1,
-            1,
-            newRows.length,
-            masterHeaders.length
-        ).setValues(newRows);
-
-        logAudit('SYNC', null, 'Synced ' + newRows.length + ' new records from Form Responses');
-    }
-
-    Logger.log('Synced ' + newRows.length + ' new records');
-
-    try {
-        SpreadsheetApp.getUi().alert('Synced ' + newRows.length + ' new records from Form Responses.');
-    } catch (e) {
-        // Running from trigger
-    }
-
-    return { synced: newRows.length };
-}
-
 
 // ============ ONE-TIME DATA FIX MACROS ============
-
-/** Test-run wrappers — no writes, results preview only. */
-function testRunFixedDistribCodes() { applyFixedDistribCodes(true); }
-function testRunHygieneSched() { applyHygieneSched(true); }
 
 /**
  * Writes a results summary to a 'MacroResults' sheet in the active spreadsheet.
@@ -1976,48 +1693,4 @@ function applyHygieneSched(dryRun) {
         writeMacroResults_(label + 'Hygiene Sched — ' + totalCells + ' cell(s) ' + (dryRun ? 'would update' : 'updated') + ', ' + notFound.length + ' not found', resultRows);
         ui.alert(label + 'Complete. See MacroResults sheet.\n' + totalCells + ' cell(s) ' + (dryRun ? 'would be updated' : 'updated') + '.\n' + notFound.length + ' code(s) not found.');
     } catch (e) { Logger.log('applyHygieneSched: ' + e.message); ui.alert('Error: ' + e.message); }
-}
-
-/**
- * Diagnostic: shows headers from FixedDistribCodes and HygieneSched in G2N_Lookups.
- */
-function diagSourceHeaders() {
-    var ui = SpreadsheetApp.getUi();
-    var out = '';
-    try {
-        var sh1 = getLookupsWorkbook().getSheetByName('FixedDistribCodes');
-        out += sh1 ? ('FixedDistribCodes:\n' + sh1.getRange(1, 1, 1, sh1.getLastColumn()).getValues()[0].join(' | '))
-            : 'FixedDistribCodes NOT FOUND in G2N_Lookups';
-    } catch (e) { out += 'Error: ' + e.message; }
-    out += '\n\n';
-    try {
-        var sh2 = getLookupsWorkbook().getSheetByName('HygieneSched');
-        out += sh2 ? ('HygieneSched:\n' + sh2.getRange(1, 1, 1, sh2.getLastColumn()).getValues()[0].join(' | '))
-            : 'HygieneSched NOT FOUND in G2N_Lookups';
-    } catch (e) { out += 'Error: ' + e.message; }
-    ui.alert(out);
-}
-
-function diagStep1() {
-    Logger.log('step 1 - start');
-    var lu = getLookupsWorkbook();
-    Logger.log('step 2 - got lookups workbook: ' + lu.getName());
-    var sh = lu.getSheetByName('FixedDistribCodes');
-    Logger.log('step 3 - sheet: ' + (sh ? sh.getName() : 'NOT FOUND'));
-    var data = sh ? sh.getLastRow() : 0;
-    Logger.log('step 4 - rows: ' + data);
-    SpreadsheetApp.getUi().alert('Done - check Logs');
-}
-
-function diagSheetNames() {
-    var sheets = getLookupsWorkbook().getSheets();
-    var names = sheets.map(function (s) { return '"' + s.getName() + '"'; });
-    SpreadsheetApp.getUi().alert(names.join('\n'));
-}
-
-function diagRaw() {
-    var lu = SpreadsheetApp.openById('1jahhI4JoDntwrAcv_E6B4te8jI6RZkn0eNbnt-pThX0');
-    var names = lu.getSheets().map(function (s) { return s.getName(); });
-    Logger.log(names.join(', '));
-    SpreadsheetApp.getUi().alert(names.join('\n'));
 }

@@ -37,13 +37,13 @@
  * @returns {string} Canonical raw header from LU_FieldMap, or rawHeader if unmapped
  */
 function resolveAMField_(rawHeader) {
-  try {
-    var map = loadFieldMap();
-    var entry = map.byRawHeader[rawHeader];
-    return entry ? entry.rawHeader : rawHeader;
-  } catch (e) {
-    return rawHeader;
-  }
+    try {
+        var map = loadFieldMap();
+        var entry = map.byRawHeader[rawHeader];
+        return entry ? entry.rawHeader : rawHeader;
+    } catch (e) {
+        return rawHeader;
+    }
 }
 
 /**
@@ -55,14 +55,14 @@ function resolveAMField_(rawHeader) {
  * @returns {string} Friendly label for report output
  */
 function getReportHeader_(rawHeader) {
-  try {
-    var map = loadFieldMap();
-    var entry = map.byRawHeader[rawHeader];
-    if (!entry) return rawHeader;
-    return entry.reportHeader || entry.displayLabel || rawHeader;
-  } catch (e) {
-    return rawHeader;
-  }
+    try {
+        var map = loadFieldMap();
+        var entry = map.byRawHeader[rawHeader];
+        if (!entry) return rawHeader;
+        return entry.reportHeader || entry.displayLabel || rawHeader;
+    } catch (e) {
+        return rawHeader;
+    }
 }
 
 
@@ -75,7 +75,7 @@ function getReportHeader_(rawHeader) {
  * @returns {string[]} Trimmed header strings
  */
 function trimHeaders(rawHeaders) {
-  return rawHeaders.map(function(h) { return h.toString().trim(); });
+    return rawHeaders.map(function (h) { return h.toString().trim(); });
 }
 
 /**
@@ -85,9 +85,9 @@ function trimHeaders(rawHeaders) {
  * @returns {string} Converted MM/DD/YYYY string, or original value
  */
 function htmlDateToSheet(dateStr) {
-  if (!dateStr || typeof dateStr !== 'string') return dateStr;
-  var m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  return m ? m[2] + '/' + m[3] + '/' + m[1] : dateStr;
+    if (!dateStr || typeof dateStr !== 'string') return dateStr;
+    var m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? m[2] + '/' + m[3] + '/' + m[1] : dateStr;
 }
 
 /**
@@ -97,12 +97,12 @@ function htmlDateToSheet(dateStr) {
  * @returns {string|null} 4-digit year string, or null if unparseable
  */
 function extractYear(dateVal) {
-  if (!dateVal) return null;
-  if (dateVal instanceof Date && !isNaN(dateVal.getTime())) {
-    return dateVal.getFullYear().toString();
-  }
-  var parsed = new Date(dateVal);
-  return !isNaN(parsed.getTime()) ? parsed.getFullYear().toString() : null;
+    if (!dateVal) return null;
+    if (dateVal instanceof Date && !isNaN(dateVal.getTime())) {
+        return dateVal.getFullYear().toString();
+    }
+    var parsed = new Date(dateVal);
+    return !isNaN(parsed.getTime()) ? parsed.getFullYear().toString() : null;
 }
 
 /**
@@ -114,14 +114,14 @@ function extractYear(dateVal) {
  * @returns {Date}
  */
 function parseDateInput(dateStr, endOfDay) {
-  var parts = dateStr.split('-');
-  var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-  if (endOfDay) {
-    d.setHours(23, 59, 59, 999);
-  } else {
-    d.setHours(0, 0, 0, 0);
-  }
-  return d;
+    var parts = dateStr.split('-');
+    var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    if (endOfDay) {
+        d.setHours(23, 59, 59, 999);
+    } else {
+        d.setHours(0, 0, 0, 0);
+    }
+    return d;
 }
 
 /**
@@ -133,41 +133,41 @@ function parseDateInput(dateStr, endOfDay) {
  * @returns {string} Normalized date (M/d/yyyy) or empty string
  */
 function normalizeDate(dateVal) {
-  if (!dateVal) return '';
+    if (!dateVal) return '';
 
-  try {
-    if (dateVal instanceof Date && !isNaN(dateVal.getTime())) {
-      return Utilities.formatDate(dateVal, CONFIG.TIMEZONE, 'M/d/yyyy');
+    try {
+        if (dateVal instanceof Date && !isNaN(dateVal.getTime())) {
+            return Utilities.formatDate(dateVal, CONFIG.TIMEZONE, 'M/d/yyyy');
+        }
+
+        var str = dateVal.toString().trim();
+
+        // YYYY-MM-DD format (from HTML date input)
+        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+            var parts = str.split('-');
+            var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+            return Utilities.formatDate(d, CONFIG.TIMEZONE, 'M/d/yyyy');
+        }
+
+        // M/D/YYYY or MM/DD/YYYY format
+        if (str.indexOf('/') > -1) {
+            var parsed = new Date(str);
+            if (!isNaN(parsed.getTime())) {
+                return Utilities.formatDate(parsed, CONFIG.TIMEZONE, 'M/d/yyyy');
+            }
+        }
+
+        // Try generic parse
+        var generic = new Date(str);
+        if (!isNaN(generic.getTime())) {
+            return Utilities.formatDate(generic, CONFIG.TIMEZONE, 'M/d/yyyy');
+        }
+
+        return '';
+    } catch (e) {
+        Logger.log('normalizeDate error: ' + e.message);
+        return '';
     }
-
-    var str = dateVal.toString().trim();
-
-    // YYYY-MM-DD format (from HTML date input)
-    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-      var parts = str.split('-');
-      var d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-      return Utilities.formatDate(d, CONFIG.TIMEZONE, 'M/d/yyyy');
-    }
-
-    // M/D/YYYY or MM/DD/YYYY format
-    if (str.indexOf('/') > -1) {
-      var parsed = new Date(str);
-      if (!isNaN(parsed.getTime())) {
-        return Utilities.formatDate(parsed, CONFIG.TIMEZONE, 'M/d/yyyy');
-      }
-    }
-
-    // Try generic parse
-    var generic = new Date(str);
-    if (!isNaN(generic.getTime())) {
-      return Utilities.formatDate(generic, CONFIG.TIMEZONE, 'M/d/yyyy');
-    }
-
-    return '';
-  } catch (e) {
-    Logger.log('normalizeDate error: ' + e.message);
-    return '';
-  }
 }
 
 
@@ -175,25 +175,6 @@ function normalizeDate(dateVal) {
 
 /**
  * Checks if a data row is "active" based on the Active column value.
- *
- * Returns true when:
- *   - No Active column exists (activeColIndex === -1) — all rows included
- *   - boolean  true
- *   - string   'TRUE', 'true', 'True'  (any case)
- *   - string   'Y', 'y', 'YES', 'Yes', 'yes'
- *   - number   1
- *   - string   '1'
- *
- * Returns false for boolean false, 0, '', null, undefined, 'N', 'NO',
- * 'FALSE', 'false', or any other value not in the truthy list above.
- *
- * Aligned with isBooleanChecked() in AdminPortalWeb.html so the server-side
- * active check is consistent with what the AP LU editor displays as checked.
- *
- * v1.2: Expanded from (val === true || val === 'TRUE') to cover all truthy
- *        variants. Fixes getActiveSchedDisbCodes() returning empty when
- *        LU_SchedDisbCodes Active column contains 'Y' or other variants.
- *
  * @param {Array}  row            - Data row from sheet
  * @param {number} activeColIndex - Column index of Active field (-1 if absent)
  * @returns {boolean}
@@ -216,7 +197,7 @@ function isRowActive(row, activeColIndex) {
  * @returns {string}
  */
 function getStr(row, idx) {
-  return idx !== -1 ? (row[idx] || '').toString().trim() : '';
+    return idx !== -1 ? (row[idx] || '').toString().trim() : '';
 }
 
 /**
@@ -227,10 +208,10 @@ function getStr(row, idx) {
  * @returns {string} "Existing", "New", or original value
  */
 function getApplicantType(usedBefore) {
-  var val = (usedBefore || '').toString().trim().toLowerCase();
-  if (val === 'yes') return 'Existing';
-  if (val === 'no') return 'New';
-  return usedBefore || '';
+    var val = (usedBefore || '').toString().trim().toLowerCase();
+    if (val === 'yes') return 'Existing';
+    if (val === 'no') return 'New';
+    return usedBefore || '';
 }
 
 /**
@@ -241,8 +222,8 @@ function getApplicantType(usedBefore) {
  * @returns {string} "X" or ""
  */
 function getBabyBoxIndicator(babyBoxVal) {
-  var val = (babyBoxVal || '').toString().trim().toUpperCase();
-  return (val === 'X' || val === 'YES' || val === 'TRUE') ? 'X' : '';
+    var val = (babyBoxVal || '').toString().trim().toUpperCase();
+    return (val === 'X' || val === 'YES' || val === 'TRUE') ? 'X' : '';
 }
 
 
@@ -257,16 +238,16 @@ function getBabyBoxIndicator(babyBoxVal) {
  * @param {string} folderId - Target folder ID
  */
 function moveToFolder(fileId, folderId) {
-  if (folderId && folderId.length > 0) {
-    try {
-      var file = DriveApp.getFileById(fileId);
-      var folder = DriveApp.getFolderById(folderId);
-      folder.addFile(file);
-      DriveApp.getRootFolder().removeFile(file);
-    } catch (e) {
-      Logger.log('Error moving file to folder: ' + e.message);
+    if (folderId && folderId.length > 0) {
+        try {
+            var file = DriveApp.getFileById(fileId);
+            var folder = DriveApp.getFolderById(folderId);
+            folder.addFile(file);
+            DriveApp.getRootFolder().removeFile(file);
+        } catch (e) {
+            Logger.log('Error moving file to folder: ' + e.message);
+        }
     }
-  }
 }
 
 
@@ -280,12 +261,12 @@ function moveToFolder(fileId, folderId) {
  * @param {number} colCount - Number of columns
  */
 function styleReportHeader(sheet, headerRow, colCount) {
-  var range = sheet.getRange(headerRow, 1, 1, colCount);
-  range.setFontWeight('bold');
-  range.setBackground('#4a86e8');
-  range.setFontColor('white');
-  range.setBorder(true, true, true, true, true, true);
-  range.setWrap(true);
+    var range = sheet.getRange(headerRow, 1, 1, colCount);
+    range.setFontWeight('bold');
+    range.setBackground('#4a86e8');
+    range.setFontColor('white');
+    range.setBorder(true, true, true, true, true, true);
+    range.setWrap(true);
 }
 
 /**
@@ -297,10 +278,10 @@ function styleReportHeader(sheet, headerRow, colCount) {
  * @param {string} bgColor - Background color (default: '#e8f0fe')
  */
 function styleGroupRow(sheet, row, colCount, bgColor) {
-  var range = sheet.getRange(row, 1, 1, colCount);
-  range.setFontWeight('bold');
-  range.setBackground(bgColor || '#e8f0fe');
-  range.merge();
+    var range = sheet.getRange(row, 1, 1, colCount);
+    range.setFontWeight('bold');
+    range.setBackground(bgColor || '#e8f0fe');
+    range.merge();
 }
 
 /**
@@ -318,40 +299,40 @@ function styleGroupRow(sheet, row, colCount, bgColor) {
  * @returns {number} Next row number after title section
  */
 function writeReportTitleSection(sheet, reportTitle, fromDate, toDate, totalCount, masterCount, archiveCount) {
-  var currentRow = 1;
+    var currentRow = 1;
 
-  sheet.getRange(currentRow, 1).setValue('Giving to the Nations');
-  sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(14);
-  currentRow++;
+    sheet.getRange(currentRow, 1).setValue('Giving to the Nations');
+    sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(14);
+    currentRow++;
 
-  sheet.getRange(currentRow, 1).setValue(reportTitle);
-  sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(12);
-  currentRow++;
+    sheet.getRange(currentRow, 1).setValue(reportTitle);
+    sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(12);
+    currentRow++;
 
-  var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-  var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-  sheet.getRange(currentRow, 1).setValue('Report Period: ' + fromDisplay + ' to ' + toDisplay);
-  currentRow++;
+    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    sheet.getRange(currentRow, 1).setValue('Report Period: ' + fromDisplay + ' to ' + toDisplay);
+    currentRow++;
 
-  sheet.getRange(currentRow, 1).setValue('Total Records: ' + totalCount);
-  sheet.getRange(currentRow, 1).setFontWeight('bold');
-  currentRow++;
+    sheet.getRange(currentRow, 1).setValue('Total Records: ' + totalCount);
+    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    currentRow++;
 
-  var sourceNote = 'Data Sources: Applicants_Master (' + masterCount + ' records)';
-  if (archiveCount > 0) {
-    sourceNote += ', G2N_Archive (' + archiveCount + ' records)';
-  }
-  sheet.getRange(currentRow, 1).setValue(sourceNote);
-  sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
-  currentRow++;
+    var sourceNote = 'Data Sources: Applicants_Master (' + masterCount + ' records)';
+    if (archiveCount > 0) {
+        sourceNote += ', G2N_Archive (' + archiveCount + ' records)';
+    }
+    sheet.getRange(currentRow, 1).setValue(sourceNote);
+    sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
+    currentRow++;
 
-  var createdDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy h:mm a');
-  sheet.getRange(currentRow, 1).setValue('Generated: ' + createdDate);
-  sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
-  currentRow++;
+    var createdDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy h:mm a');
+    sheet.getRange(currentRow, 1).setValue('Generated: ' + createdDate);
+    sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
+    currentRow++;
 
-  currentRow++; // Blank row
-  return currentRow;
+    currentRow++; // Blank row
+    return currentRow;
 }
 
 function formatPhoneNumber_(raw) {

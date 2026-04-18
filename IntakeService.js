@@ -17,27 +17,6 @@
  * v3.7 - Fixed appendRow race condition: replaced setNumberFormat-before-appendRow
  *         with setValues at a deterministic row, then applies formatting after write.
  *         Prevents ID formatting from landing on the wrong row under concurrent writes.
- * v3.8 - FieldMapService migration: getIntakeFieldMapping() now delegates to
- *         FieldMapService.getIntakeFieldMappingFromMap() which reads Form Field ID
- *         mappings from LU_FieldMap sheet. Falls back to hardcoded mapping if
- *         LU_FieldMap sheet is not yet available.
- * v3.9 - No timezone changes needed (zero occurrences). Added TODO for
- *         _getIntakeFieldMappingFallback() removal (#13).
- * v4.0 - Fixed getIntakePortalData() portal visibility filter: was 'AP', now 'AI'.
- *         Added Sheets fallback when MySQL bridge returns empty lookup data, so AI
- *         dropdowns always populate even if bridge is unreachable.
- * v4.1 - Fixed timezone bug in submitIntakeForm(): today/next90 date strings were
- *         built with getMonth()/getDate() which use UTC, causing Request Date to
- *         display as -1 day in US timezones after 6–7pm. Replaced with
- *         Utilities.formatDate(..., CONFIG.TIMEZONE, 'M/d/yyyy').
- * v4.2 - submitIntakeForm(): Entered By uses formData.enteredBy when present
- *         (staff code passed from SV via URL param → AI → formData). Falls back
- *         to 'Applicant' for public submissions.
- * v4.3 - submitIntakeForm(): passes current time (HH:MM) to getEventInfoForDate()
- *         so event detection respects Event Begins Time / Event Ends Time columns
- *         in LU_EventInfo in addition to date range.
- *         Event mode Funding Source now uses fundingSourceDescription (the
- *         Description from LU_FundingSources) instead of the raw funding code.
  */
 
 /**
@@ -50,147 +29,146 @@
  * @returns {Object} { success: boolean, recordId: string, message: string }
  */
 function submitIntakeForm(formData, eventInfo) {
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.submitIntakeForm(formData, eventInfo);
-  try {
-    const sheet = getMasterSheet();
-    if (!sheet) {
-      return { success: false, error: 'Master sheet not found' };
-    }
-    
-    const rawHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const headers = trimHeaders(rawHeaders);
-    const nextId = getNextId();
-    
-    // Create new row array
-    const newRow = new Array(headers.length).fill('');
-    
-    // Set ID
-    newRow[0] = nextId;
-    
-    // Set Timestamp
-    const timestampCol = headers.indexOf('Timestamp');
-    if (timestampCol !== -1) {
-      newRow[timestampCol] = new Date();
-    }
-    
-    // Map form fields to columns
-    const fieldMapping = getIntakeFieldMapping();
-    
-    for (const formField in formData) {
-      const sheetColumn = fieldMapping[formField] || formField;
-      const colIndex = headers.indexOf(sheetColumn);
-      
-      if (colIndex !== -1) {
-        let value = formData[formField];
-        
-        // Handle special transformations
-        if (formField === 'childrenNewbornTo2') {
-          // Convert Yes/No to X/blank for Baby Box indicator
-          value = (value === 'Yes' || value === true) ? 'X' : '';
+    try {
+        const sheet = getMasterSheet();
+        if (!sheet) {
+            return { success: false, error: 'Master sheet not found' };
         }
-        
-        // Convert date fields from YYYY-MM-DD to MM/DD/YYYY
-        if (formField === 'formDate' || formField === 'signatureDate') {
-          value = htmlDateToSheet(value);
-        }
-        
-        // Handle multi-select fields (arrays)
-        if (Array.isArray(value)) {
-          value = value.join(', ');
-        }
-        
-        newRow[colIndex] = value;
-      }
-    }
-    
-    // Set fields based on event mode
-    const today = new Date();
-    // v4.1: Use Utilities.formatDate with CONFIG.TIMEZONE to avoid UTC offset bug.
-    // bare getMonth()/getDate() returns UTC date, which is -1 day after ~6pm Chicago time.
-    const todayFormatted = Utilities.formatDate(today, CONFIG.TIMEZONE, 'M/d/yyyy');
 
-    // Calculate Next Service Availability Date (today + 90 days)
-    const next90 = new Date(today.getTime() + (90 * 24 * 60 * 60 * 1000));
-    const next90Formatted = Utilities.formatDate(next90, CONFIG.TIMEZONE, 'M/d/yyyy');
-    
-    // v3.6: Auto-detect event from signature date if not already in event mode
-    // v4.3: Also pass current time for time-window check against LU_EventInfo
-    if (!eventInfo || !eventInfo.isActive) {
-      var sigDateStr = formData.signatureDate || '';
-      if (sigDateStr) {
-        // Build current time string (HH:MM) in configured timezone
-        var nowForTime = new Date();
-        var nowTimeStr = Utilities.formatDate(nowForTime, CONFIG.TIMEZONE, 'HH:mm');
-        var detectedEvent = getEventInfoForDate(sigDateStr, nowTimeStr);
-        if (detectedEvent && detectedEvent.isActive) {
-          eventInfo = detectedEvent;
-          setColumnValue(newRow, headers,
-            'Are you completing this form at a Giving to the Nations OUTDOOR event?', 'Yes');
+        const rawHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+        const headers = trimHeaders(rawHeaders);
+        const nextId = getNextId();
+
+        // Create new row array
+        const newRow = new Array(headers.length).fill('');
+
+        // Set ID
+        newRow[0] = nextId;
+
+        // Set Timestamp
+        const timestampCol = headers.indexOf('Timestamp');
+        if (timestampCol !== -1) {
+            newRow[timestampCol] = new Date();
         }
-      }
-    }
 
-    if (eventInfo && eventInfo.isActive) {
-      // Event mode - set all event-related fields
-      setColumnValue(newRow, headers, 'Service Status', 'Picked Up');
-      setColumnValue(newRow, headers, 'Request Type', 'Event');
-      setColumnValue(newRow, headers, 'Box Code', eventInfo.boxCode || '');
-      setColumnValue(newRow, headers, 'Scheduled Box Code 1', eventInfo.boxCode || '');
-      setColumnValue(newRow, headers, 'Received Product Code 1', eventInfo.boxCode || '');
-      // v4.3: Use Description from LU_FundingSources, not the raw Code
-      var fundingSrcValue = eventInfo.fundingSourceDescription ||
-                            eventInfo.fundingSource || '';
-      setColumnValue(newRow, headers, 'Funding Source', fundingSrcValue);
-      setColumnValue(newRow, headers, 'Last Date Served', todayFormatted);
-      setColumnValue(newRow, headers, 'Final Service Contact Date', todayFormatted);
-      setColumnValue(newRow, headers, 'Next Service Availability Date', next90Formatted);
-    } else {
-      // Non-event mode - set Request Type to Direct
-      setColumnValue(newRow, headers, 'Request Type', 'Direct');
-    }
-    
-    // v3.6: Default "Entered By" to "Applicant" for public intake submissions
-    // v4.2: In staff mode, formData.enteredBy contains the staff member's code —
-    //        use it when provided so Entered By reflects who submitted on behalf of applicant
-    var enteredBy = (formData.enteredBy && formData.enteredBy.toString().trim())
-      ? formData.enteredBy.toString().trim()
-      : 'Applicant';
-    setColumnValue(newRow, headers,
-      'Entered By (Who entered the data into the database?)', enteredBy);
-    
-    // Write row at a deterministic position, then format
-    // v3.7 - Replaced appendRow with setValues to prevent race condition
-    const newRowNum = sheet.getLastRow() + 1;
-    sheet.getRange(newRowNum, 1, 1, headers.length).setValues([newRow]);
-    sheet.getRange(newRowNum, 1, 1, 1).setNumberFormat('0');
-    sheet.getRange(newRowNum, 1, 1, headers.length).setBackground(null).setFontColor(null).setFontWeight(null);
+        // Map form fields to columns
+        const fieldMapping = getIntakeFieldMapping();
 
-    // Log the creation
-    const logMsg = eventInfo && eventInfo.isActive 
-      ? 'New applicant submitted via Intake Portal (Event Mode)' 
-      : 'New applicant submitted via Intake Portal';
-    logAudit('CREATE', nextId, logMsg);
-    
-    return {
-      success: true,
-      message: 'Application submitted successfully',
-      recordId: nextId
-    };
-    
-  } catch (error) {
-    Logger.log('Intake submission error: ' + error.message);
-    return { success: false, error: 'Submission failed: ' + error.message };
-  }
+        for (const formField in formData) {
+            const sheetColumn = fieldMapping[formField] || formField;
+            const colIndex = headers.indexOf(sheetColumn);
+
+            if (colIndex !== -1) {
+                let value = formData[formField];
+
+                // Handle special transformations
+                if (formField === 'childrenNewbornTo2') {
+                    // Convert Yes/No to X/blank for Baby Box indicator
+                    value = (value === 'Yes' || value === true) ? 'X' : '';
+                }
+
+                // Convert date fields from YYYY-MM-DD to MM/DD/YYYY
+                if (formField === 'formDate' || formField === 'signatureDate') {
+                    value = htmlDateToSheet(value);
+                }
+
+                // Handle multi-select fields (arrays)
+                if (Array.isArray(value)) {
+                    value = value.join(', ');
+                }
+
+                newRow[colIndex] = value;
+            }
+        }
+
+        // Set fields based on event mode
+        const today = new Date();
+        // v4.1: Use Utilities.formatDate with CONFIG.TIMEZONE to avoid UTC offset bug.
+        // bare getMonth()/getDate() returns UTC date, which is -1 day after ~6pm Chicago time.
+        const todayFormatted = Utilities.formatDate(today, CONFIG.TIMEZONE, 'M/d/yyyy');
+
+        // Calculate Next Service Availability Date (today + 90 days)
+        const next90 = new Date(today.getTime() + (90 * 24 * 60 * 60 * 1000));
+        const next90Formatted = Utilities.formatDate(next90, CONFIG.TIMEZONE, 'M/d/yyyy');
+
+        // v3.6: Auto-detect event from signature date if not already in event mode
+        // v4.3: Also pass current time for time-window check against LU_EventInfo
+        if (!eventInfo || !eventInfo.isActive) {
+            var sigDateStr = formData.signatureDate || '';
+            if (sigDateStr) {
+                // Build current time string (HH:MM) in configured timezone
+                var nowForTime = new Date();
+                var nowTimeStr = Utilities.formatDate(nowForTime, CONFIG.TIMEZONE, 'HH:mm');
+                var detectedEvent = getEventInfoForDate(sigDateStr, nowTimeStr);
+                if (detectedEvent && detectedEvent.isActive) {
+                    eventInfo = detectedEvent;
+                    setColumnValue(newRow, headers,
+                        'Are you completing this form at a Giving to the Nations OUTDOOR event?', 'Yes');
+                }
+            }
+        }
+
+        if (eventInfo && eventInfo.isActive) {
+            // Event mode - set all event-related fields
+            setColumnValue(newRow, headers, 'Service Status', 'Picked Up');
+            setColumnValue(newRow, headers, 'Request Type', 'Event');
+            setColumnValue(newRow, headers, 'Box Code', eventInfo.boxCode || '');
+            setColumnValue(newRow, headers, 'Scheduled Box Code 1', eventInfo.boxCode || '');
+            setColumnValue(newRow, headers, 'Received Product Code 1', eventInfo.boxCode || '');
+            // v4.3: Use Description from LU_FundingSources, not the raw Code
+            var fundingSrcValue = eventInfo.fundingSourceDescription ||
+                eventInfo.fundingSource || '';
+            setColumnValue(newRow, headers, 'Funding Source', fundingSrcValue);
+            setColumnValue(newRow, headers, 'Last Date Served', todayFormatted);
+            setColumnValue(newRow, headers, 'Final Service Contact Date', todayFormatted);
+            setColumnValue(newRow, headers, 'Next Service Availability Date', next90Formatted);
+        } else {
+            // Non-event mode - set Request Type to Direct
+            setColumnValue(newRow, headers, 'Request Type', 'Direct');
+        }
+
+        // v3.6: Default "Entered By" to "Applicant" for public intake submissions
+        // v4.2: In staff mode, formData.enteredBy contains the staff member's code —
+        //        use it when provided so Entered By reflects who submitted on behalf of applicant
+        var enteredBy = (formData.enteredBy && formData.enteredBy.toString().trim())
+            ? formData.enteredBy.toString().trim()
+            : 'Applicant';
+        setColumnValue(newRow, headers,
+            'Entered By (Who entered the data into the database?)', enteredBy);
+
+        // Write row at a deterministic position, then format
+        // v3.7 - Replaced appendRow with setValues to prevent race condition
+        const newRowNum = sheet.getLastRow() + 1;
+        sheet.getRange(newRowNum, 1, 1, headers.length).setValues([newRow]);
+        sheet.getRange(newRowNum, 1, 1, 1).setNumberFormat('0');
+        sheet.getRange(newRowNum, 1, 1, headers.length).setBackground(null).setFontColor(null).setFontWeight(null);
+
+        // Log the creation
+        const logMsg = eventInfo && eventInfo.isActive
+            ? 'New applicant submitted via Intake Portal (Event Mode)'
+            : 'New applicant submitted via Intake Portal';
+        logAudit('CREATE', nextId, logMsg);
+
+        return {
+            success: true,
+            message: 'Application submitted successfully',
+            recordId: nextId
+        };
+
+    } catch (error) {
+        Logger.log('Intake submission error: ' + error.message);
+        return { success: false, error: 'Submission failed: ' + error.message };
+    }
 }
 
 /**
  * Helper function to set a column value in the row array
  */
 function setColumnValue(rowArray, headers, columnName, value) {
-  const colIndex = headers.indexOf(columnName);
-  if (colIndex !== -1) {
-    rowArray[colIndex] = value;
-  }
+    const colIndex = headers.indexOf(columnName);
+    if (colIndex !== -1) {
+        rowArray[colIndex] = value;
+    }
 }
 
 /**
@@ -200,17 +178,16 @@ function setColumnValue(rowArray, headers, columnName, value) {
  * @returns {Object} { formFieldId: rawAMColumnHeader }
  */
 function getIntakeFieldMapping() {
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getIntakeFieldMapping();
-  var mapping = getIntakeFieldMappingFromMap();
+    var mapping = getIntakeFieldMappingFromMap();
 
-  // If FieldMapService returned entries, use them
-  if (mapping && Object.keys(mapping).length > 0) {
-    return mapping;
-  }
+    // If FieldMapService returned entries, use them
+    if (mapping && Object.keys(mapping).length > 0) {
+        return mapping;
+    }
 
-  // Fallback: hardcoded mapping (retained for migration safety)
-  Logger.log('IntakeService: LU_FieldMap not available, using hardcoded fallback');
-  return _getIntakeFieldMappingFallback();
+    // Fallback: hardcoded mapping (retained for migration safety)
+    Logger.log('IntakeService: LU_FieldMap not available, using hardcoded fallback');
+    return _getIntakeFieldMappingFallback();
 }
 
 // TODO: Item #13 -- Remove _getIntakeFieldMappingFallback() after 2-4 weeks
@@ -222,78 +199,78 @@ function getIntakeFieldMapping() {
  * @returns {Object} { formFieldId: rawAMColumnHeader }
  */
 function _getIntakeFieldMappingFallback() {
-  return {
-    // Section 1: How did you hear about us
-    'outdoorEvent': 'Are you completing this form at a Giving to the Nations OUTDOOR event?',
-    'learnedHow': 'How did you learn about our program?',
-    'referralInfo': 'More information about the person or organization that referred you.',
-    'referrerTitle': 'What is the title or position of the person who referred you?',
-    'referrerName': "What is the person's name who referred you?",
-    'additionalInfo': 'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.',
-    'usedServicesBefore': 'Have you used our services before?',
-    'currentlyHomeless': 'Are you currently homeless?',
-    
-    // Section 2: Applicant Information
-    'firstName': 'First Name',
-    'lastName': 'Last Name',
-    'streetAddress': 'Street Address',
-    'apartment': 'Apartment #, Upper, Lower, or Lot #',
-    'city': 'City',
-    'state': 'State',
-    'zipCode': 'Zip Code',
-    'county': 'County',
-    'addressValidity': 'Address Validity',
-    'addressType': 'Address type?',
-    'phoneNumber': 'Phone Number',
-    'phoneType': 'Phone type?',
-    'email': 'Email',
-    'bestContact': 'Best contact method (What is the best way to get ahold of you?)',
-    
-    // Section 3: Household Demographics
-    'malesUnder5': '[Males under 5]',
-    'femalesUnder5': '[Females under 5]',
-    'males5to9': '[Males 5-9]',
-    'females5to9': '[Females 5-9]',
-    'males10to14': '[Males 10-14]',
-    'females10to14': '[Females 10-14]',
-    'males15to17': '[Males 15-17]',
-    'females15to17': '[Females 15-17]',
-    'males18to24': '[Males 18-24]',
-    'females18to24': '[Females 18-24]',
-    'males25to34': '[Males 25-34]',
-    'females25to34': '[Females 25-34]',
-    'males35to44': '[Males 35-44]',
-    'females35to44': '[Females 35-44]',
-    'males45to54': '[Males 45-54]',
-    'females45to54': '[Females 45-54]',
-    'males55to64': '[Males 55-64]',
-    'females55to64': '[Females 55-64]',
-    'males65to84': '[Males 65-84]',
-    'females65to84': '[Females 65-84]',
-    'males85plus': '[Males 85 and Over]',
-    'females85plus': '[Females 85 and Over]',
-    'childrenNewbornTo2': 'Take Baby Box?',
-    
-    // Section 4: About You
-    'militaryStatus': 'Military Status',
-    'racialCategory': 'Please Select Your Racial Category',
-    'ethnicCategory': 'Please Select Your Ethnic Category',
-    'assistanceReceiving': 'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.',
-    'currentlyEmployed': 'Are you currently employed?',
-    'annualIncome': 'Total annual household income. (How much money does your family make in 1 year?)',
-    
-    // Section 5: About contacting
-    'emergencySituation': 'Was there an emergency situation which caused you to contact us?',
-    'currentSituation': 'Briefly explain your current situation.',
-    'howProductsHelp': 'How will receiving personal and home cleaning products help you?',
-    'pastProductsHelped': 'If you have received cleaning products from us in the past, how has receiving these products helped you?',
-    'mayUseInfo': 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.',
-    
-    // Section 7: Acknowledgement
-    'applicantSignature': 'Applicant Signature',
-    'formDate': "Please enter today's date.",
-    'signatureDate': 'Request Date'
-  };
+    return {
+        // Section 1: How did you hear about us
+        'outdoorEvent': 'Are you completing this form at a Giving to the Nations OUTDOOR event?',
+        'learnedHow': 'How did you learn about our program?',
+        'referralInfo': 'More information about the person or organization that referred you.',
+        'referrerTitle': 'What is the title or position of the person who referred you?',
+        'referrerName': "What is the person's name who referred you?",
+        'additionalInfo': 'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.',
+        'usedServicesBefore': 'Have you used our services before?',
+        'currentlyHomeless': 'Are you currently homeless?',
+
+        // Section 2: Applicant Information
+        'firstName': 'First Name',
+        'lastName': 'Last Name',
+        'streetAddress': 'Street Address',
+        'apartment': 'Apartment #, Upper, Lower, or Lot #',
+        'city': 'City',
+        'state': 'State',
+        'zipCode': 'Zip Code',
+        'county': 'County',
+        'addressValidity': 'Address Validity',
+        'addressType': 'Address type?',
+        'phoneNumber': 'Phone Number',
+        'phoneType': 'Phone type?',
+        'email': 'Email',
+        'bestContact': 'Best contact method (What is the best way to get ahold of you?)',
+
+        // Section 3: Household Demographics
+        'malesUnder5': '[Males under 5]',
+        'femalesUnder5': '[Females under 5]',
+        'males5to9': '[Males 5-9]',
+        'females5to9': '[Females 5-9]',
+        'males10to14': '[Males 10-14]',
+        'females10to14': '[Females 10-14]',
+        'males15to17': '[Males 15-17]',
+        'females15to17': '[Females 15-17]',
+        'males18to24': '[Males 18-24]',
+        'females18to24': '[Females 18-24]',
+        'males25to34': '[Males 25-34]',
+        'females25to34': '[Females 25-34]',
+        'males35to44': '[Males 35-44]',
+        'females35to44': '[Females 35-44]',
+        'males45to54': '[Males 45-54]',
+        'females45to54': '[Females 45-54]',
+        'males55to64': '[Males 55-64]',
+        'females55to64': '[Females 55-64]',
+        'males65to84': '[Males 65-84]',
+        'females65to84': '[Females 65-84]',
+        'males85plus': '[Males 85 and Over]',
+        'females85plus': '[Females 85 and Over]',
+        'childrenNewbornTo2': 'Take Baby Box?',
+
+        // Section 4: About You
+        'militaryStatus': 'Military Status',
+        'racialCategory': 'Please Select Your Racial Category',
+        'ethnicCategory': 'Please Select Your Ethnic Category',
+        'assistanceReceiving': 'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.',
+        'currentlyEmployed': 'Are you currently employed?',
+        'annualIncome': 'Total annual household income. (How much money does your family make in 1 year?)',
+
+        // Section 5: About contacting
+        'emergencySituation': 'Was there an emergency situation which caused you to contact us?',
+        'currentSituation': 'Briefly explain your current situation.',
+        'howProductsHelp': 'How will receiving personal and home cleaning products help you?',
+        'pastProductsHelped': 'If you have received cleaning products from us in the past, how has receiving these products helped you?',
+        'mayUseInfo': 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.',
+
+        // Section 7: Acknowledgement
+        'applicantSignature': 'Applicant Signature',
+        'formDate': "Please enter today's date.",
+        'signatureDate': 'Request Date'
+    };
 }
 
 /**
@@ -303,59 +280,59 @@ function _getIntakeFieldMappingFallback() {
  * @returns {Object} { valid: boolean, errors: string[] }
  */
 function validateIntakeForm(formData, enforceRequired = true) {
-  const errors = [];
-  
-  // Phone validation - must be 10 digits if provided
-  if (formData.phoneNumber) {
-    const phoneDigits = formData.phoneNumber.replace(/\D/g, '');
-    if (phoneDigits.length !== 10) {
-      errors.push('Phone number must be exactly 10 digits');
+    const errors = [];
+
+    // Phone validation - must be 10 digits if provided
+    if (formData.phoneNumber) {
+        const phoneDigits = formData.phoneNumber.replace(/\D/g, '');
+        if (phoneDigits.length !== 10) {
+            errors.push('Phone number must be exactly 10 digits');
+        }
+    } else if (enforceRequired) {
+        errors.push('Phone number is required');
     }
-  } else if (enforceRequired) {
-    errors.push('Phone number is required');
-  }
-  
-  // Email validation - basic format check if provided
-  if (formData.email) {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(formData.email)) {
-      errors.push('Please enter a valid email address');
+
+    // Email validation - basic format check if provided
+    if (formData.email) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(formData.email)) {
+            errors.push('Please enter a valid email address');
+        }
+    } else if (enforceRequired) {
+        errors.push('Email is required');
     }
-  } else if (enforceRequired) {
-    errors.push('Email is required');
-  }
-  
-  // Zip code validation - must be 5 digits if provided
-  if (formData.zipCode) {
-    const zipDigits = formData.zipCode.replace(/\D/g, '');
-    if (zipDigits.length !== 5) {
-      errors.push('Zip code must be exactly 5 digits');
+
+    // Zip code validation - must be 5 digits if provided
+    if (formData.zipCode) {
+        const zipDigits = formData.zipCode.replace(/\D/g, '');
+        if (zipDigits.length !== 5) {
+            errors.push('Zip code must be exactly 5 digits');
+        }
     }
-  }
-  
-  // Required fields check
-  if (enforceRequired) {
-    const requiredFields = [
-      { field: 'firstName', label: 'First Name' },
-      { field: 'lastName', label: 'Last Name' },
-      { field: 'streetAddress', label: 'Street Address' },
-      { field: 'city', label: 'City' },
-      { field: 'state', label: 'State' },
-      { field: 'zipCode', label: 'Zip Code' },
-      { field: 'county', label: 'County' }
-    ];
-    
-    for (const req of requiredFields) {
-      if (!formData[req.field] || formData[req.field].trim() === '') {
-        errors.push(req.label + ' is required');
-      }
+
+    // Required fields check
+    if (enforceRequired) {
+        const requiredFields = [
+            { field: 'firstName', label: 'First Name' },
+            { field: 'lastName', label: 'Last Name' },
+            { field: 'streetAddress', label: 'Street Address' },
+            { field: 'city', label: 'City' },
+            { field: 'state', label: 'State' },
+            { field: 'zipCode', label: 'Zip Code' },
+            { field: 'county', label: 'County' }
+        ];
+
+        for (const req of requiredFields) {
+            if (!formData[req.field] || formData[req.field].trim() === '') {
+                errors.push(req.label + ' is required');
+            }
+        }
     }
-  }
-  
-  return {
-    valid: errors.length === 0,
-    errors: errors
-  };
+
+    return {
+        valid: errors.length === 0,
+        errors: errors
+    };
 }
 
 /**
@@ -368,23 +345,23 @@ function validateIntakeForm(formData, enforceRequired = true) {
  * @returns {Object} { success: boolean, recordId: string, errors: string[] }
  */
 function submitIntakeFormWithValidation(formData, enforceRequired, eventInfo) {
-  // Default enforceRequired to true if not provided
-  if (enforceRequired === undefined || enforceRequired === null) {
-    enforceRequired = true;
-  }
-  
-  // Validate first
-  const validation = validateIntakeForm(formData, enforceRequired);
-  if (!validation.valid) {
-    return {
-      success: false,
-      error: 'Validation failed',
-      errors: validation.errors
-    };
-  }
-  
-  // Submit if valid — pass eventInfo through
-  return submitIntakeForm(formData, eventInfo);
+    // Default enforceRequired to true if not provided
+    if (enforceRequired === undefined || enforceRequired === null) {
+        enforceRequired = true;
+    }
+
+    // Validate first
+    const validation = validateIntakeForm(formData, enforceRequired);
+    if (!validation.valid) {
+        return {
+            success: false,
+            error: 'Validation failed',
+            errors: validation.errors
+        };
+    }
+
+    // Submit if valid — pass eventInfo through
+    return submitIntakeForm(formData, eventInfo);
 }
 
 /**
@@ -392,11 +369,11 @@ function submitIntakeFormWithValidation(formData, enforceRequired, eventInfo) {
  * Returns empty form structure with lookups
  */
 function getBlankIntakeForm() {
-  return {
-    lookups: getIntakeLookups(),
-    formData: {},
-    enforceRequired: false
-  };
+    return {
+        lookups: getIntakeLookups(),
+        formData: {},
+        enforceRequired: false
+    };
 }
 
 /**
@@ -409,44 +386,29 @@ function getBlankIntakeForm() {
  *         (bridge unreachable or IAM error) so AI dropdowns always populate.
  */
 function getIntakePortalData() {
-  var lookups = getIntakeLookups();
-
-  // v2.1: If MySQL returned empty (bridge error), fall back to Sheets lookups
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-    var isEmpty = !lookups || Object.keys(lookups).length === 0;
-    if (isEmpty) {
-      Logger.log('getIntakePortalData WARNING: MySQL getIntakeLookups() returned empty — ' +
-        'falling back to Sheets lookup. Check Cloud Run URL and IAM permissions.');
-      try {
-        lookups = getIntakeLookupsFromSheets_();
-      } catch (e2) {
-        Logger.log('getIntakePortalData: Sheets fallback also failed: ' + e2.message);
-      }
+    var lookups = getIntakeLookups();
+    // Build dropdownFields from LU_FieldMap: formFieldId → lookupSource
+    // for all fields visible in AI portal with dataType = dropdown.
+    // v2.1: corrected filter from 'AP' to 'AI'.
+    var dropdownFields = {};
+    try {
+        var map = loadFieldMap();
+        map.allFields.forEach(function (entry) {
+            if (entry.formFieldId
+                && entry.lookupSource
+                && entry.dataType === 'dropdown'
+                && entry.portalVisibility.toUpperCase().indexOf('AI') !== -1) {
+                dropdownFields[entry.formFieldId] = entry.lookupSource;
+            }
+        });
+    } catch (e) {
+        Logger.log('getIntakePortalData: LU_FieldMap load error (non-fatal): ' + e.message);
     }
-  }
 
-  // Build dropdownFields from LU_FieldMap: formFieldId → lookupSource
-  // for all fields visible in AI portal with dataType = dropdown.
-  // v2.1: corrected filter from 'AP' to 'AI'.
-  var dropdownFields = {};
-  try {
-    var map = loadFieldMap();
-    map.allFields.forEach(function(entry) {
-      if (entry.formFieldId
-          && entry.lookupSource
-          && entry.dataType === 'dropdown'
-          && entry.portalVisibility.toUpperCase().indexOf('AI') !== -1) {
-        dropdownFields[entry.formFieldId] = entry.lookupSource;
-      }
-    });
-  } catch (e) {
-    Logger.log('getIntakePortalData: LU_FieldMap load error (non-fatal): ' + e.message);
-  }
-
-  return {
-    lookups:        lookups,
-    dropdownFields: dropdownFields
-  };
+    return {
+        lookups: lookups,
+        dropdownFields: dropdownFields
+    };
 }
 
 /**
@@ -459,33 +421,33 @@ function getIntakePortalData() {
  * @returns {Object} { success: boolean }
  */
 function logIntakeSession(sessionInfo) {
-  try {
-    var mode = (sessionInfo && sessionInfo.mode) || 'unknown';
-    var userAgent = (sessionInfo && sessionInfo.userAgent) || '';
-    // Truncate user agent to prevent bloat
-    if (userAgent.length > 200) userAgent = userAgent.substring(0, 200);
-
-    var email = '';
     try {
-      email = Session.getActiveUser().getEmail() || '';
+        var mode = (sessionInfo && sessionInfo.mode) || 'unknown';
+        var userAgent = (sessionInfo && sessionInfo.userAgent) || '';
+        // Truncate user agent to prevent bloat
+        if (userAgent.length > 200) userAgent = userAgent.substring(0, 200);
+
+        var email = '';
+        try {
+            email = Session.getActiveUser().getEmail() || '';
+        } catch (e) {
+            // getActiveUser() can throw for anonymous access
+        }
+
+        var details = 'Intake form opened | Mode: ' + mode;
+        if (email) {
+            details += ' | User: ' + email;
+        } else {
+            details += ' | User: Anonymous';
+        }
+        if (userAgent) {
+            details += ' | UA: ' + userAgent;
+        }
+
+        logAudit('INTAKE_SESSION', null, details);
+        return { success: true };
     } catch (e) {
-      // getActiveUser() can throw for anonymous access
+        Logger.log('logIntakeSession error: ' + e.message);
+        return { success: false, error: e.message };
     }
-
-    var details = 'Intake form opened | Mode: ' + mode;
-    if (email) {
-      details += ' | User: ' + email;
-    } else {
-      details += ' | User: Anonymous';
-    }
-    if (userAgent) {
-      details += ' | UA: ' + userAgent;
-    }
-
-    logAudit('INTAKE_SESSION', null, details);
-    return { success: true };
-  } catch (e) {
-    Logger.log('logIntakeSession error: ' + e.message);
-    return { success: false, error: e.message };
-  }
 }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ProductService.gs
  * Backend CRUD services for the Product Portal (ProductPortalWeb.html)
  * Manages product records in DR/PF_Products sheet within G2N_Data workbook.
@@ -26,81 +26,74 @@
  *         updateProductRecords() to keep cache consistent after writes.
  *         normalizeProductDate() called once per row at index-build time, not
  *         on every lookup — eliminates O(n) per-row normalization on searches.
- * v1.5 - Two-phase DR/PF_Products index:
- *         PRODUCT_CACHE_KEY_PF_IDS caches just the Set of IDs present in
- *         DR/PF_Products (Phase 1, tiny payload). If ID not found, getNewProductList
- *         is called immediately — no full composite index built for brand-new records.
- *         PRODUCT_CACHE_KEY_PF_INDEX (Phase 2) built only when ID IS in PF_IDS.
- *         PRODUCT_CACHE_KEY_PRODUCTS caches LU_Products list (5-min TTL) so
- *         getNewProductList avoids a sheet read on repeated new-entry calls.
- * v1.6 - Persistent PF_IDS via ScriptProperties (no TTL expiry):
- *         PRODUCT_PROPS_PF_IDS stores the DR/PF_Products ID set in ScriptProperties
- *         so it survives cache evictions and product saves. appendPFIdToProps_()
- *         adds each newly saved ID instead of wiping the set.
- *         AM_IDS TTL raised to 6 hours (21600 s); stale AM_IDS is safe because
- *         a brand-new record not yet in AM_IDS simply falls through to new-entry mode.
- *         invalidateProductCache_() now only clears PF_INDEX and PRODUCTS from
- *         CacheService; AM_IDS and PF_IDS survive saves to avoid cold rebuilds.
- * v1.7 - addProductRecords(): strip G2N- prefix from recordId before writing to
- *         DR/PF_Products sheet ID column. Prevents "G2N-05216" being stored when
- *         the SV portal passes the MySQL-format record_id on the Sheets path.
- *         Sheet ID column stores bare integers matching AM column A format.
- * v1.8 - addProductRecords() and updateProductRecords(): moved USE_MYSQL guard
- *         outside the try/catch block. Previously a bridge error (thrown by
- *         DbService.addProductRecords → call_()) was caught by the surrounding
- *         try/catch and silently fell through to the Sheets write path, causing
- *         PP to write to DR/PF_Products Google Sheet instead of drpf_products MySQL.
- * v1.9 - getNewProductList(): filters out inactive products when LU_Products has
- *         an 'Active' column (Y/YES/TRUE/1 = active). Previously all rows were
- *         included regardless of active status.
  */
 
 // ============ PRODUCT CACHE KEYS ============
-var PRODUCT_CACHE_KEY_AM_IDS   = 'G2N_PRODUCT_AM_IDS';
+var PRODUCT_CACHE_KEY_AM_IDS = 'G2N_PRODUCT_AM_IDS';
 var PRODUCT_CACHE_KEY_PF_INDEX = 'G2N_PRODUCT_PF_INDEX';
 var PRODUCT_CACHE_KEY_PRODUCTS = 'G2N_PRODUCT_CATALOG';   // v1.5: LU_Products catalog
-var PRODUCT_CACHE_TTL          = 21600; // v1.6: 6-hour TTL (was 5 min) for CacheService entries
+var PRODUCT_CACHE_TTL = 21600; // v1.6: 6-hour TTL (was 5 min) for CacheService entries
 // v1.6: PF_IDS stored in ScriptProperties (persistent, no TTL)
-var PRODUCT_PROPS_PF_IDS       = 'G2N_PROD_PF_IDS';
+var PRODUCT_PROPS_PF_IDS = 'G2N_PROD_PF_IDS';
 
 /**
  * Searches for product records for a given ID + Request Date.
  * v1.3 - Source-aware: checks AM first. If ID is active, searches DR/PF_Products only.
  *         If ID is not in AM (archived record), searches Products_Archive in all
  *         archive workbooks. Archive results are returned with archived:true (read-only).
+ * v1.11 - DR/PF_Products is never archived: always search it first regardless of
+ *          whether the applicant record is in AM or the archive. If found, return
+ *          edit mode. If not found, fall through to Products_Archive (box-code
+ *          products that may have been archived), then new-entry mode.
+ *          Fixes PF/DR records for archived applicants showing as blank.
  * @param {string|number} recordId - The applicant record ID
  * @param {string} requestDate - Request date (YYYY-MM-DD or M/D/YYYY)
  * @returns {Object} { success, found, mode, products[], recordId, requestDate, archived? }
  */
 function getProductsForRecord(recordId, requestDate) {
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getProductsForRecord(recordId, requestDate);
-  try {
-    var id = (recordId || '').toString().trim();
-    if (!id) {
-      return { success: false, error: 'Record ID is required' };
-    }
+    try {
+        var id = (recordId || '').toString().trim();
+        if (!id) {
+            return { success: false, error: 'Record ID is required' };
+        }
 
-    var searchDate = normalizeProductDate(requestDate);
-    if (!searchDate) {
-      return { success: false, error: 'Valid Request Date is required' };
-    }
+        var searchDate = normalizeProductDate(requestDate);
+        if (!searchDate) {
+            return { success: false, error: 'Valid Request Date is required' };
+        }
 
-    // v1.3: Determine if record is active (in AM) or archived
-    if (isIdInMaster_(id)) {
-      // Active record — search DR/PF_Products only
-      return searchActiveDRPFProducts_(id, searchDate);
-    } else {
-      // Archived record — search Products_Archive in all archive workbooks
-      var archiveResult = findProductsInArchives_(id, searchDate);
-      if (archiveResult) return archiveResult;
-      // Not found anywhere — fall back to new product list
-      return getNewProductList(id, searchDate);
-    }
+        // v1.11: Always search DR/PF_Products first — this sheet is never archived.
+        var drPfResult = searchActiveDRPFProducts_(id, searchDate);
+        if (drPfResult && drPfResult.success && drPfResult.found) {
+            return drPfResult;
+        }
 
-  } catch (error) {
-    Logger.log('getProductsForRecord error: ' + error.message);
-    return { success: false, error: 'Failed to load products: ' + error.message };
-  }
+        // DR/PF not found — if applicant is archived, check Products_Archive next.
+        // v1.14: Even in new-entry mode, pass archived:true + archiveSource so PP
+        // saves new products to the correct archive workbook.
+        if (!isIdInMaster_(id)) {
+            var archiveResult = findProductsInArchives_(id, searchDate);
+            if (archiveResult) return archiveResult;
+
+            // Not in Products_Archive either — new-entry for this archived applicant.
+            // Determine which archive workbook holds the applicant record so PP can
+            // route the save to Products_Archive in the correct workbook.
+            var archSrcForNew = findArchiveSourceForId_(id);
+            var newList = getNewProductList(id, searchDate);
+            if (newList && archSrcForNew) {
+                newList.archived = true;
+                newList.archiveSource = archSrcForNew;
+            }
+            return newList;
+        }
+
+        // Not found anywhere and not archived — standard new-entry mode
+        return getNewProductList(id, searchDate);
+
+    } catch (error) {
+        Logger.log('getProductsForRecord error: ' + error.message);
+        return { success: false, error: 'Failed to load products: ' + error.message };
+    }
 }
 
 /**
@@ -111,14 +104,14 @@ function getProductsForRecord(recordId, requestDate) {
  *         Only clears PF_INDEX (composite key map) and PRODUCTS catalog.
  */
 function invalidateProductCache_() {
-  try {
-    CacheService.getScriptCache().removeAll([
-      PRODUCT_CACHE_KEY_PF_INDEX,
-      PRODUCT_CACHE_KEY_PRODUCTS
-    ]);
-  } catch (e) {
-    Logger.log('invalidateProductCache_ error (non-fatal): ' + e.message);
-  }
+    try {
+        CacheService.getScriptCache().removeAll([
+            PRODUCT_CACHE_KEY_PF_INDEX,
+            PRODUCT_CACHE_KEY_PRODUCTS
+        ]);
+    } catch (e) {
+        Logger.log('invalidateProductCache_ error (non-fatal): ' + e.message);
+    }
 }
 
 /**
@@ -128,11 +121,11 @@ function invalidateProductCache_() {
  * @returns {Array<string>}
  */
 function getPFIdsFromProps_() {
-  try {
-    var raw = PropertiesService.getScriptProperties().getProperty(PRODUCT_PROPS_PF_IDS);
-    if (raw) return JSON.parse(raw);
-  } catch (e) { /* non-fatal */ }
-  return null; // null signals "not yet built" to callers
+    try {
+        var raw = PropertiesService.getScriptProperties().getProperty(PRODUCT_PROPS_PF_IDS);
+        if (raw) return JSON.parse(raw);
+    } catch (e) { /* non-fatal */ }
+    return null; // null signals "not yet built" to callers
 }
 
 /**
@@ -142,17 +135,17 @@ function getPFIdsFromProps_() {
  * @param {string} id - The record ID just written to DR/PF_Products
  */
 function appendPFIdToProps_(id) {
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var raw = props.getProperty(PRODUCT_PROPS_PF_IDS);
-    var idSet = raw ? JSON.parse(raw) : [];
-    if (idSet.indexOf(id) === -1) {
-      idSet.push(id);
-      props.setProperty(PRODUCT_PROPS_PF_IDS, JSON.stringify(idSet));
+    try {
+        var props = PropertiesService.getScriptProperties();
+        var raw = props.getProperty(PRODUCT_PROPS_PF_IDS);
+        var idSet = raw ? JSON.parse(raw) : [];
+        if (idSet.indexOf(id) === -1) {
+            idSet.push(id);
+            props.setProperty(PRODUCT_PROPS_PF_IDS, JSON.stringify(idSet));
+        }
+    } catch (e) {
+        Logger.log('appendPFIdToProps_ error (non-fatal): ' + e.message);
     }
-  } catch (e) {
-    Logger.log('appendPFIdToProps_ error (non-fatal): ' + e.message);
-  }
 }
 
 /**
@@ -164,46 +157,80 @@ function appendPFIdToProps_(id) {
  * @returns {boolean}
  */
 function isIdInMaster_(id) {
-  try {
-    var cache = CacheService.getScriptCache();
-    var cached = cache.get(PRODUCT_CACHE_KEY_AM_IDS);
-    var idSet;
+    try {
+        var cache = CacheService.getScriptCache();
+        var cached = cache.get(PRODUCT_CACHE_KEY_AM_IDS);
+        var idSet;
 
-    if (cached) {
-      try {
-        idSet = JSON.parse(cached); // Array of id strings
-      } catch (e) {
-        idSet = null;
-      }
+        if (cached) {
+            try {
+                idSet = JSON.parse(cached); // Array of id strings
+            } catch (e) {
+                idSet = null;
+            }
+        }
+
+        if (!idSet) {
+            // Build from sheet
+            var sheet = getMasterSheet();
+            if (!sheet || sheet.getLastRow() < 2) return false;
+            var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+            idSet = [];
+            for (var i = 0; i < ids.length; i++) {
+                var v = (ids[i][0] || '').toString().trim();
+                if (v) idSet.push(v);
+            }
+            try {
+                cache.put(PRODUCT_CACHE_KEY_AM_IDS, JSON.stringify(idSet), PRODUCT_CACHE_TTL);
+            } catch (e) {
+                Logger.log('isIdInMaster_ cache write (non-fatal): ' + e.message);
+            }
+        }
+
+        // O(1) lookup via object map built from the array
+        for (var j = 0; j < idSet.length; j++) {
+            if (idSet[j] === id) return true;
+        }
+        return false;
+
+    } catch (e) {
+        Logger.log('isIdInMaster_ error: ' + e.message);
+        return false;
     }
+}
 
-    if (!idSet) {
-      // Build from sheet
-      var sheet = getMasterSheet();
-      if (!sheet || sheet.getLastRow() < 2) return false;
-      var ids = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-      idSet = [];
-      for (var i = 0; i < ids.length; i++) {
-        var v = (ids[i][0] || '').toString().trim();
-        if (v) idSet.push(v);
-      }
-      try {
-        cache.put(PRODUCT_CACHE_KEY_AM_IDS, JSON.stringify(idSet), PRODUCT_CACHE_TTL);
-      } catch (e) {
-        Logger.log('isIdInMaster_ cache write (non-fatal): ' + e.message);
-      }
+/**
+ * Finds which archive workbook contains a given applicant ID.
+ * Scans G2N_Archive and all G2N_Archive_YYYY workbooks (ID column only).
+ * Returns the workbook name string, or null if not found.
+ * v1.14 - New helper. Used to determine where to save new product records for
+ *          archived applicants (Products_Archive in the correct workbook).
+ * @param {string} id - Applicant record ID
+ * @returns {string|null} Archive workbook name or null
+ */
+function findArchiveSourceForId_(id) {
+    try {
+        var farPast = new Date('2000-01-01');
+        var farFuture = new Date('2099-12-31');
+        var archiveWorkbooks = getArchiveWorkbooksForRange(farPast, farFuture);
+        for (var w = 0; w < archiveWorkbooks.length; w++) {
+            var wb = archiveWorkbooks[w].workbook;
+            var wbName = archiveWorkbooks[w].name;
+            var sheet = wb.getSheetByName('Archive');
+            if (!sheet || sheet.getLastRow() < 2) continue;
+            // Read only column A (ID column) for performance
+            var idColData = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+            for (var i = 0; i < idColData.length; i++) {
+                if ((idColData[i][0] || '').toString().trim() === id) {
+                    return wbName;
+                }
+            }
+        }
+        return null;
+    } catch (e) {
+        Logger.log('findArchiveSourceForId_ error: ' + e.message);
+        return null;
     }
-
-    // O(1) lookup via object map built from the array
-    for (var j = 0; j < idSet.length; j++) {
-      if (idSet[j] === id) return true;
-    }
-    return false;
-
-  } catch (e) {
-    Logger.log('isIdInMaster_ error: ' + e.message);
-    return false;
-  }
 }
 
 /**
@@ -219,49 +246,70 @@ function isIdInMaster_(id) {
  * @returns {Object} { success, found, mode, products[], recordId, requestDate }
  */
 function searchActiveDRPFProducts_(id, searchDate) {
-  var cache = CacheService.getScriptCache();
+    var cache = CacheService.getScriptCache();
 
-  // ── Phase 1: ID-only check (v1.6: ScriptProperties — persistent, no TTL) ──
-  // Priority: ScriptProperties → CacheService → sheet scan
-  var idSet = getPFIdsFromProps_();
+    // ── Phase 1: ID-only check (v1.6: ScriptProperties — persistent, no TTL) ──
+    // Priority: ScriptProperties → CacheService → sheet scan
+    var idSet = getPFIdsFromProps_();
 
-  if (idSet === null) {
-    // Neither ScriptProperties nor cache has it — build from sheet
-    idSet = [];
-    var allData, hdrs;
-    var dataWB = getDataWorkbook();
-    var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
-    if (sheet && sheet.getLastRow() >= 2) {
-      allData = sheet.getDataRange().getValues();
-      hdrs = trimHeaders(allData[0]);
-      var idCol = hdrs.indexOf('ID');
-      if (idCol !== -1) {
-        var seen = {};
-        for (var r = 1; r < allData.length; r++) {
-          var rid = (allData[r][idCol] || '').toString().trim();
-          if (rid && !seen[rid]) { idSet.push(rid); seen[rid] = true; }
+    if (idSet === null) {
+        // Neither ScriptProperties nor cache has it — build from sheet
+        idSet = [];
+        var allData, hdrs;
+        var dataWB = getDataWorkbook();
+        var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
+        if (sheet && sheet.getLastRow() >= 2) {
+            allData = sheet.getDataRange().getValues();
+            hdrs = trimHeaders(allData[0]);
+            var idCol = hdrs.indexOf('ID');
+            if (idCol !== -1) {
+                var seen = {};
+                for (var r = 1; r < allData.length; r++) {
+                    var rid = (allData[r][idCol] || '').toString().trim();
+                    if (rid && !seen[rid]) { idSet.push(rid); seen[rid] = true; }
+                }
+            }
         }
-      }
+        // Persist to ScriptProperties so future calls skip this scan entirely
+        try {
+            PropertiesService.getScriptProperties().setProperty(PRODUCT_PROPS_PF_IDS, JSON.stringify(idSet));
+        } catch (e) { /* non-fatal */ }
+
+        // Reuse the already-read data for Phase 2 if this ID is present
+        if (idSet.indexOf(id) !== -1) {
+            return searchDRPFProductsWithData_(id, searchDate, allData, hdrs, cache);
+        }
+        return getNewProductList(id, searchDate);
     }
-    // Persist to ScriptProperties so future calls skip this scan entirely
-    try {
-      PropertiesService.getScriptProperties().setProperty(PRODUCT_PROPS_PF_IDS, JSON.stringify(idSet));
-    } catch (e) { /* non-fatal */ }
 
-    // Reuse the already-read data for Phase 2 if this ID is present
-    if (idSet.indexOf(id) !== -1) {
-      return searchDRPFProductsWithData_(id, searchDate, allData, hdrs, cache);
+    // ScriptProperties warm — fast path
+    if (idSet.indexOf(id) === -1) {
+        // v1.13: Before returning new-entry mode, do a targeted ID-column scan of
+        // DR/PF_Products. ScriptProperties can be stale (cleared, write failure, or
+        // record added before appendPFIdToProps_ ran). This catches archived applicants
+        // whose products ARE in DR/PF_Products but whose ID was never persisted to props.
+        var dataWB2 = getDataWorkbook();
+        var sheet2 = dataWB2 ? dataWB2.getSheetByName(CONFIG.PF_PRODUCTS_SHEET) : null;
+        if (sheet2 && sheet2.getLastRow() >= 2) {
+            var idCol2Data = sheet2.getRange(1, 1, sheet2.getLastRow(), 1).getValues();
+            var foundInSheet = false;
+            for (var ri = 1; ri < idCol2Data.length; ri++) {
+                if ((idCol2Data[ri][0] || '').toString().trim() === id) {
+                    foundInSheet = true;
+                    break;
+                }
+            }
+            if (foundInSheet) {
+                // ID is in the sheet but missing from ScriptProperties — repair and proceed
+                appendPFIdToProps_(id);
+                return searchDRPFProductsWithData_(id, searchDate, null, null, cache);
+            }
+        }
+        return getNewProductList(id, searchDate); // Truly a brand-new ID
     }
-    return getNewProductList(id, searchDate);
-  }
 
-  // ScriptProperties warm — fast path
-  if (idSet.indexOf(id) === -1) {
-    return getNewProductList(id, searchDate); // Brand-new ID — skip Phase 2 entirely
-  }
-
-  // ── Phase 2: composite key lookup ────────────────────────────────────────
-  return searchDRPFProductsWithData_(id, searchDate, null, null, cache);
+    // ── Phase 2: composite key lookup ────────────────────────────────────────
+    return searchDRPFProductsWithData_(id, searchDate, null, null, cache);
 }
 
 /**
@@ -274,58 +322,58 @@ function searchActiveDRPFProducts_(id, searchDate) {
  * @returns {Object}
  */
 function searchDRPFProductsWithData_(id, searchDate, preloadedData, preloadedHeaders, cache) {
-  var indexMap = null;
-  try {
-    var cachedIdx = cache.get(PRODUCT_CACHE_KEY_PF_INDEX);
-    if (cachedIdx) indexMap = JSON.parse(cachedIdx);
-  } catch (e) { /* non-fatal */ }
+    var indexMap = null;
+    try {
+        var cachedIdx = cache.get(PRODUCT_CACHE_KEY_PF_INDEX);
+        if (cachedIdx) indexMap = JSON.parse(cachedIdx);
+    } catch (e) { /* non-fatal */ }
 
-  if (!indexMap) {
-    indexMap = {};
-    var data = preloadedData;
-    var headers = preloadedHeaders;
+    if (!indexMap) {
+        indexMap = {};
+        var data = preloadedData;
+        var headers = preloadedHeaders;
 
-    if (!data) {
-      var dataWB = getDataWorkbook();
-      var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
-      if (!sheet || sheet.getLastRow() < 2) return getNewProductList(id, searchDate);
-      data = sheet.getDataRange().getValues();
-      headers = trimHeaders(data[0]);
+        if (!data) {
+            var dataWB = getDataWorkbook();
+            var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
+            if (!sheet || sheet.getLastRow() < 2) return getNewProductList(id, searchDate);
+            data = sheet.getDataRange().getValues();
+            headers = trimHeaders(data[0]);
+        }
+
+        var idCol = headers.indexOf('ID');
+        var reqDateCol = headers.indexOf('RequestDate');
+        var productIdCol = headers.indexOf('ProductId');
+        var productNameCol = headers.indexOf('ProductName');
+        var qtyReqCol = headers.indexOf('QtyRequested');
+        var qtyRecCol = headers.indexOf('QtyReceived');
+
+        if (idCol === -1 || reqDateCol === -1) {
+            return { success: false, error: 'DR/PF_Products sheet is missing required columns (ID, RequestDate)' };
+        }
+
+        for (var i = 1; i < data.length; i++) {
+            var rowId = (data[i][idCol] || '').toString().trim();
+            var rowDate = normalizeProductDate(data[i][reqDateCol]);
+            if (!rowId || !rowDate) continue;
+            var key = rowId + '|' + rowDate;
+            if (!indexMap[key]) indexMap[key] = [];
+            indexMap[key].push({
+                sheetRow: i + 1,
+                productId: productIdCol !== -1 ? (data[i][productIdCol] || '').toString() : '',
+                productName: productNameCol !== -1 ? (data[i][productNameCol] || '').toString() : '',
+                qtyRequested: qtyReqCol !== -1 ? (data[i][qtyReqCol] || '') : '',
+                qtyReceived: qtyRecCol !== -1 ? (data[i][qtyRecCol] || '') : ''
+            });
+        }
+        try { cache.put(PRODUCT_CACHE_KEY_PF_INDEX, JSON.stringify(indexMap), PRODUCT_CACHE_TTL); } catch (e) { /* non-fatal */ }
     }
 
-    var idCol          = headers.indexOf('ID');
-    var reqDateCol     = headers.indexOf('RequestDate');
-    var productIdCol   = headers.indexOf('ProductId');
-    var productNameCol = headers.indexOf('ProductName');
-    var qtyReqCol      = headers.indexOf('QtyRequested');
-    var qtyRecCol      = headers.indexOf('QtyReceived');
-
-    if (idCol === -1 || reqDateCol === -1) {
-      return { success: false, error: 'DR/PF_Products sheet is missing required columns (ID, RequestDate)' };
+    var matches = indexMap[id + '|' + searchDate];
+    if (matches && matches.length > 0) {
+        return { success: true, found: true, mode: 'edit', products: matches, recordId: id, requestDate: searchDate };
     }
-
-    for (var i = 1; i < data.length; i++) {
-      var rowId   = (data[i][idCol]  || '').toString().trim();
-      var rowDate = normalizeProductDate(data[i][reqDateCol]);
-      if (!rowId || !rowDate) continue;
-      var key = rowId + '|' + rowDate;
-      if (!indexMap[key]) indexMap[key] = [];
-      indexMap[key].push({
-        sheetRow:     i + 1,
-        productId:    productIdCol   !== -1 ? (data[i][productIdCol]   || '').toString() : '',
-        productName:  productNameCol !== -1 ? (data[i][productNameCol] || '').toString() : '',
-        qtyRequested: qtyReqCol      !== -1 ? (data[i][qtyReqCol]      || '') : '',
-        qtyReceived:  qtyRecCol      !== -1 ? (data[i][qtyRecCol]      || '') : ''
-      });
-    }
-    try { cache.put(PRODUCT_CACHE_KEY_PF_INDEX, JSON.stringify(indexMap), PRODUCT_CACHE_TTL); } catch (e) { /* non-fatal */ }
-  }
-
-  var matches = indexMap[id + '|' + searchDate];
-  if (matches && matches.length > 0) {
-    return { success: true, found: true, mode: 'edit', products: matches, recordId: id, requestDate: searchDate };
-  }
-  return getNewProductList(id, searchDate);
+    return getNewProductList(id, searchDate);
 }
 
 /**
@@ -339,58 +387,57 @@ function searchDRPFProductsWithData_(id, searchDate, preloadedData, preloadedHea
  * @returns {Object|null} Result object if found, null if not found in any archive
  */
 function findProductsInArchives_(id, searchDate) {
-  try {
-    var farPast = new Date('2000-01-01');
-    var farFuture = new Date('2099-12-31');
-    var archiveWorkbooks = getArchiveWorkbooksForRange(farPast, farFuture);
+    try {
+        var farPast = new Date('2000-01-01');
+        var farFuture = new Date('2099-12-31');
+        var archiveWorkbooks = getArchiveWorkbooksForRange(farPast, farFuture);
 
-    for (var w = 0; w < archiveWorkbooks.length; w++) {
-      var wb = archiveWorkbooks[w].workbook;
-      var wbName = archiveWorkbooks[w].name;
-      var sheet = wb.getSheetByName('Products_Archive');
-      if (!sheet || sheet.getLastRow() < 2) continue;
+        for (var w = 0; w < archiveWorkbooks.length; w++) {
+            var wb = archiveWorkbooks[w].workbook;
+            var wbName = archiveWorkbooks[w].name;
+            var sheet = wb.getSheetByName('Products_Archive');
+            if (!sheet || sheet.getLastRow() < 2) continue;
 
-      var data = sheet.getDataRange().getValues();
-      var headers = trimHeaders(data[0]);
-      var idCol = headers.indexOf('ID');
-      var reqDateCol = headers.indexOf('RequestDate');
-      var productIdCol = headers.indexOf('ProductId');
-      var productNameCol = headers.indexOf('ProductName');
-      var qtyReqCol = headers.indexOf('QtyRequested');
-      var qtyRecCol = headers.indexOf('QtyReceived');
+            var data = sheet.getDataRange().getValues();
+            var headers = trimHeaders(data[0]);
+            var idCol = headers.indexOf('ID');
+            var reqDateCol = headers.indexOf('RequestDate');
+            var productIdCol = headers.indexOf('ProductId');
+            var productNameCol = headers.indexOf('ProductName');
+            var qtyReqCol = headers.indexOf('QtyRequested');
+            var qtyRecCol = headers.indexOf('QtyReceived');
 
-      if (idCol === -1 || reqDateCol === -1) continue;
+            if (idCol === -1 || reqDateCol === -1) continue;
 
-      var matches = [];
-      for (var i = 1; i < data.length; i++) {
-        var rowId = (data[i][idCol] || '').toString().trim();
-        var rowDate = normalizeProductDate(data[i][reqDateCol]);
-        if (rowId === id && rowDate === searchDate) {
-          matches.push({
-            sheetRow: i + 1,
-            productId: productIdCol !== -1 ? (data[i][productIdCol] || '').toString() : '',
-            productName: productNameCol !== -1 ? (data[i][productNameCol] || '').toString() : '',
-            qtyRequested: qtyReqCol !== -1 ? (data[i][qtyReqCol] || '') : '',
-            qtyReceived: qtyRecCol !== -1 ? (data[i][qtyRecCol] || '') : ''
-          });
+            var matches = [];
+            for (var i = 1; i < data.length; i++) {
+                var rowId = (data[i][idCol] || '').toString().trim();
+                var rowDate = normalizeProductDate(data[i][reqDateCol]);
+                if (rowId === id && rowDate === searchDate) {
+                    matches.push({
+                        sheetRow: i + 1,
+                        productId: productIdCol !== -1 ? (data[i][productIdCol] || '').toString() : '',
+                        productName: productNameCol !== -1 ? (data[i][productNameCol] || '').toString() : '',
+                        qtyRequested: qtyReqCol !== -1 ? (data[i][qtyReqCol] || '') : '',
+                        qtyReceived: qtyRecCol !== -1 ? (data[i][qtyRecCol] || '') : ''
+                    });
+                }
+            }
+
+            if (matches.length > 0) {
+                return {
+                    success: true, found: true, mode: 'edit',
+                    archived: true,          // PP renders these read-only
+                    archiveSource: wbName,
+                    products: matches, recordId: id, requestDate: searchDate
+                };
+            }
         }
-      }
-
-      if (matches.length > 0) {
-        Logger.log('findProductsInArchives_: found ' + matches.length + ' records in ' + wbName);
-        return {
-          success: true, found: true, mode: 'edit',
-          archived: true,          // PP renders these read-only
-          archiveSource: wbName,
-          products: matches, recordId: id, requestDate: searchDate
-        };
-      }
+        return null;
+    } catch (e) {
+        Logger.log('findProductsInArchives_ error: ' + e.message);
+        return null;
     }
-    return null;
-  } catch (e) {
-    Logger.log('findProductsInArchives_ error: ' + e.message);
-    return null;
-  }
 }
 
 /**
@@ -402,62 +449,66 @@ function findProductsInArchives_(id, searchDate) {
  * @returns {Object} { success, found: false, mode: 'new', products[] }
  */
 function getNewProductList(recordId, normalizedDate) {
-  try {
-    var cache = CacheService.getScriptCache();
-    var products = null;
-
     try {
-      var cachedProds = cache.get(PRODUCT_CACHE_KEY_PRODUCTS);
-      if (cachedProds) products = JSON.parse(cachedProds);
-    } catch (e) { /* non-fatal */ }
+        var cache = CacheService.getScriptCache();
+        var products = null;
 
-    if (!products) {
-      var lookups = getLookupsWorkbook();
-      var sheet = lookups.getSheetByName(CONFIG.LOOKUPS.PRODUCTS);
+        try {
+            var cachedProds = cache.get(PRODUCT_CACHE_KEY_PRODUCTS);
+            if (cachedProds) products = JSON.parse(cachedProds);
+        } catch (e) { /* non-fatal */ }
 
-      if (!sheet || sheet.getLastRow() < 2) {
-        return { success: false, error: 'LU_Products sheet not found or empty' };
-      }
+        if (!products) {
+            var lookups = getLookupsWorkbook();
+            var sheet = lookups.getSheetByName(CONFIG.LOOKUPS.PRODUCTS);
 
-      var data = sheet.getDataRange().getValues();
-      var headers = trimHeaders(data[0]);
-      var nameCol   = headers.indexOf('ProductName');
-      var activeCol = headers.indexOf('Active');
-      if (nameCol === -1) nameCol = 0;
+            if (!sheet || sheet.getLastRow() < 2) {
+                return { success: false, error: 'LU_Products sheet not found or empty' };
+            }
 
-      products = [];
-      for (var i = 1; i < data.length; i++) {
-        var name = (data[i][nameCol] || '').toString().trim();
-        if (!name) continue;
-        // v1.8: Skip inactive products when Active column is present
-        if (activeCol !== -1) {
-          var activeVal = (data[i][activeCol] || '').toString().trim().toUpperCase();
-          if (activeVal !== 'Y' && activeVal !== 'YES' && activeVal !== 'TRUE' && activeVal !== '1') continue;
+            var data = sheet.getDataRange().getValues();
+            var headers = trimHeaders(data[0]);
+            var idCol = headers.indexOf('ProductId');   // v1.10: real ProductId column
+            var nameCol = headers.indexOf('ProductName');
+            var activeCol = headers.indexOf('Active');
+            if (nameCol === -1) nameCol = 0;
+
+            products = [];
+            for (var i = 1; i < data.length; i++) {
+                var name = (data[i][nameCol] || '').toString().trim();
+                if (!name) continue;
+                // v1.8: Skip inactive products when Active column is present
+                if (activeCol !== -1) {
+                    var activeVal = (data[i][activeCol] || '').toString().trim().toUpperCase();
+                    if (activeVal !== 'Y' && activeVal !== 'YES' && activeVal !== 'TRUE' && activeVal !== '1') continue;
+                }
+                // v1.10: Use real ProductId from column if present; fall back to row-based for backward compat
+                var pid = idCol !== -1 ? (data[i][idCol] || '').toString().trim() : '';
+                if (!pid) pid = (i + 1).toString();
+                products.push({
+                    sheetRow: i + 1,
+                    productId: pid,
+                    productName: name,
+                    qtyRequested: '',
+                    qtyReceived: ''
+                });
+            }
+            try { cache.put(PRODUCT_CACHE_KEY_PRODUCTS, JSON.stringify(products), PRODUCT_CACHE_TTL); } catch (e) { /* non-fatal */ }
         }
-        products.push({
-          sheetRow:     i + 1,
-          productId:    (i + 1).toString(),  // stable row-based ID for new entries
-          productName:  name,
-          qtyRequested: '',
-          qtyReceived:  ''
-        });
-      }
-      try { cache.put(PRODUCT_CACHE_KEY_PRODUCTS, JSON.stringify(products), PRODUCT_CACHE_TTL); } catch (e) { /* non-fatal */ }
+
+        return {
+            success: true,
+            found: false,
+            mode: 'new',
+            products: products,
+            recordId: recordId,
+            requestDate: normalizedDate
+        };
+
+    } catch (error) {
+        Logger.log('getNewProductList error: ' + error.message);
+        return { success: false, error: 'Failed to load product list: ' + error.message };
     }
-
-    return {
-      success: true,
-      found: false,
-      mode: 'new',
-      products: products,
-      recordId: recordId,
-      requestDate: normalizedDate
-    };
-
-  } catch (error) {
-    Logger.log('getNewProductList error: ' + error.message);
-    return { success: false, error: 'Failed to load product list: ' + error.message };
-  }
 }
 
 /**
@@ -469,63 +520,216 @@ function getNewProductList(recordId, normalizedDate) {
  * @returns {Object} { success, message, updatedCount }
  */
 function updateProductRecords(products) {
-  // v1.8: USE_MYSQL guard outside try/catch — prevents bridge errors falling through to Sheets path.
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.updateProductRecords(products);
-  try {
-    if (!products || products.length === 0) {
-      return { success: false, error: 'No products to update' };
+    try {
+        if (!products || products.length === 0) {
+            return { success: false, error: 'No products to update' };
+        }
+
+        var dataWB = getDataWorkbook();
+        var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
+
+        if (!sheet) {
+            return { success: false, error: 'DR/PF_Products sheet not found' };
+        }
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var qtyReqCol = headers.indexOf('QtyRequested');
+        var qtyRecCol = headers.indexOf('QtyReceived');
+
+        if (qtyReqCol === -1 || qtyRecCol === -1) {
+            return { success: false, error: 'QtyRequested or QtyReceived column not found' };
+        }
+
+        var updated = 0;
+        for (var i = 0; i < products.length; i++) {
+            var p = products[i];
+            var rowIdx = parseInt(p.sheetRow) - 1; // Convert to 0-based array index
+            if (rowIdx >= 1 && rowIdx < data.length) {
+                data[rowIdx][qtyReqCol] = p.qtyRequested || '';
+                data[rowIdx][qtyRecCol] = p.qtyReceived || '';
+                updated++;
+            }
+        }
+
+        // Single bulk write of all data rows
+        if (updated > 0 && data.length > 1) {
+            var dataRows = data.slice(1);
+            sheet.getRange(2, 1, dataRows.length, dataRows[0].length).setValues(dataRows);
+        }
+
+        logAudit('PRODUCT_UPDATE', null, 'Updated ' + updated + ' product records in DR/PF_Products');
+        invalidateProductCache_();
+
+        return {
+            success: true,
+            message: 'Updated ' + updated + ' product records',
+            updatedCount: updated
+        };
+
+    } catch (error) {
+        Logger.log('updateProductRecords error: ' + error.message);
+        return { success: false, error: 'Failed to update products: ' + error.message };
     }
-
-    var dataWB = getDataWorkbook();
-    var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
-
-    if (!sheet) {
-      return { success: false, error: 'DR/PF_Products sheet not found' };
-    }
-
-    var data = sheet.getDataRange().getValues();
-    var headers = trimHeaders(data[0]);
-    var qtyReqCol = headers.indexOf('QtyRequested');
-    var qtyRecCol = headers.indexOf('QtyReceived');
-
-    if (qtyReqCol === -1 || qtyRecCol === -1) {
-      return { success: false, error: 'QtyRequested or QtyReceived column not found' };
-    }
-
-    var updated = 0;
-    for (var i = 0; i < products.length; i++) {
-      var p = products[i];
-      var rowIdx = parseInt(p.sheetRow) - 1; // Convert to 0-based array index
-      if (rowIdx >= 1 && rowIdx < data.length) {
-        data[rowIdx][qtyReqCol] = p.qtyRequested || '';
-        data[rowIdx][qtyRecCol] = p.qtyReceived || '';
-        updated++;
-      }
-    }
-
-    // Single bulk write of all data rows
-    if (updated > 0 && data.length > 1) {
-      var dataRows = data.slice(1);
-      sheet.getRange(2, 1, dataRows.length, dataRows[0].length).setValues(dataRows);
-    }
-
-    logAudit('PRODUCT_UPDATE', null, 'Updated ' + updated + ' product records in DR/PF_Products');
-    invalidateProductCache_();
-
-    return {
-      success: true,
-      message: 'Updated ' + updated + ' product records',
-      updatedCount: updated
-    };
-
-  } catch (error) {
-    Logger.log('updateProductRecords error: ' + error.message);
-    return { success: false, error: 'Failed to update products: ' + error.message };
-  }
 }
 
 /**
- * Adds new product records to DR/PF_Products (new mode)
+ * Adds new product records to Products_Archive in the specified archive workbook.
+ * Called when adding products for an archived applicant record — keeps product data
+ * in the same workbook as the applicant's Applicants_Master row.
+ *
+ * v1.14 - New function. Previously new products for archived applicants were written
+ *          to DR/PF_Products (active data workbook), creating an environment mismatch:
+ *          the applicant row is in G2N_Archive or G2N_Archive_YYYY but their new
+ *          products ended up in G2N_Data. Now products follow the applicant.
+ *
+ * @param {string} archiveSource - Archive workbook name ('G2N_Archive' or 'G2N_Archive_YYYY')
+ * @param {string} recordId      - Applicant record ID
+ * @param {string} requestDate   - Request date (any normalizable format)
+ * @param {Array}  products      - Array of { productId, productName, qtyRequested, qtyReceived }
+ * @returns {Object} { success, message, addedCount }
+ */
+function addProductRecordsToArchive(archiveSource, recordId, requestDate, products) {
+    try {
+        if (!archiveSource) return { success: false, error: 'Archive source is required' };
+        if (!recordId || !requestDate) return { success: false, error: 'Record ID and Request Date are required' };
+        if (!products || products.length === 0) return { success: false, error: 'No products to add' };
+
+        var sheetId = (recordId || '').toString().trim();
+        if (sheetId.toUpperCase().startsWith('G2N-')) {
+            sheetId = parseInt(sheetId.substring(4), 10).toString();
+        }
+
+        // ── Locate the archive workbook ──────────────────────────────────────
+        var archiveWB = null;
+        if (archiveSource === 'G2N_Archive') {
+            if (!CONFIG.ARCHIVE_WORKBOOK_ID) return { success: false, error: 'ARCHIVE_WORKBOOK_ID not configured' };
+            archiveWB = SpreadsheetApp.openById(CONFIG.ARCHIVE_WORKBOOK_ID);
+        } else {
+            if (!CONFIG.ARCHIVES_BACKUPS_FOLDER_ID) return { success: false, error: 'ARCHIVES_BACKUPS_FOLDER_ID not configured' };
+            var folder = DriveApp.getFolderById(CONFIG.ARCHIVES_BACKUPS_FOLDER_ID);
+            var files = folder.getFiles();
+            while (files.hasNext()) {
+                var file = files.next();
+                if (file.getMimeType() === 'application/vnd.google-apps.spreadsheet' && file.getName() === archiveSource) {
+                    archiveWB = SpreadsheetApp.openById(file.getId());
+                    break;
+                }
+            }
+            if (!archiveWB) return { success: false, error: 'Archive workbook "' + archiveSource + '" not found' };
+        }
+
+        // ── Get or create Products_Archive sheet ────────────────────────────
+        var sheet = archiveWB.getSheetByName('Products_Archive');
+        if (!sheet) {
+            sheet = archiveWB.insertSheet('Products_Archive');
+            sheet.getRange(1, 1, 1, 7).setValues([['ID', 'RequestDate', 'ProductId', 'ProductName', 'QtyRequested', 'QtyReceived', 'Active']]);
+            sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+            sheet.setFrozenRows(1);
+        }
+
+        // ── Filter to products with at least one qty value ──────────────────
+        var rowsToAdd = [];
+        for (var i = 0; i < products.length; i++) {
+            var p = products[i];
+            var qtyReq = (p.qtyRequested || '').toString().trim();
+            var qtyRec = (p.qtyReceived || '').toString().trim();
+            if (qtyReq !== '' || qtyRec !== '') {
+                rowsToAdd.push([
+                    sheetId, requestDate,
+                    p.productId || '', p.productName || '',
+                    qtyReq ? parseInt(qtyReq) || 0 : '',
+                    qtyRec ? parseInt(qtyRec) || 0 : '',
+                    'Y'
+                ]);
+            }
+        }
+
+        if (rowsToAdd.length === 0) {
+            return { success: true, message: 'No products had quantities entered. Nothing was saved.', addedCount: 0 };
+        }
+
+        var lastRow = sheet.getLastRow();
+        sheet.getRange(lastRow + 1, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
+
+        logAudit('PRODUCT_ADD', sheetId, 'Added ' + rowsToAdd.length + ' product records to Products_Archive in ' + archiveSource);
+
+        return { success: true, message: 'Added ' + rowsToAdd.length + ' product records to ' + archiveSource, addedCount: rowsToAdd.length };
+
+    } catch (error) {
+        Logger.log('addProductRecordsToArchive error: ' + error.message);
+        return { success: false, error: 'Failed to add archive products: ' + error.message };
+    }
+}
+
+/**
+ * Updates existing product records in Products_Archive (edit mode for archived applicants).
+ * Mirrors updateProductRecords() but writes to the archive workbook's Products_Archive sheet.
+ *
+ * v1.14 - New function. updateProductRecords() only wrote to DR/PF_Products; calls from
+ *          PP for archived records with sheetRow references into Products_Archive had no
+ *          valid write target. Now routes correctly based on archiveSource.
+ *
+ * @param {string} archiveSource - Archive workbook name
+ * @param {Array}  products      - Array of { sheetRow, qtyRequested, qtyReceived }
+ * @returns {Object} { success, message, updatedCount }
+ */
+function updateArchiveProductRecords(archiveSource, products) {
+    try {
+        if (!archiveSource) return { success: false, error: 'Archive source is required' };
+        if (!products || products.length === 0) return { success: false, error: 'No products to update' };
+
+        var archiveWB = null;
+        if (archiveSource === 'G2N_Archive') {
+            archiveWB = SpreadsheetApp.openById(CONFIG.ARCHIVE_WORKBOOK_ID);
+        } else {
+            var folder = DriveApp.getFolderById(CONFIG.ARCHIVES_BACKUPS_FOLDER_ID);
+            var files = folder.getFiles();
+            while (files.hasNext()) {
+                var file = files.next();
+                if (file.getMimeType() === 'application/vnd.google-apps.spreadsheet' && file.getName() === archiveSource) {
+                    archiveWB = SpreadsheetApp.openById(file.getId());
+                    break;
+                }
+            }
+            if (!archiveWB) return { success: false, error: 'Archive workbook "' + archiveSource + '" not found' };
+        }
+
+        var sheet = archiveWB.getSheetByName('Products_Archive');
+        if (!sheet) return { success: false, error: 'Products_Archive sheet not found in ' + archiveSource };
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var qtyReqCol = headers.indexOf('QtyRequested');
+        var qtyRecCol = headers.indexOf('QtyReceived');
+        if (qtyReqCol === -1 || qtyRecCol === -1) return { success: false, error: 'QtyRequested or QtyReceived column not found' };
+
+        var updated = 0;
+        for (var i = 0; i < products.length; i++) {
+            var p = products[i];
+            var rowIdx = parseInt(p.sheetRow) - 1; // 0-based in data[]
+            if (rowIdx >= 1 && rowIdx < data.length) {
+                data[rowIdx][qtyReqCol] = p.qtyRequested || '';
+                data[rowIdx][qtyRecCol] = p.qtyReceived || '';
+                updated++;
+            }
+        }
+
+        if (updated > 0 && data.length > 1) {
+            sheet.getRange(2, 1, data.length - 1, data[0].length).setValues(data.slice(1));
+        }
+
+        logAudit('PRODUCT_UPDATE', null, 'Updated ' + updated + ' product records in Products_Archive (' + archiveSource + ')');
+
+        return { success: true, message: 'Updated ' + updated + ' product records', updatedCount: updated };
+
+    } catch (error) {
+        Logger.log('updateArchiveProductRecords error: ' + error.message);
+        return { success: false, error: 'Failed to update archive products: ' + error.message };
+    }
+}
+
+/**
  * Only writes rows where QtyRequested or QtyReceived has a value
  * Creates the sheet with headers if it doesn't exist
  * @param {string} recordId - The applicant record ID
@@ -534,78 +738,75 @@ function updateProductRecords(products) {
  * @returns {Object} { success, message, addedCount }
  */
 function addProductRecords(recordId, requestDate, products) {
-  // v1.8: USE_MYSQL guard is OUTSIDE the try/catch so bridge errors propagate
-  // to the caller instead of falling through to the Sheets write path.
-  if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.addProductRecords(recordId, requestDate, products);
-  try {
-    if (!recordId || !requestDate) {
-      return { success: false, error: 'Record ID and Request Date are required' };
+    // to the caller instead of falling through to the Sheets write path.
+    try {
+        if (!recordId || !requestDate) {
+            return { success: false, error: 'Record ID and Request Date are required' };
+        }
+
+        // v1.7: Strip G2N- prefix so the sheet ID column stores bare integers
+        // matching AM column A format. SV portal may pass "G2N-05216" when
+        var sheetId = (recordId || '').toString().trim();
+        if (sheetId.toUpperCase().startsWith('G2N-')) {
+            sheetId = parseInt(sheetId.substring(4), 10).toString();
+        }
+
+        if (!products || products.length === 0) {
+            return { success: false, error: 'No products to add' };
+        }
+
+        var dataWB = getDataWorkbook();
+        var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
+
+        if (!sheet) {
+            // Create the sheet if it doesn't exist
+            sheet = dataWB.insertSheet(CONFIG.PF_PRODUCTS_SHEET);
+            sheet.getRange(1, 1, 1, 7).setValues([['ID', 'RequestDate', 'ProductId', 'ProductName', 'QtyRequested', 'QtyReceived', 'Active']]);
+            sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
+            sheet.setFrozenRows(1);
+        }
+
+        // Filter to only products with qty values
+        var rowsToAdd = [];
+        for (var i = 0; i < products.length; i++) {
+            var p = products[i];
+            var qtyReq = (p.qtyRequested || '').toString().trim();
+            var qtyRec = (p.qtyReceived || '').toString().trim();
+
+            if (qtyReq !== '' || qtyRec !== '') {
+                rowsToAdd.push([
+                    sheetId,
+                    requestDate,
+                    p.productId || '',
+                    p.productName || '',
+                    qtyReq ? parseInt(qtyReq) || 0 : '',
+                    qtyRec ? parseInt(qtyRec) || 0 : '',
+                    'Y'
+                ]);
+            }
+        }
+
+        if (rowsToAdd.length === 0) {
+            return { success: true, message: 'No products had quantities entered. Nothing was saved.', addedCount: 0 };
+        }
+
+        var lastRow = sheet.getLastRow();
+        sheet.getRange(lastRow + 1, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
+
+        logAudit('PRODUCT_ADD', sheetId, 'Added ' + rowsToAdd.length + ' product records to DR/PF_Products');
+        invalidateProductCache_();
+        appendPFIdToProps_(sheetId); // v1.6: keep PF_IDS props current
+
+        return {
+            success: true,
+            message: 'Added ' + rowsToAdd.length + ' product records',
+            addedCount: rowsToAdd.length
+        };
+
+    } catch (error) {
+        Logger.log('addProductRecords error: ' + error.message);
+        return { success: false, error: 'Failed to add products: ' + error.message };
     }
-
-    // v1.7: Strip G2N- prefix so the sheet ID column stores bare integers
-    // matching AM column A format. SV portal may pass "G2N-05216" when
-    // USE_MYSQL was previously true and records were opened in that session.
-    var sheetId = (recordId || '').toString().trim();
-    if (sheetId.toUpperCase().startsWith('G2N-')) {
-      sheetId = parseInt(sheetId.substring(4), 10).toString();
-    }
-
-    if (!products || products.length === 0) {
-      return { success: false, error: 'No products to add' };
-    }
-
-    var dataWB = getDataWorkbook();
-    var sheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
-
-    if (!sheet) {
-      // Create the sheet if it doesn't exist
-      sheet = dataWB.insertSheet(CONFIG.PF_PRODUCTS_SHEET);
-      sheet.getRange(1, 1, 1, 7).setValues([['ID', 'RequestDate', 'ProductId', 'ProductName', 'QtyRequested', 'QtyReceived', 'Active']]);
-      sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
-      sheet.setFrozenRows(1);
-    }
-
-    // Filter to only products with qty values
-    var rowsToAdd = [];
-    for (var i = 0; i < products.length; i++) {
-      var p = products[i];
-      var qtyReq = (p.qtyRequested || '').toString().trim();
-      var qtyRec = (p.qtyReceived || '').toString().trim();
-
-      if (qtyReq !== '' || qtyRec !== '') {
-        rowsToAdd.push([
-          sheetId,
-          requestDate,
-          p.productId || '',
-          p.productName || '',
-          qtyReq ? parseInt(qtyReq) || 0 : '',
-          qtyRec ? parseInt(qtyRec) || 0 : '',
-          'Y'
-        ]);
-      }
-    }
-
-    if (rowsToAdd.length === 0) {
-      return { success: true, message: 'No products had quantities entered. Nothing was saved.', addedCount: 0 };
-    }
-
-    var lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
-
-    logAudit('PRODUCT_ADD', sheetId, 'Added ' + rowsToAdd.length + ' product records to DR/PF_Products');
-    invalidateProductCache_();
-    appendPFIdToProps_(sheetId); // v1.6: keep PF_IDS props current
-
-    return {
-      success: true,
-      message: 'Added ' + rowsToAdd.length + ' product records',
-      addedCount: rowsToAdd.length
-    };
-
-  } catch (error) {
-    Logger.log('addProductRecords error: ' + error.message);
-    return { success: false, error: 'Failed to add products: ' + error.message };
-  }
 }
 
 /**
@@ -615,5 +816,5 @@ function addProductRecords(recordId, requestDate, products) {
  * @returns {string} Normalized date (M/D/YYYY) or empty string
  */
 function normalizeProductDate(dateVal) {
-  return normalizeDate(dateVal);
+    return normalizeDate(dateVal);
 }

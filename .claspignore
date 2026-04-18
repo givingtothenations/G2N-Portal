@@ -3,6 +3,7 @@ package.json
 package-lock.json
 eslint.config.js
 eslint.config.mjs
+eslint_config.js
 .eslintrc
 .eslintrc.js
 .eslintrc.json
@@ -12,3 +13,11 @@ eslint.config.mjs
 obj/**
 *.md
 README*
+# Diagnostic tools — manual-run only, never called by the web app
+DiagnosticTools.js
+DiagnosticTools_work.js
+# Test files
+AddressService_Tests.js
+# Local dev tooling
+app.js
+DbService.js

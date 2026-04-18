@@ -37,207 +37,6 @@
  *         Distrib Code, Total Scheduled-Recipients/Boxes, With Baby Box,
  *         Picked Up-Generic/Baby, Restock-# Recipients, % No Pick Up
  * v4.4 - Fixed Hygiene Stats column name: Restock-# Recipients (dash not =)
- * v4.5 - Added Box 3 support: Scheduled Box Code 3, Received Product Code 3
- * v5.0 - Phase 5: Login Report saves to Google Sheet with Year/Month/Day
- *         timestamp breakout, saved to Login folder with Open/Download links.
- *         Archive file deletion changed from 6 months to 3 months,
- *         excluding Distribution folder files.
- * v5.1 - Phase 5 fix: executeArchiveBatch now calls checkAndAutoRollover()
- *         after completion — auto-splits G2N_Archive by year if >= 85% capacity.
- * v5.2 - Login Report: Added INTAKE_SESSION and CREATE events to Detail sheet
- *         and new "Intake Activity" sheet with summary (opens, creates, conversion
- *         rate by mode) and event detail. Record ID column added to Detail sheet.
- *         Rollover result included in batch return for AP display.
- * v5.3 - Adopted trimHeaders() across all 16 inline header trim calls.
- * v5.4 - Removed dead legacy executeArchive() function (superseded by
- *         executeArchiveBatch; no server-side callers remained).
- * v5.5 - CRITICAL: Adopted trimHeaders() across 4 remaining raw header reads
- *         in generateDistributionReport(), scheduling report, scheduling report
- *         processing, and login report functions. Prevents silent column-match
- *         failures from whitespace in AM headers (#1).
- *         Replaced 4 inline folder-move blocks with shared moveToFolder() (#4).
- *         Adopted CONFIG.TIMEZONE across 24 formatDate() calls (#8).
- *         Replaced applicable inline report header styling with shared
- *         styleReportHeader() (#10).
- * v5.6 - Added 'Admin Notes' column to Scheduling Report (generateSchedulingReport):
- *         inserted after 'Service Status' in reportColumns; updated colWidths
- *         with 200px for the new column.
- * v5.7 - Distribution Report: Added formatted Phone Number column to the right
- *         of City. Formatted as (XXX) XXX-XXXX for 10-digit numbers; raw value
- *         otherwise. Added formatPhoneNumber_() helper.
- * v5.8 - previewDistributionReport: Added try/catch so GAS exceptions return
- *         {success:false, error:...} instead of triggering client withFailureHandler
- *         with no visible message.
- * v5.9 - Integrated FieldMapService: all AM column lookups across generateDistributionReport,
- *         previewDistributionReport, getDistributionInfo, generateSchedulingReport,
- *         processSchedulingReport, processDistribution, and executeArchiveBatch now use
- *         resolveAMField_() via SharedUtils for LU_FieldMap-driven header resolution.
- * v5.10 - Distribution Report: Address 1 and Address 2 column headers now resolved
- *          via getReportHeader_() so the report label matches LU_FieldMap Report Header
- *          (e.g. "Apt/Unit/Lot" instead of hardcoded "Address 2").
- * v5.11 - executeArchiveBatch: SpreadsheetApp.flush() added after writing rows to
- *          archive sheet and after rewriting master sheet for commit ordering safety.
- * v5.12 - Distribution Report: Added "Extra Box" column to the right of "Baby Box".
- *          Shows "X" when Scheduled Box Code 3 has any value. hasExtraBox flag mirrors
- *          hasBabyBox pattern; column and footer note only appear when needed.
- *          createDistributionReportSpreadsheet() 
- * v5.13 - processDistributionSheet: Extra Box column now detected per-row.
- *          Box Code 3 fields (Scheduled Box Code 3, Received Product Code 3)
- *          written only for rows where Extra Box = "X". Rows without "X"
- *          are left unchanged. Older reports without Extra Box column retain
- *          original behaviour (luBox3 applied to all rows).
- *          column widths now built dynamically.
- *          Scheduling Report: Phone Number formatted as (XXX) XXX-XXXX via
- *          formatPhoneNumber_(). Standard applied to all report and portal phone displays.
- * v5.14 - processDistributionSheet: For Extra Box rows (Extra Box = "X"),
- *          copies QtyRequested → QtyReceived in DR/PF_Products for that
- *          ID + RequestDate. requestDateCol added to masterHeaders lookups.
- *          Updates collected during main loop; applied in one bulk setValues()
- *          after all AM writes complete.
- * v5.15 - processDistributionSheet: Received Product Code 3 now read from
- *          AM Scheduled Box Code 3 directly (per-client value), not luBox3
- *          from LU_SchedDisbCodes (typically empty for Box 3).
- *          DR/PF_Products update now triggers for ANY row where Scheduled
- *          Box Code 1, 2, or 3 in AM starts with DR or PF, not just Extra
- *          Box rows. luBox1/luBox2 checked; AM Box3 checked per-row.
- * v5.16 - processDistributionSheet: DR/PF_Products update block now emits
- *          individual per-ID log entries (id, requestDate, rows updated)
- *          plus phase markers "Updating DR/PF Products..." and
- *          "DR/PF Products saved" so spinner-phase log is accurate.
- * v5.17 - saveDistributionReportEdits: now accepts distribCode param.
- *          Writes Extra Box column back to report sheet.
- *          Syncs AM Scheduled Box Code 3: X → luBox3 value;
- *          blank → clears AM field. Uses bulk setValues() for AM writes.
- * v5.18 - generateSchedulingReport: added Referrer Title column after Referral Info.
- *          Added How Products Help as last column after Briefly Explain.
- *          Fixed History flag: now per-name (highest ID = current, all lower IDs
- *          for same name = History) rather than range-boundary-only check.
- *          colWidths updated for 2 new columns; both long-text columns wrapped.
- *          After successful generation calls appendLastScheduledId() to record
- *          endId + report date in LU_LastScheduled for Beginning ID auto-population.
- * v5.19 - generateSchedulingReport: removed beginId/endId parameters entirely.
- *          Report now includes ALL records from Applicants_Master (no archive,
- *          no ID range, no 1-year date filter).
- *          Report name is date-only (no ID range in title).
- *          Removed magenta AM highlight and appendLastScheduledId() call.
- *          Added 'Learned How' column after 'Referrer Title' in reportColumns.
- *          Confirmed 'How Products Help' immediately after 'Current Situation'
- *          in additionalColumns.
- *          Report column headers now written via getReportHeader_() from
- *          LU_FieldMap; rawKeyHeaders array used internally for column position
- *          tracking (data validation, wrap, etc.) so no raw-name indexOf needed.
- *          Assistance column text wrapping applied.
- *          colWidths updated to 45 columns (inserted Learned How at index 14).
- *          processSchedulingReport: rptIdCol / rptSchedCodeCol / rptStatusCol
- *          lookups changed from resolveAMField_() to getReportHeader_() to match
- *          the report headers now written by generateSchedulingReport.
- *          AdminPortalWeb v7.3: removed Beginning ID field, loadLastScheduledId(),
- *          and related client-side logic.
- * v5.20 - LU_ReportColumns integration for generateSchedulingReport().
- *          Column definitions (previously hardcoded reportColumns,
- *          ageBracketPairs, additionalColumns arrays) now read from
- *          LU_ReportColumns 'Scheduling' via ReportColumnService.
- *          Column widths applied via applyReportColumnFormatting().
- *          Falls back to v5.19 hardcoded arrays when LU_ReportColumns empty.
- *          processSchedulingReport() unchanged — still uses getReportHeader_()
- *          for column lookups since it reads the generated report back.
- * v5.21 - createDistributionReportSpreadsheet(): replaced per-row setValue()
- *         loop with single batch setValues() call for data rows.
- *         Alternating row background applied as a single loop of setBackground()
- *         per-row (not per-cell). Eliminates 800+ API calls for a 80-record
- *         report; fixes "running forever" / 6-minute GAS timeout.
- *   v5.22 - Re-added generateDistributionReport() which was missing from the file.
- *           Filters AM by Scheduled Distribution Code, builds record objects,
- *           calls createDistributionReportSpreadsheet() (batch write, v5.21).
- * v5.23 - Removed duplicate generateSchedulingReport() declaration (GAS error).
- *          generateSchedulingReport(beginId): accepts beginId parameter; auto-detects
- *          endId as max AM ID. New-record rows (ID >= beginId) highlighted light pink
- *          (#FFD9D9) and bold. First Name and Last Name cells highlighted yellow for
- *          ALL rows. AM row at endId highlighted magenta after report generation.
- *          appendLastScheduledId(endId, reportDate) called on success so LU_SchedID
- *          is updated for next report's Beginning ID pre-fill.
- * v5.24 - generateDistributionReport(): collects additional contact-info fields.
- *          createDistributionReportSpreadsheet(): adds second sheet tab
- *          "Distribution Contact Info" with 18 contact/service columns sorted in
- *          the same order as the primary sheet.
- * v5.25 - executeArchiveBatch / previewArchive: Reports folder file cutoff changed
- *          from 3 months to 1 month. Distribution folder no longer skipped — instead
- *          deleteInactiveDistributionFiles() deletes files whose code matches an
- *          inactive entry in LU_SchedDisbCodes. Added deleteInactiveDistributionFiles(),
- *          countInactiveDistributionFiles(), and getInactiveSchedDisbCodes_() helpers.
- * v5.26 - Distribution Report: Sheet1 renamed to "Scheduled". New third sheet tab
- *          "Products Needed" added by _addProductsNeededSheet_(). Looks up the
- *          distribCode in LU_SchedDisbCodes to get Box1/Box2/Box3 codes, then reads
- *          Distributed_Products for each box code and sums Quantity by ProductName.
- *          Recipient count per box: Box1/Box3 = all records; Box2 = extraBox='X' count.
- *          Sheet is grouped by BoxCode with a sub-total per box and a grand total.
- * v5.29 - generateDistributionReport: hasExtraBox now driven by LU_SchedDisbCodes Box3
- *          (not per-row AM Scheduled Box Code 3); all scheduled recipients get 'X' in
- *          Extra Box column when Box3 has a value. extraBox set uniformly for all records.
- *          Products Needed sheet: counts based on scheduledRecords (Scheduled-sheet rows)
- *          not allRecords; recipient count and babyCount both from scheduled set.
- *          processSchedulingReport: fixed corrupted MIME type string (was arithmetic
- *          expression, caused zero files matched — report never processed).
- *          Added active-code filter: rows whose SchedDisbCode is not active in
- *          LU_SchedDisbCodes are skipped and logged. Status written as report's
- *          Service Status value when present, else defaults to 'Scheduled'.
- *          Return now includes skippedCount.
- * v5.34 - archiveOrphanedProducts(): ID-only sweep called after archiveProductRecords().
- *          Catches product rows missed due to date-format mismatch in composite key.
- *          Integrated into executeArchiveBatch() immediately after the composite-key
- *          archive pass. Moves remaining rows for archived IDs to Products_Archive.
- * v5.35 - processDistributionSheet: converted all per-row setValue() calls to
- *          in-memory updates of masterData[], with a single setValues() per changed
- *          row after the loop. Eliminates 200-500 individual Sheets API calls per
- *          run (was causing GAS timeouts and partial writes, especially for Restock
- *          rows where Date Picked Up is blank). Restock logic unchanged: sets
- *          Service Status=Restock, Last Date Served/Final Service Contact Date/
- *          Next Service Avail to the end date from the Available Dates header.
- * v5.36 - findDistributionReportByCode: fixed malformed MIME type string
- *          (was arithmetic expression `application / vnd.google - apps.spreadsheet`
- *          causing ReferenceError "application is not defined" on Process Distribution).
- *          generateSchedulingReport: SchedDisbCode dropdown now only includes active
- *          codes (was already filtered via getAllDistribCodes_() but the Scheduling
- *          Report rows themselves were not filtered — rows with inactive SchedDisbCode
- *          values in AM are now excluded from the generated report).
- *          _addProductsNeededSheet_: added 'QtyPerBox' and 'QtyDistributed' as
- *          fallback column names for 'Quantity' in Distributed_Products.
- * v5.37 - _addProductsNeededSheet_: added diagnostic Logger.log showing all BoxCodes
- *          present in Distributed_Products and the box codes being searched, so
- *          mismatches between LU_SchedDisbCodes box values and Distributed_Products
- *          BoxCode column are visible in the Execution Log. Changed empty-section
- *          handling from silent skip to an error message on the sheet itself.
- * v5.38 - generateRestockReport(): reads Hygiene Stats workbook, two-sheet output.
- * v5.39 - getDistributionReportData(): new public function returning scheduled
- *         records, all-records, and Products Needed data for a SchedDisbCode
- *         without writing any spreadsheet. Called by Report Builder in
- *         AIReportService so it works from the same data as Distribution Reports.
- * v5.33 - _addProductsNeededSheet_: section headers now show "Box 1 — DG2 (N recipients)"
- *          instead of "Box Code: DG2" so users can identify which box number each
- *          section represents. Sub-total rows updated to match.
- * v5.32 - _addProductsNeededSheet_: fixed case-sensitive BoxCode mismatch between
- *          LU_SchedDisbCodes Box1/2/3 values and Distributed_Products BoxCode column.
- *          sumProductsByBox now compares both sides uppercased; boxCode stored in
- *          sections array as uppercase. Was silently producing empty product lists.
- * v5.31 - _addProductsNeededSheet_: confirmed three-box logic (docstring only).
- *          Box1 × allCount, Box2 × babyCount, Box3 × allCount (same as Box1).
- * v5.28 - _addProductsNeededSheet_: fixed undefined extraCount reference in footer
- *          (extraCount was removed in v5.27 when Box3 changed to allCount; now
- *          footer correctly shows babyCount as "Baby Box Recipients").
- *          Corrected JSDoc: Box1/Box3 = allCount; Box2 = babyBox='X' count.
- * v5.27 - Scheduling Report: Service Status dropdown reads from LU_ServiceStatus
- *          instead of hardcoded list.
- *          Distribution Report Scheduled sheet: excludes rows where Service Status
- *          is not 'Scheduled' or blank (only status-eligible rows shown).
- *          Distribution Contact Info sheet: includes ALL rows for the selected
- *          Sched Distrib Code (not filtered by status); adds Service Status column
- *          after Income Level. createDistributionReportSpreadsheet() gains optional
- *          allRecords param for unfiltered Contact Info data.
- *          Column name fixes in generateDistributionReport(): Referral Info, Referrer
- *          Name, Additional Info, Apartment #, Phone Type, Best Contact, Income Level
- *          now use the actual AM raw headers via LU_FieldMap COL_* equivalents.
- *          Products Needed Box2: recipient count now uses Take Baby Box = X count
- *          (babyBox) instead of Extra Box count. Box3 uses allCount (same as Box1).
  */
 
 'use strict';
@@ -339,18 +138,6 @@ function _getSchedFallbackCols_() {
 
 /**
  * Build a single Scheduling Report output row from a record and column definitions.
- *
- * Three types of columns are handled:
- *   1. 'History'          → rec.isHistory ? 'History' : ''
- *   2. '[Calc] x-y' keys  → combined sum of male + female bracket from SCHED_AGE_BRACKET_MAP_
- *   3. All other keys     → direct AM column value via colIndexMap
- *
- * Special value transforms applied (same as v5.19):
- *   - Dates → formatted M/d/yyyy
- *   - Scheduled Distribution Code → uppercase
- *   - Phone Number → (XXX) XXX-XXXX via formatPhoneNumber_()
- *
- * @private
  * @param {Object}  rec        - { rowData: Array, isHistory: boolean }
  * @param {Object[]} cols      - From getReportColumns('Scheduling') or _getSchedFallbackCols_()
  * @param {Object}  colIndexMap- { rawKey: colIndex } built from AM headers
@@ -396,20 +183,6 @@ function _buildSchedRow_(rec, cols, colIndexMap) {
 
 /**
  * Get all ACTIVE Scheduled Distribution Codes for data validation dropdowns.
- *
- * Reads from LU_SchedDisbCodes (CONFIG.LOOKUPS.SCHED_DISB_CODES), which is the
- * authoritative source for scheduled distribution codes. Filters to Active = TRUE
- * rows only, matching the same logic used by the Distribution Reports tab dropdown.
- *
- * Delegates to getActiveSchedDisbCodes() in LookupService.gs which already
- * handles Active column filtering, date formatting, and caching correctly.
- *
- * NOTE: This was previously reading from LU_DistribCodes (wrong sheet — that table
- * holds generic distribution/pickup codes, not scheduled distribution codes).
- *
- * Only add this function if it doesn't already exist in your ReportService.js.
- *
- * @private
  * @returns {string[]} Sorted array of active SchedDisbCode strings
  */
 function getAllDistribCodes_() {
@@ -430,23 +203,6 @@ function getAllDistribCodes_() {
 
 /**
  * Generate a Returned to Stock (Restock) Products report.
- *
- * For each distribution run recorded in the Hygiene Box Distribution Stats
- * workbook where Restock-# Recipients > 0:
- *   1. Looks up Box1/Box2/Box3 codes from LU_SchedDisbCodes for that run's
- *      Scheduled Distrib Code.
- *   2. Looks up each box's products and per-box quantity from Distributed_Products.
- *   3. Calculates total returned quantity = Restock Recipients × Qty per box.
- *
- * Output: two sheets
- *   - "By Distribution Center" — one row per center+product combination,
- *     summed across all runs for that center.
- *   - "All Run Detail" — one row per run+box+product with full drill-down.
- *
- * v5.38 - New function (initial version tracked recipients only).
- * v5.39 - Rebuilt: now cross-references LU_SchedDisbCodes and Distributed_Products
- *          to report actual product quantities returned to stock per distribution center.
- *
  * @returns {Object} { success, centerCount, totalRestockUnits, reportUrl, downloadUrl, error }
  */
 function generateRestockReport() {
@@ -704,20 +460,8 @@ function generateRestockReport() {
 
 /**
  * Returns fully-computed distribution report data for a given SchedDisbCode
- * without writing any spreadsheet. Exposes the same data pipeline as
- * generateDistributionReport() + _addProductsNeededSheet_() so the Report
- * Builder can work from identical source data.
- *
- * Returns three data sets:
- *   - scheduled: records for the Scheduled sheet (Status = Scheduled or blank)
- *   - all:       all records matching the distribCode
- *   - products:  Products Needed data [{label, boxCode, recipients, products:{name:qty}}]
- *
- * v5.39 - New function. Named getDistributionRecordsForBuilder to avoid collision
- *          with existing getDistributionReportData(reportId) at Phase 4B.4.
  * @param {string} distribCode - Scheduled Distribution Code (will be uppercased)
  * @returns {Object} { success, distribCode, scheduledHeaders, scheduledRows,
- *                     allHeaders, allRows, scheduledCount, totalCount, products, error }
  */
 function getDistributionRecordsForBuilder(distribCode) {
     try {
@@ -895,36 +639,6 @@ function getDistributionRecordsForBuilder(distribCode) {
 
 /**
  * Generate Scheduling Report for ALL Applicants_Master records.
- *
- * Report includes every active AM record — no ID range, no date filter,
- * no archive workbooks. Columns are driven by LU_ReportColumns 'Scheduling'.
- *
- * HISTORY FLAG:
- *   For each unique first+last name, the highest ID = current record.
- *   All lower IDs for the same name are marked 'History' in the first column.
- *
- * HIGHLIGHTING (v5.23):
- *   - Rows with ID >= beginId highlighted light pink (#FFD9D9) and bold.
- *   - First Name and Last Name cells highlighted yellow for ALL data rows.
- *   - AM row whose ID = endId highlighted magenta after report creation.
- *   - appendLastScheduledId(endId, date) called so LU_SchedID is updated.
- *
- * DATA VALIDATION:
- *   Scheduled Distribution Code column gets a dropdown from LU_SchedDisbCodes.
- *   Service Status column gets a dropdown with standard status values.
- *
- * SORT ORDER: Last Name, First Name, ID (ascending).
- *
- * COLUMN HEADERS: Resolved via LU_FieldMap Report Headers (getReportHeader_()).
- *
- * v5.19 — All AM rows included; Learned How column added; no ID range params
- * v5.20 — Column definitions from LU_ReportColumns 'Scheduling' via
- *          ReportColumnService. _buildSchedRow_() replaces inline row builder.
- *          applyReportColumnFormatting() replaces hardcoded colWidths array.
- *          Falls back to v5.19 hardcoded column set when LU_ReportColumns empty.
- * v5.23 — beginId parameter; new-record row highlighting; yellow name cells;
- *          magenta AM row at endId; appendLastScheduledId() call on success.
- *
  * @param {number} [beginId=0] - First AM ID considered a "new" record (from LU_SchedID)
  * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount, endId }}
  */
@@ -1146,36 +860,11 @@ function generateSchedulingReport(beginId) {
 }
 
 /**
- * Formats a phone number as (XXX) XXX-XXXX for 10-digit values.
- * Returns the raw value unchanged for any other length.
- * @param {string|number} raw - Raw phone number value
- * @returns {string} Formatted phone number string
- */
-function formatPhoneNumber_(raw) {
-    var digits = (raw || '').toString().replace(/\D/g, '');
-    if (digits.length === 10) {
-        return '(' + digits.substring(0, 3) + ') ' + digits.substring(3, 6) + '-' + digits.substring(6);
-    }
-    return (raw || '').toString().trim();
-}
-
-/**
  * Creates the Distribution Report spreadsheet with formatted headers and data.
- *
- * v5.12: Baby Box and Extra Box are optional columns inserted after Date Picked Up.
- * v5.21: Data rows now written as a single batch setValues() call instead of
- *        per-row setValue() loops. Eliminates 800+ individual API calls per
- *        report generation; fixes GAS 6-minute execution timeout.
- *
  * @param {string}   distribCode  - Distribution code
  * @param {Object[]} records      - Filtered/sorted record objects (Scheduled status only)
  * @param {boolean}  hasBabyBox   - Whether to include Baby Box column
  * @param {boolean}  hasExtraBox  - Whether to include Extra Box column (v5.12)
- * @param {string}   startDate    - Report start date string
- * @param {string}   endDate      - Report end date string
- * @param {string}   pickupTimes  - Pickup times text
- * @param {Object[]} [allRecords] - All records for this distribCode (v5.27 Contact Info sheet)
- * @returns {GoogleAppsScript.Spreadsheet.Spreadsheet} The created spreadsheet
  */
 function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, hasExtraBox,
     startDate, endDate, pickupTimes, allRecords) {
@@ -1391,21 +1080,9 @@ function _addDistributionContactInfoSheet_(ss, distribCode, records) {
 
 /**
  * Adds a "Products Needed" sheet to the distribution report spreadsheet.
- * v5.26 - New helper called by createDistributionReportSpreadsheet().
- * v5.29 - records param receives scheduledRecords (Scheduled-sheet rows only);
- *          allCount and babyCount computed from that set.
- * v5.31 - Confirmed three-box logic (no code change; docstring only):
- *          Box1: each ProductName × allCount (all scheduled recipients)
- *          Box2: each ProductName × babyCount (Baby Box = 'X' recipients)
- *          Box3: each ProductName × allCount (same logic as Box1)
- *          Each box section is only rendered when its code is present in LU_SchedDisbCodes.
- *
- * Non-fatal: logs and returns silently on any error so the main report is unaffected.
- *
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss          - The report spreadsheet
  * @param {string}                                   distribCode  - Scheduled Distribution Code
  * @param {Object[]}                                 records      - Scheduled-sheet records
- * @private
  */
 function _addProductsNeededSheet_(ss, distribCode, records) {
     try {
@@ -1469,9 +1146,6 @@ function _addProductsNeededSheet_(ss, distribCode, records) {
             var bc = (dpData[dbi][dpBoxCol] || '').toString().trim();
             if (bc) dpBoxCodes[bc] = true;
         }
-        Logger.log('_addProductsNeededSheet_: Distributed_Products has ' + (dpData.length - 1) +
-            ' rows. BoxCodes present: ' + Object.keys(dpBoxCodes).join(', ') +
-            '. Looking for box1=[' + box1Code + '] box2=[' + box2Code + '] box3=[' + box3Code + ']');
 
         /**
          * Build {ProductName: summedQty} for a given box code from Distributed_Products.
@@ -1669,23 +1343,10 @@ function previewDistributionReport(distribCode) {
 
 /**
  * Generate Distribution Report Google Sheet for a given Scheduled Distribution Code.
- *
- * Reads all Applicants_Master rows where Scheduled Distribution Code matches
- * distribCode, builds a record object per row, sorts by Last Name / First Name,
- * and calls createDistributionReportSpreadsheet() to write the sheet.
- *
- * hasBabyBox  — true if ANY matched row has Take Baby Box? = 'X'
- * hasExtraBox — true if ANY matched row has a non-blank Scheduled Box Code 3
- *
- * Called from AP: generateDistributionReport(distribCode, startDate, endDate, pickupTimes)
- *
- * v5.22 — Restored (was missing from file; caused indefinite hang on generate)
- *
  * @param {string} distribCode  - Scheduled Distribution Code (will be uppercased)
  * @param {string} startDate    - Display start date string (e.g. '3/15/26')
  * @param {string} endDate      - Display end date string (e.g. '3/29/26')
  * @param {string} pickupTimes  - Pickup times text for report header
- * @returns {{ success, recordCount, reportUrl, downloadUrl, reportId }}
  */
 function generateDistributionReport(distribCode, startDate, endDate, pickupTimes) {
     try {
@@ -2432,18 +2093,6 @@ function saveDistributionReportEdits(reportId, rows, distribCode) {
 
 /**
  * Processes a Distribution Report: updates Applicants_Master records
- * For each row:
- *   - Uses Date Picked Up as effective date; falls back to ending date from
- *     Available Dates header if Date Picked Up is blank
- *   - Updates Last Date Served, Final Service Contact Date, Next Service
- *     Availability (+90 days) using the effective date
- *   - Sets First Service Contact Date from LU_SchedDisbCodes StartDate (picked up only)
- *   - Writes Box 1 from LU_SchedDisbCodes → Box Code, Scheduled Box Code 1,
- *     Received Product Code 1
- *   - Writes Box 2 from LU_SchedDisbCodes → Scheduled Box Code 2,
- *     Received Product Code 2
- *   - Deactivates the SchedDisbCode in LU_SchedDisbCodes
- *   - Inserts stats row into Hygiene Box Distribution Stats workbook
  * @param {string} reportId - Google Sheets ID of the Distribution Report
  * @param {string} distribCode - The distribution code being processed
  * @returns {Object} { success, processedCount, skippedCount, log[] }
@@ -3441,17 +3090,6 @@ function archiveProductRecords(archiveIdDates, archiveWorkbook, log) {
 
 /**
  * ID-only sweep of DR/PF_Products for a set of archived applicant IDs.
- * Called immediately after archiveProductRecords() to catch any product rows
- * that were missed due to date-format mismatches in the composite key.
- * Only moves rows whose ID is in the archivedIdSet but are still in DR/PF_Products
- * after the main composite-key archive pass.
- *
- * v5.34 - New function. archiveProductRecords() uses an ID+Date composite key;
- *          when the RequestDate stored in DR/PF_Products doesn't match the date
- *          format derived from AM (e.g. stored as YYYY-MM-DD string vs M/D/YYYY),
- *          those product rows survive the first pass. This function catches them
- *          with an ID-only check.
- *
  * @param {string[]}   archivedIds   - Array of applicant ID strings just archived
  * @param {Spreadsheet} archiveWorkbook - Already-open G2N_Archive workbook
  * @param {Array}      log           - Log array for messages

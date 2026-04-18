@@ -13,62 +13,6 @@
  *         to filter Times by specific distribution code from LU_DistribCodes
  * v3.7 - Added Box 3 support across getSchedDisbCodeDetails,
  *         getActiveSchedDisbCodes, saveSchedDisbCodes
- * v4.0 - Phase 5: Staff code forced uppercase on save (5.1).
- *         getStaffRecords accepts includeInactive parameter (5.3).
- * v4.1 - Added Email column support to getStaffRecords and saveStaffRecords.
- *         Email used for archive notification emails to administrators.
- * v4.2 - Fixed redundant requestTypes lookup in getAllLookups(): now aliases
- *         serviceHow instead of making a duplicate getLookupValues() call (#9).
- *         Added getEventInfoForDate(dateStr) for server-side event detection
- *         by signature date (supports IntakeService auto-event-detect).
- * v4.3 - Adopted trimHeaders() across all header reads (8 inline trims).
- *         Adopted isRowActive() for Active column checks in getLookupValues,
- *         getLookupData, getStaffRecords, getActiveSchedDisbCodes.
- *         Refactored getEventInfo() to delegate to getEventInfoForDate()
- *         (eliminates ~40 lines of duplicate date-comparison logic).
- *         Fixed getActiveSchedDisbCodes: moved box/times column lookups
- *         outside the loop (were recomputed on every iteration).
- * v4.4 - Lookup caching via CacheService (6-hour TTL, ~20-40x faster portal loads).
- *         getAllLookups() and getIntakeLookups() now check ScriptCache before
- *         reading sheets. invalidateLookupCache() clears cache and is called
- *         automatically by all admin save/deactivate operations.
- *         Removed unused getStaffLookups() (zero callers found).
- * v4.5 - Adopted CONFIG.TIMEZONE across all Utilities.formatDate() calls (#8).
- * v4.6 - getDistributedProducts() and getBoxCodeSummary() now use getDataWorkbook()
- *         and CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS (was incorrectly using
- *         getLookupsWorkbook() and CONFIG.LOOKUPS.DISTRIBUTED_PRODUCTS).
- * v4.7 - Added generic getLookupRecords(sheetKey) and saveLookupRecords(sheetKey,
- *         updates, newRecords) for Admin Portal generic LU editor.
- *         Added getDistributedProductRecords() and saveDistributedProductRecords()
- *         for Distributed_Products sheet in G2N_Data workbook.
- * v4.8 - Extracted getAllLookupsFromSheets_() and getIntakeLookupsFromSheets_()
- *         as private helpers. getAllLookups() and getIntakeLookups() now fall back
- *         to Sheets when MySQL bridge returns empty, ensuring portal dropdowns
- *         always populate. Logs WARNING on fallback.
- * v4.9 - invalidateLookupCache() now also calls DbService.invalidateFieldMapCache()
- *         when USE_MYSQL=true, busting the GAS CacheService field map entry and
- *         notifying the bridge via DELETE /lookups/field-map/cache. Eliminates
- *         the 1-hour TTL lag when admin changes lu_field_map in MySQL.
- * v5.0 - getLookupRecords() / saveLookupRecords() add FIELD_MAP branch for the
- *         LU_FieldMap sheet editor in AP Manage Dropdowns.
- *         saveLookupRecords() calls DbService.invalidateLookupTableCache() when
- *         USE_MYSQL=true so MySQL lookup table cache is busted immediately on save.
- * v5.1 - Added getLastScheduledId(): reads the last row of LU_LastScheduled,
- *         returns the ApplicantId value + 1 for pre-filling Beginning ID.
- *         Added appendLastScheduledId(lastId, reportDate): appends a new row to
- *         LU_LastScheduled with ApplicantId and ReportDate after a Scheduling
- *         Report is successfully generated.
- * v5.2 - getEventInfoForDate(): added optional timeStr parameter to check
- *         Event Begins Time / Event Ends Time columns in LU_EventInfo when
- *         date matches. Added parseTimeToMinutes_() and
- *         getFundingSourceDescription_() private helpers.
- *         saveEventInfoRecords(): added eventBeginsTime / eventEndsTime
- *         to colMap and newRow builder.
- *         Added getLastSchedId(): reads LU_SchedID last row EndId.
- *         Added appendSchedId(): appends StartId/EndId/ReportDate to LU_SchedID.
- * v5.3 - Restored public getEventInfo() wrapper (accidentally removed during
- *         debug cleanup). Delegates to getEventInfoForDate() with today's date
- *         and current time. Called by ApplicantIntake.html on page load.
  */
 
 // ============ LOOKUP CACHE ============
@@ -151,7 +95,6 @@ function getEventInfo() {
  * @returns {Object} { isActive, boxCode, fundingSource, fundingSourceDescription }
  */
 function getEventInfoForDate(dateStr, timeStr) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getEventInfoForDate(dateStr, timeStr);
     try {
         if (!dateStr) return { isActive: false };
 
@@ -291,77 +234,6 @@ function getFundingSourceDescription_(code) {
 }
 
 /**
- * Reads the last row of LU_SchedID and returns the EndId stored there.
- * Used by generateSchedulingReport() to determine Start of New Records (lastEndId + 1).
- * Returns 0 if the sheet is empty or not found (first run).
- * v5.2 - New function; replaces LU_LastScheduled approach.
- * @returns {{ lastEndId: number }}
- */
-function getLastSchedId() {
-    try {
-        var key = CONFIG.LOOKUPS.SCHED_ID;
-        if (!key) {
-            Logger.log('getLastSchedId: SCHED_ID not in CONFIG.LOOKUPS');
-            return { lastEndId: 0 };
-        }
-        var lookups = getLookupsWorkbook();
-        var sheet = lookups.getSheetByName(key);
-        if (!sheet || sheet.getLastRow() < 2) return { lastEndId: 0 };
-
-        var data = sheet.getDataRange().getValues();
-        var headers = trimHeaders(data[0]);
-        var endIdCol = headers.indexOf('EndId');
-        if (endIdCol === -1) return { lastEndId: 0 };
-
-        // Return the EndId from the last data row
-        var lastRow = data[data.length - 1];
-        var lastEndId = parseInt(lastRow[endIdCol]) || 0;
-        return { lastEndId: lastEndId };
-    } catch (e) {
-        Logger.log('getLastSchedId error: ' + e.message);
-        return { lastEndId: 0 };
-    }
-}
-
-/**
- * Appends a new row to LU_SchedID recording the ID range and date of a
- * Scheduling Report run.
- * v5.2 - New function.
- * @param {number} startId    - First ID of the new records window (lastEndId + 1)
- * @param {number} endId      - Last row ID in AM at time of report generation
- * @param {string} reportDate - Formatted date string of the report run
- * @returns {boolean} true on success
- */
-function appendSchedId(startId, endId, reportDate) {
-    try {
-        var key = CONFIG.LOOKUPS.SCHED_ID;
-        if (!key) { Logger.log('appendSchedId: SCHED_ID not in CONFIG.LOOKUPS'); return false; }
-        var lookups = getLookupsWorkbook();
-        var sheet = lookups.getSheetByName(key);
-        if (!sheet) { Logger.log('appendSchedId: LU_SchedID sheet not found'); return false; }
-
-        var data = sheet.getDataRange().getValues();
-        var headers = trimHeaders(data[0]);
-        var startIdCol = headers.indexOf('StartId');
-        var endIdCol = headers.indexOf('EndId');
-        var reportDateCol = headers.indexOf('ReportDate');
-
-        if (endIdCol === -1) { Logger.log('appendSchedId: EndId column not found in LU_SchedID'); return false; }
-
-        var newRow = new Array(headers.length).fill('');
-        if (startIdCol !== -1) newRow[startIdCol] = startId;
-        if (endIdCol !== -1) newRow[endIdCol] = endId;
-        if (reportDateCol !== -1) newRow[reportDateCol] = reportDate;
-
-        sheet.getRange(sheet.getLastRow() + 1, 1, 1, newRow.length).setValues([newRow]);
-        return true;
-    } catch (e) {
-        Logger.log('appendSchedId error: ' + e.message);
-        return false;
-    }
-}
-
-/**
  * Get full lookup data as objects (for detailed lookups)
  * @param {string} lookupKey - Key from CONFIG.LOOKUPS
  * @returns {Array} Array of objects with all columns
@@ -403,7 +275,6 @@ function getLookupData(lookupKey) {
  * @returns {Object} Keyed object with arrays of values per lookup type
  */
 function getAllLookups() {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getAllLookups();
     try {
         var cache = CacheService.getScriptCache();
         var cached = cache.get(LOOKUP_CACHE_KEY_ALL);
@@ -456,7 +327,6 @@ function getAllLookups() {
  * @returns {Object} Keyed object with intake-relevant lookup arrays
  */
 function getIntakeLookups() {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getIntakeLookups();
     try {
         var cache = CacheService.getScriptCache();
         var cached = cache.get(LOOKUP_CACHE_KEY_INTAKE);
@@ -509,159 +379,7 @@ function invalidateLookupCache() {
     } catch (e) {
         Logger.log('invalidateLookupCache error (non-fatal): ' + e.message);
     }
-    // When MySQL is active, also bust the field map cache so admin LU_FieldMap
     // changes take effect immediately instead of waiting for the 1-hour TTL
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-        try {
-            DbService.invalidateFieldMapCache();
-        } catch (e) {
-            Logger.log('invalidateLookupCache: field map cache bust (non-fatal): ' + e.message);
-        }
-    }
-}
-
-/**
- * Returns product list for a given box code from LU_BoxCode lookup
- * Used for product distribution tracking
- * @param {string} boxCode - The box code to look up
- * @returns {Object[]} Array of product objects with names and quantities
- */
-function getDistributedProducts(boxCode) {
-    const dataWb = getDataWorkbook();
-    const sheet = dataWb.getSheetByName(CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS);
-
-    if (!sheet) {
-        Logger.log('Distributed_Products sheet not found');
-        return [];
-    }
-
-    const data = sheet.getDataRange().getValues();
-    if (data.length < 2) return [];
-
-    const headers = data[0];
-    const boxCodeCol = headers.indexOf('BoxCode');
-    const productIdCol = headers.indexOf('ProductID');
-    const productNameCol = headers.indexOf('ProductName');
-    const quantityCol = headers.indexOf('Quantity');
-
-    const products = [];
-    for (let i = 1; i < data.length; i++) {
-        if (data[i][boxCodeCol] === boxCode) {
-            products.push({
-                productId: data[i][productIdCol],
-                productName: data[i][productNameCol],
-                quantity: data[i][quantityCol]
-            });
-        }
-    }
-
-    return products;
-}
-
-/**
- * Get all box codes with their product counts
- */
-function getBoxCodeSummary() {
-    const dataWb = getDataWorkbook();
-    const sheet = dataWb.getSheetByName(CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS);
-
-    if (!sheet) return [];
-
-    const data = sheet.getDataRange().getValues();
-    const boxCounts = {};
-
-    for (let i = 1; i < data.length; i++) {
-        const boxCode = data[i][0];
-        if (boxCode) {
-            boxCounts[boxCode] = (boxCounts[boxCode] || 0) + 1;
-        }
-    }
-
-    return Object.entries(boxCounts).map(([code, count]) => ({
-        code: code,
-        productCount: count
-    }));
-}
-
-/**
- * Lookup state name from abbreviation
- */
-function getStateName(abbrev) {
-    const data = getLookupData('STATES');
-    const state = data.find(s => s.Abbrev === abbrev);
-    return state ? state.Name : abbrev;
-}
-
-/**
- * Lookup income level description from key
- */
-function getIncomeLevelName(key) {
-    const data = getLookupData('INCOME_LEVELS');
-    const level = data.find(l => l.Key == key);
-    return level ? level.LevelName : '';
-}
-
-/**
- * Add new value to lookup table (Admin function)
- */
-function addLookupValue(lookupKey, values) {
-    const sheetName = CONFIG.LOOKUPS[lookupKey];
-    if (!sheetName) {
-        return { success: false, error: 'Unknown lookup key' };
-    }
-
-    const lookups = getLookupsWorkbook();
-    const sheet = lookups.getSheetByName(sheetName);
-
-    if (!sheet) {
-        return { success: false, error: 'Sheet not found: ' + sheetName };
-    }
-
-    // Append new row
-    sheet.appendRow(values);
-
-    logAudit('LOOKUP_ADD', null, 'Added to ' + sheetName + ': ' + values.join(', '));
-    invalidateLookupCache();
-
-    return { success: true, message: 'Value added to ' + sheetName };
-}
-
-/**
- * Deactivate a lookup value (set Active = FALSE)
- */
-function deactivateLookupValue(lookupKey, keyValue) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.deactivateLookupValue(lookupKey, keyValue);
-    const sheetName = CONFIG.LOOKUPS[lookupKey];
-    if (!sheetName) {
-        return { success: false, error: 'Unknown lookup key' };
-    }
-
-    const lookups = getLookupsWorkbook();
-    const sheet = lookups.getSheetByName(sheetName);
-
-    if (!sheet) {
-        return { success: false, error: 'Sheet not found' };
-    }
-
-    const data = sheet.getDataRange().getValues();
-    const headers = data[0];
-    const activeCol = headers.indexOf('Active');
-
-    if (activeCol === -1) {
-        return { success: false, error: 'No Active column in this lookup' };
-    }
-
-    // Find and update the row
-    for (let i = 1; i < data.length; i++) {
-        if (data[i][0] === keyValue) {
-            sheet.getRange(i + 1, activeCol + 1).setValue(false);
-            logAudit('LOOKUP_DEACTIVATE', null, 'Deactivated in ' + sheetName + ': ' + keyValue);
-            invalidateLookupCache();
-            return { success: true, message: 'Value deactivated' };
-        }
-    }
-
-    return { success: false, error: 'Value not found' };
 }
 
 /**
@@ -671,7 +389,6 @@ function deactivateLookupValue(lookupKey, keyValue) {
  * @returns {Object} { success, schedDisbCode, startDate, interval, fundingCode, fundingDescription }
  */
 function getSchedDisbCodeDetails(code) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getSchedDisbCodeDetails(code);
     if (!code) {
         return { success: false, error: 'Code is required' };
     }
@@ -756,7 +473,6 @@ function getFundingSourceDescription(code) {
  * @returns {Object} { success: boolean, added: number, duplicates: string[] }
  */
 function saveSchedDisbCodes(records) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.saveSchedDisbCodes(records);
     try {
         if (!records || records.length === 0) {
             return { success: false, error: 'No records to save' };
@@ -933,54 +649,6 @@ function saveSchedDisbCodes(records) {
 }
 
 /**
- * Looks up the StartDate for a Scheduled Distribution Code
- * @param {string} code - The SchedDisbCode to look up
- * @returns {Object} { success: boolean, startDate: string }
- */
-function getSchedDisbStartDate(code) {
-    if (!code) return '';
-
-    try {
-        const lookups = getLookupsWorkbook();
-        const sheet = lookups.getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
-
-        if (!sheet) return '';
-
-        const data = sheet.getDataRange().getValues();
-        if (data.length < 2) return '';
-
-        const headers = trimHeaders(data[0]);
-        const codeCol = headers.indexOf('SchedDisbCode');
-        const startDateCol = headers.indexOf('StartDate');
-
-        if (codeCol === -1 || startDateCol === -1) return '';
-
-        code = code.toString().toUpperCase();
-
-        for (var i = 1; i < data.length; i++) {
-            var rowCode = (data[i][codeCol] || '').toString().trim().toUpperCase();
-            if (rowCode === code) {
-                var startDate = data[i][startDateCol];
-                if (startDate instanceof Date && !isNaN(startDate.getTime())) {
-                    return Utilities.formatDate(startDate, CONFIG.TIMEZONE, 'M/d/yyyy');
-                } else if (startDate) {
-                    var parsed = new Date(startDate);
-                    if (!isNaN(parsed.getTime())) {
-                        return Utilities.formatDate(parsed, CONFIG.TIMEZONE, 'M/d/yyyy');
-                    }
-                }
-                return startDate ? startDate.toString() : '';
-            }
-        }
-
-        return '';
-    } catch (e) {
-        Logger.log('getSchedDisbStartDate error: ' + e.message);
-        return '';
-    }
-}
-
-/**
  * Sets Active=FALSE for a Scheduled Distribution Code in LU_SchedDisbCodes
  * Called after distribution processing is complete
  * @param {string} code - The SchedDisbCode to deactivate
@@ -1037,7 +705,6 @@ function deactivateSchedDisbCode(code) {
  * @returns {string[]} Array of unique time strings
  */
 function getDistribCodeTimes(distribCode) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getDistribCodeTimes(distribCode);
     try {
         var lookups = getLookupsWorkbook();
         var sheetName = CONFIG.LOOKUPS.DISTRIB_CODES;
@@ -1093,7 +760,6 @@ function getDistribCodeTimes(distribCode) {
  * @returns {Object[]} Array of { code, startDate, interval, fundingSource, box1, box2, times }
  */
 function getActiveSchedDisbCodes() {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getActiveSchedDisbCodes();
     try {
         var lookups = getLookupsWorkbook();
         var sheet = lookups.getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
@@ -1166,7 +832,6 @@ function getActiveSchedDisbCodes() {
  * @returns {Object} { success: boolean, savedCount: number }
  */
 function saveEventInfoRecords(records) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.saveEventInfoRecords(records);
     try {
         if (!records || records.length === 0) {
             return { success: false, error: 'No records to save' };
@@ -1269,7 +934,6 @@ function saveEventInfoRecords(records) {
  * @returns {Object} { success: boolean, records: Object[] }
  */
 function getStaffRecords(includeInactive) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.getStaffRecords(includeInactive);
     try {
         var sheetName = CONFIG.LOOKUPS.STAFF;
         if (!sheetName) {
@@ -1331,7 +995,6 @@ function getStaffRecords(includeInactive) {
  * @returns {Object} { success: boolean, updatedCount: number, addedCount: number }
  */
 function saveStaffRecords(updates, newRecords) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.saveStaffRecords(updates, newRecords);
     try {
         var sheetName = CONFIG.LOOKUPS.STAFF;
         if (!sheetName) {
@@ -1588,20 +1251,8 @@ function saveLookupRecords(sheetKey, updates, newRecords) {
 
         var message = 'Updated ' + updatedCount + ', added ' + addedCount;
         logAudit('LOOKUP_EDIT', null, sheetName + ': ' + message);
-
-        // Bust GAS-side cache + MySQL lookup/field-map caches
         invalidateLookupCache();
-
-        // When MySQL active, also bust the general lookup table cache on the bridge
         // so portal dropdowns reflect the saved changes without TTL lag
-        if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-            try {
-                DbService.invalidateLookupTableCache();
-            } catch (e) {
-                Logger.log('saveLookupRecords: MySQL lookup cache bust (non-fatal): ' + e.message);
-            }
-        }
-
         return { success: true, message: message, updatedCount: updatedCount, addedCount: addedCount };
 
     } catch (e) {

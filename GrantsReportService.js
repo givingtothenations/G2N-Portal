@@ -32,63 +32,6 @@
  * v3.1 - Removed Report Totals; batch write; Grant Summary improvements
  * v3.2 - FIELD_DISPLAY_MAP and getFieldDisplayLabel()
  * v3.3 - Year-based archive iteration; trimHeaders()
- * v3.4 - FieldMapService migration; COL_* constants retained
- * v3.5 - SharedUtils extraction; CONFIG.TIMEZONE
- * v3.6 - resolveAMField_() for all AM column lookups
- * v3.7 - MySQL offload for Request Frequency and Grant Summary
- * v3.8 - Baby product detection (BoxCode 2nd char = B);
- *         calculateDetailedAgeBrackets() gains totalMales/totalFemales;
- *         Households: Funding Code + Baby Products columns added
- * v3.9 - LU_FieldMap Report Header alignment; Children 2 and Under fixed
- *         (Take Baby Box? X→1, not a.under5); Products Requested added to
- *         Distribution Stats; referral column headers corrected
- * v4.0 - LU_ReportColumns integration replaces all hardcoded dataHeaders arrays.
- *         NEW: _getGrantResolvers_()  — maps every column key to a value fn(rec)
- *         NEW: _buildGrantRows_()     — generic LU-driven row builder
- *         NEW: _writeGrantReport_()   — shared spreadsheet writer (4 reports share it)
- *         NEW: _getColsWithFallback_()— returns LU cols or v3.9 hardcoded fallback
- *         All 5 report functions: data collection unchanged; header/row output LU-driven
- *         generateGrantSummaryReport() unchanged (narrative Doc — no column structure)
- * v4.1 - generateDistributionStatsReport and generateTestimonialsReport: added
- *         Service Status filter (Picked Up or Delivered). All six grant reports
- *         now consistently exclude records that have not been picked up or delivered.
- * v4.2 - Households and Distribution Stats: replaced single Assistance column with
- *         individual indicator columns (0/1) for each active LU_IncomeSources.Source
- *         value; replaced single Funding Code column with individual indicator columns
- *         for each active LU_FundingSources.Code value. Row expansion (one row per
- *         assistance source) removed — now one row per original record.
- *         New helpers: _getDynamicGrantCols_(), _buildGrantRowsWithDynamic_(),
- *         _writeGrantReportRaw_().
- * v4.3 - _buildGrantSummaryDoc_(): fixed income bracket counts and percentages not
- *         showing. The belowThresholdLevels array, belowThresholdCount accumulation,
- *         and all narrative/doc creation were inside the for-in loop over incomeCounts,
- *         so belowThresholdCount was always 0 and a new doc was created per iteration.
- *         Moved all computation and doc creation outside the loop.
- * v4.4 - Request Frequency: avgFreqDays now computed from consecutive request date
- *         gaps (sorted asc) instead of Last Date Served per row — correctly shows
- *         avg days between requests for applicants with >1 request.
- *         Testimonials: added _writeTestimonialsReport_() with per-row pink highlight
- *         (#FFD0D0) when May Use Info = 'No'. Permission column matched by key
- *         substring to handle long COL_PERMISSION string.
- *         Grant Summary: added Children Under 2 row to metrics table (Take Baby Box?
- *         X→count). Added babyBox to colIdx. Added totalChildren2Under parameter to
- *         _buildGrantSummaryDoc_().
- *         Households/Distribution Stats: dynamic income source columns now teal
- *         header (#0F9D58), funding code columns orange (#F4B400) in
- *         _writeGrantReportRaw_() for visual differentiation.
- * v4.5 - _getGrantResolvers_(): added short-key aliases for Testimonials columns
- *         that LU_ReportColumns may abbreviate: 'May Use Info', 'May We Use Info',
- *         'Permission', 'How Will Help', 'How Did Help', 'Current Situation',
- *         'Emergency Situation'. Fixes blank May Use Info column when LU_ReportColumns
- *         uses a short label instead of the full AM column name as the key.
- * v4.6 - _writeTestimonialsReport_(): reads permission value directly from
- *         records[ri].permission. COL_PERMISSION trailing period fix.
- * v4.7 - getGrantReportData(): new public function exposing fully-computed data
- *         (age brackets, products, applicant type, dynamic income/funding columns)
- *         for Households, Distribution Stats, Open Requests, Request Frequency,
- *         and Testimonials — without writing any spreadsheet. Called by the Report
- *         Builder in AIReportService so it works from the same data pipeline as
- *         the real grant reports.
  */
 
 'use strict';
@@ -181,18 +124,6 @@ function calculateAgeBrackets(headers, row, adultMaxAge) {
 
 /**
  * Calculate the full detailed age breakdown for a single data row.
- * Used by Households, Distribution Stats, and Open Requests reports.
- *
- * Returns individual bracket totals plus rolled-up totals by category
- * (children/adults/seniors) and by gender (totalMales/totalFemales).
- *
- * Classification:
- *   Children  — maxAge ≤ 17   (under 5, 5-9, 10-14, 15-17)
- *   Adults    — maxAge 18-64  (18-24, 25-34, 35-44, 45-54, 55-64)
- *   Seniors   — maxAge ≥ 65   (65-84, 85+)
- *
- * v3.8: Added totalMales and totalFemales (sum across all brackets).
- *
  * @param {string[]} headers - Trimmed column headers
  * @param {Array}    row     - Single data row
  * @returns {Object} Full breakdown — see result object for all fields
@@ -259,35 +190,11 @@ function calculateDetailedAgeBrackets(headers, row) {
 
 /**
  * Load product lookup dictionaries from G2N_Data and all year-based archives.
- *
- * Returns two lookup objects used by calculateProductCounts():
- *   distProdByBox  — { BoxCode: [qty, ...] }         from Distributed_Products
- *   drPfByIdDate   — { 'id|date': {qtyRequested, qtyReceived} }  from DR/PF_Products
- *                    (+ Products_Archive sheets in all archive workbooks)
- *
- * MySQL path: delegates to DbService.getProductLookupData() which queries
- * the bridge endpoint — no sheet reads needed.
- *
- * Sheets path: reads Distributed_Products once, then DR/PF_Products, then
- * iterates all getArchiveWorkbooksForRange() workbooks for Products_Archive.
- * v3.3: Added year-based archive iteration for complete coverage.
- *
  * @param {Date} fromDate - Report start date (used to scope archive search)
  * @param {Date} toDate   - Report end date
  * @returns {{ distProdByBox: Object, drPfByIdDate: Object }}
  */
 function loadProductLookupData(fromDate, toDate) {
-    // ── MySQL path ────────────────────────────────────────────────────────────
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-        try {
-            var fs = (fromDate instanceof Date) ? Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd') : null;
-            var ts = (toDate instanceof Date) ? Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd') : null;
-            return DbService.getProductLookupData(fs, ts);
-        } catch (e) {
-            Logger.log('loadProductLookupData MySQL error — falling back to Sheets: ' + e.message);
-        }
-    }
-
     // ── Sheets path ───────────────────────────────────────────────────────────
     var result = { distProdByBox: {}, drPfByIdDate: {} };
     try {
@@ -387,47 +294,13 @@ function loadProductLookupData(fromDate, toDate) {
 
 /**
  * Calculate Products Requested, Products Distributed, Baby Products Requested,
- * and Baby Products Distributed for a single applicant record.
- *
- * ROUTING LOGIC (applied to each of the 3 received product code slots):
- *
- *   Code = 'DR' or 'PF'
- *     → Look up drPfByIdDate['id|date'] — QtyRequested / QtyReceived
- *     → Counted only ONCE per record, even if multiple slots are DR/PF
- *
- *   Code 2nd character = 'B' (e.g. 'TB001', 'XB002')
- *     → Look up distProdByBox[code] — sum of Quantity
- *     → Counted as BABY products (babyRequested / babyDistributed)
- *
- *   All other non-empty codes
- *     → Look up distProdByBox[code] — sum of Quantity
- *     → Counted as REGULAR products (productsRequested / productsDistributed)
- *
- * Products are only counted when Service Status = 'Picked Up' or 'Delivered'.
- * Callers are responsible for pre-filtering rows.
- *
- * MYSQL PATH: If sp_get_report_data appends calc_qty_requested / calc_qty_received
- * (and optionally calc_baby_requested / calc_baby_received) as extra columns,
- * this function uses those pre-computed values and skips dictionary lookups.
- * Note: calc_baby_* columns require a follow-on sp_get_report_data update.
- *
- * v3.0: DR/PF routing; codes 1-3
- * v3.1: Fixed DR/PF double-count
- * v3.8: Baby detection (2nd char = B); babyRequested / babyDistributed added
- *
  * @param {string} id           - Applicant record ID
  * @param {string} productCode1 - Received Product Code 1
  * @param {string} productCode2 - Received Product Code 2
  * @param {string} productCode3 - Received Product Code 3
- * @param {Date}   requestDate  - For DR/PF key matching
- * @param {Object} productData  - From loadProductLookupData()
- * @param {Array}  [headers]    - Optional: enables MySQL pre-computed path
- * @param {Array}  [row]        - Optional: enables MySQL pre-computed path
- * @returns {{ productsRequested, productsDistributed, babyRequested, babyDistributed }}
  */
 function calculateProductCounts(id, productCode1, productCode2, productCode3,
     requestDate, productData, headers, row) {
-    // ── MySQL pre-computed path ───────────────────────────────────────────────
     if (headers && row) {
         var ri = headers.indexOf('calc_qty_requested');
         var rci = headers.indexOf('calc_qty_received');
@@ -539,25 +412,10 @@ function _getDynamicGrantCols_() {
 
 /**
  * Builds 2D output rows for reports that include dynamic income-source and
- * funding-code indicator columns appended after the standard static cols.
- *
- * Dynamic columns appended in order:
- *   1. One column per LU_IncomeSources.Source — value = 1 if the record's
- *      rawAssistance array contains that source, 0 otherwise.
- *   2. One column per LU_FundingSources.Code — value = 1 if the record's
- *      fundingCode matches that code, 0 otherwise.
- *
- * v4.2 - New function. Replaces _buildGrantRows_() for Households and
- *         Distribution Stats which previously expanded rows per assistance
- *         source instead of using indicator columns.
- *
  * @param {Object[]} records        - Per-row record objects
  * @param {Object[]} staticCols     - Standard cols from _getColsWithFallback_()
  * @param {string[]} incomeSources  - From _getDynamicGrantCols_().incomeSources
  * @param {string[]} fundingCodes   - From _getDynamicGrantCols_().fundingCodes
- * @returns {{ headers: string[], rows: Array[] }}
- *   headers — full column header array (static labels + dynamic keys)
- *   rows    — 2D data array ready for setValues()
  */
 function _buildGrantRowsWithDynamic_(records, staticCols, incomeSources, fundingCodes) {
     var resolvers = _getGrantResolvers_();
@@ -922,7 +780,6 @@ function _getFallbackCols_(reportName) {
  * Get combined data from Applicants_Master and all year-based archive workbooks,
  * filtered by Request Date range and optional column filters.
  *
- * MySQL path: delegates to DbService.getReportData() — returns same shape.
  * Sheets path: reads AM, then iterates getArchiveWorkbooksForRange() for archives.
  *
  * @param {Date}     fromDate
@@ -931,23 +788,6 @@ function _getFallbackCols_(reportName) {
  * @returns {{ headers, rows, masterCount, archiveCount, totalCount }}
  */
 function getCombinedData(fromDate, toDate, filters) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-        try {
-            var fs = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-            var ts = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-            var statusCsv = null, statusIncludeNull = false;
-            if (filters) {
-                for (var f = 0; f < filters.length; f++) {
-                    if (filters[f].column === 'Service Status') {
-                        if (filters[f].values) statusCsv = filters[f].values.join(',');
-                        if (filters[f].emptyOrValues) { statusCsv = filters[f].emptyOrValues.join(','); statusIncludeNull = true; }
-                    }
-                }
-            }
-            return DbService.getReportData(fs, ts, true, statusCsv, statusIncludeNull, null, null, null);
-        } catch (e) { Logger.log('getCombinedData MySQL error (fallback): ' + e.message); }
-    }
-
     var result = { headers: [], rows: [], masterCount: 0, archiveCount: 0, totalCount: 0 };
     try {
         var masterSheet = getMasterSheet();
@@ -1073,23 +913,10 @@ function parseIncomeHighEnd(incomeLabel) {
 
 /**
  * Create a Grant report spreadsheet, write headers and data rows, apply
- * column formatting from LU_ReportColumns, log the audit event, and return
- * the standard result object.
- *
- * Column headers come from cols[].label (resolved via LU_FieldMap Report Headers).
- * Row data comes from _buildGrantRows_(records, cols).
- * Column widths and wrap settings come from cols[].width and cols[].wrapText.
- *
  * @param {string}   reportKey   - Matches 'Report Name' in LU_ReportColumns
  * @param {string}   reportTitle - Shown in writeReportTitleSection() and sheet tab name
  * @param {string}   filePrefix  - Spreadsheet filename prefix (e.g. 'Households')
  * @param {Object[]} records     - Per-row record objects
- * @param {Object[]} cols        - From _getColsWithFallback_()
- * @param {Object}   combined    - From getCombinedData()
- * @param {Date}     fromDate
- * @param {Date}     toDate
- * @param {string}   auditAction - e.g. 'GRANTS_REPORT'
- * @returns {{ success, message, recordCount, masterCount, archiveCount, reportUrl, downloadUrl, reportId }}
  */
 function _writeGrantReport_(reportKey, reportTitle, filePrefix, records, cols,
     combined, fromDate, toDate, auditAction) {
@@ -1495,17 +1322,6 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
 
 /**
  * Generate Distribution Stats report — all records, full demographics.
- *
- * Filter: Service Status = 'Picked Up' or 'Delivered' (v4.1).
- * Products counted only when Service Status = 'Picked Up' or 'Delivered'.
- * Assistance field expanded: one row per comma-separated assistance type.
- * Columns: driven by LU_ReportColumns 'Distribution Stats'.
- * Order: Quarter, Year, Month, Day, First Name, Last Name, City, State, Zip, County.
- *
- * v3.9: Products Requested added; Baby columns added; Children 2 and Under fixed;
- *       referral column raw headers corrected to match LU_FieldMap COL_* constants
- * v4.0: dataHeaders replaced with LU_ReportColumns lookup
- *
  * @param {string} fromDateStr - YYYY-MM-DD
  * @param {string} toDateStr   - YYYY-MM-DD
  * @returns {Object} Standard report result
@@ -1895,39 +1711,6 @@ function generateRequestFrequencyReport(fromDateStr, toDateStr) {
             return { success: false, error: 'From Date must be before To Date' };
 
         var cols = _getColsWithFallback_('Request Frequency');
-
-        // ── MySQL fast path ───────────────────────────────────────────────────
-        if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-            try {
-                var fs = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-                var ts = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-                var freqData = DbService.getRequestFrequencyData(fs, ts);
-                var mH = freqData.headers || [];
-                var qi = mH.indexOf('quarter'), yi = mH.indexOf('year'), mni = mH.indexOf('month'),
-                    di = mH.indexOf('day'), cii = mH.indexOf('city'), sti = mH.indexOf('state'),
-                    zii = mH.indexOf('zip'), coi = mH.indexOf('county'), inci = mH.indexOf('income_level'),
-                    rti = mH.indexOf('request_type'), ssi = mH.indexOf('service_status'),
-                    rci = mH.indexOf('request_count'), afi = mH.indexOf('avg_freq_days');
-                var records = (freqData.rows || []).map(function (r) {
-                    return {
-                        quarter: qi !== -1 ? r[qi] : '', year: yi !== -1 ? r[yi] : '',
-                        month: mni !== -1 ? r[mni] : '', day: di !== -1 ? r[di] : '',
-                        city: cii !== -1 ? r[cii] : '', state: sti !== -1 ? r[sti] : '',
-                        zip: zii !== -1 ? r[zii] : '', county: coi !== -1 ? r[coi] : '',
-                        incomeLevel: inci !== -1 ? r[inci] : '', requestType: rti !== -1 ? r[rti] : '',
-                        serviceStatus: ssi !== -1 ? r[ssi] : '',
-                        requestCount: rci !== -1 ? r[rci] : 0,
-                        avgFreqDays: afi !== -1 && r[afi] !== null ? r[afi] : ''
-                    };
-                });
-                var totalReqs = records.reduce(function (s, r) { return s + (r.requestCount || 0); }, 0);
-                return _writeRequestFrequencySpreadsheet_(records, totalReqs,
-                    freqData.totalCount, 0, fromDate, toDate, cols);
-            } catch (e) {
-                Logger.log('Request Frequency MySQL error (fallback to Sheets): ' + e.message);
-            }
-        }
-
         // ── Sheets path ───────────────────────────────────────────────────────
         var combined = getCombinedData(fromDate, toDate,
             [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
@@ -2093,45 +1876,6 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
         if (fromDate > toDate) {
             return { success: false, error: 'From Date must be before To Date' };
         }
-
-        // ── MySQL path: sp_get_grant_summary_stats returns pre-aggregated results ──
-        if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-            try {
-                var fromStr = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-                var toStr = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-                var countyCsv = (filterCounty || '').trim() || null;
-                var cityCsv = (filterCity || '').trim() || null;
-                var zipCsv = (filterZip || '').trim() || null;
-
-                var stats = DbService.getGrantSummaryStats(fromStr, toStr, countyCsv, cityCsv, zipCsv);
-                if (!stats) throw new Error('getGrantSummaryStats returned null');
-
-                if (stats.householdCount === 0) {
-                    return { success: false, error: 'No records found for the specified filters and date range' };
-                }
-
-                // Build incomeCounts map from incomeBreakdown array
-                var incomeCounts = {};
-                var totalIncomeRecords = 0;
-                (stats.incomeBreakdown || []).forEach(function (b) {
-                    if (b.incomeLevel !== '') {
-                        incomeCounts[b.incomeLevel] = b.incomeCount;
-                        totalIncomeRecords += b.incomeCount;
-                    }
-                });
-
-                return _buildGrantSummaryDoc_(
-                    fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
-                    stats.householdCount, stats.totalRequests,
-                    stats.totalChildren, stats.totalAdults, stats.totalSeniors,
-                    stats.totalProductsDistributed,
-                    incomeCounts, totalIncomeRecords);
-            } catch (e) {
-                Logger.log('generateGrantSummaryReport MySQL error (falling back to Sheets): ' + e.message);
-                // Fall through to Sheets path
-            }
-        }
-
         // ── Sheets path ─────────────────────────────────────────────────────────
         var filters = [
             { column: 'Service Status', values: ['Picked Up', 'Delivered'] }

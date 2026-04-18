@@ -17,41 +17,6 @@
  *         getFieldDefinitions() with Box Code 3 fields (#2). Adopted
  *         CONFIG.TIMEZONE (#8). Added TODO notes for future FieldMapService
  *         migration (#6, #7). Marked getSheetHeaders() usage as deprecated (#14).
- * v2.8 - Added 'Admin Notes' to EDITABLE_FIELDS and getFieldDefinitions()
- *         adminNotes section. Displayed as editable textarea in the
- *         Information section of StaffVolunteerPortalWeb. Included in
- *         Scheduling Report via ReportService.gs generateSchedulingReport().
- * v2.9 - Migrated EDITABLE_FIELDS and getFieldDefinitions() to LU_FieldMap sheet-
- *         driven sources. Removed hardcoded EDITABLE_FIELDS const (resolved TODO #7);
- *         getFieldDefinitions() now delegates to FieldMapService.getStaffPortalSections()
- *         (resolved TODO #6). getPortalData() returns full portal data set including
- *         fieldMap, editableFields, and dropdownFields for use by SV portal.
- * v3.0 - Added updateIntakeRecord(): updates AM via AI form field IDs, writes 3 new
- *         audit raw headers (Updated By, Updated Date, Update Applied). Adds those
- *         columns to AM header row if they don't yet exist. Update Applied stores
- *         a semicolon-separated before→after string for every changed field.
- *         Added getApplicantEditData(): returns lookups + dropdownFields + fieldMapping
- *         for the Admin Portal Edit Applicant tab.
- * v3.4 - updateArchiveRecord(): added temporary diagnostic Logger.log calls.
- *         Console.log added to SV saveRecord() for client-side visibility.
- * v3.5 - Removed all temporary diagnostic Logger.log calls from updateArchiveRecord()
- *         and console.log from SV saveRecord(). No logic change.
- * v3.3 - getDemographicsStatus(recordId, archiveSource): reads Demographics-group
- *         fields from LU_FieldMap, checks the given record (AM or archive), and
- *         returns blankCount / totalCount / isMostlyBlank (>= 80%) so the SV portal
- *         can prompt staff to complete missing intake data.
- * v3.2 - updateArchiveRecord(): replaced full getDataRange().getValues() with
- *         two-step targeted read (ID column only, then single row). Eliminates
- *         GAS timeout on large archive workbooks. ID column looked up as plain
- *         'ID' string (not via COL_ID constant) — archive sheet always uses
- *         this header, and avoiding the constant eliminates file-load-order
- *         dependency with SharedUtils.gs.
- * v3.1 - Added updateArchiveRecord().
- *         in an archive workbook by ID. Mirrors searchArchiveSheets_ workbook-location
- *         logic (G2N_Archive by CONFIG.ARCHIVE_WORKBOOK_ID; G2N_Archive_YYYY by
- *         ARCHIVES_BACKUPS_FOLDER_ID folder scan). Same change-tracking / bulk-write
- *         / AuditLog pattern as updateRequest(). Called by SV saveRecord() when
- *         currentRecord._archived is true.
  */
 
 /**
@@ -64,10 +29,6 @@
  * @returns {Object} { success: boolean, changesCount: number }
  */
 function updateRequest(rowIndex, formData) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-        var user = getCurrentUser();
-        return DbService.updateRequest(rowIndex, formData, user ? user.code : null);
-    }
     try {
         // Validate parameters
         if (rowIndex === undefined || rowIndex === null || isNaN(rowIndex)) {
@@ -148,7 +109,6 @@ function updateRequest(rowIndex, formData) {
  * @returns {Object} { success: boolean, recordId: string }
  */
 function createNewRequest(formData) {
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) return DbService.createNewRequest(formData);
     try {
         const ss = getMasterWorkbook();
         const sheet = ss.getSheetByName(CONFIG.MASTER_SHEET);
@@ -343,7 +303,7 @@ function getFieldDefinitions() {
  */
 function getPortalData() {
     var portalSections = getStaffPortalSections();
-    var lookups = (CONFIG.DB && CONFIG.DB.USE_MYSQL) ? DbService.getAllLookups() : getAllLookups();
+    var lookups = getAllLookups();
     return {
         lookups: lookups,
         fieldMap: portalSections.fieldMap,
@@ -473,23 +433,9 @@ function updateIntakeRecord(rowIndex, formData, updatedBy) {
  */
 /**
  * Checks how many Demographics-group fields are blank in a given record.
- * Used by the Staff Portal to decide whether to show the "Complete Intake Data" prompt.
- *
- * Reads the record from AM or the specified archive workbook, then loads
- * Demographics fields from LU_FieldMap and counts blank vs. populated values.
- *
- * v3.3 - New function.
- *
  * @param {string} recordId     - Applicant record ID
  * @param {string} archiveSource - Archive workbook name ('G2N_Archive', 'G2N_Archive_YYYY') or ''
  * @returns {Object} {
- *   success: boolean,
- *   isMostlyBlank: boolean,   - true when blankPct >= 80
- *   blankCount: number,
- *   totalCount: number,
- *   blankPct: number,         - 0–100 integer
- *   demographicsFields: string[] - display labels of blank fields (for tooltip/message)
- * }
  */
 function getDemographicsStatus(recordId, archiveSource) {
     try {

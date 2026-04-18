@@ -43,75 +43,6 @@
  *         (People, Children, Adults, Seniors, Male/Female Children, Applicant
  *         Type, Products Requested/Distributed). Computed at report time from
  *         age brackets and product lookups. Selectable in field picker UI.
- * v1.5 - Added [Summary] fields: Number of Households (unique names), Number
- *         of Requests, Age Bracket Totals with M/F breakdowns.
- *         Added [Calc] Income Bracket with 3-tier/5-tier/as-is range choice.
- *         Added [Calc] Income Source (Expanded) — splits comma-separated
- *         assistance values into individual rows.
- *         Changed Products Req/Dist to use DR/PF_Products sheet directly
- *         (loadDRPFProductsSimple) instead of BoxCode lookup.
- * v1.6 - Shared calculations: Removed loadDRPFProductsSimple, formatDateKey,
- *         buildProductKey — now uses shared loadProductLookupData() and
- *         calculateProductCounts() from GrantsReportService.gs (routes by code
- *         value: DR/PF vs BoxCode, counts DR/PF once per record).
- *         Applicant Type uses shared getApplicantType() ("Existing"/"New").
- *         Fixed age labels: Adults (18-64), Seniors (65+) to match actual
- *         calculateDetailedAgeBrackets() cutoffs.
- * v1.7 - Field Display Labels: Uses shared FIELD_DISPLAY_MAP from GrantsReportService
- *         to map raw AM column headers to friendly grant-report-style labels.
- *         Applied to field picker UI, Claude prompt field names, and output sheet
- *         column headers. All labels match GrantsReportService output columns exactly.
- * v1.8 - Adopted trimHeaders() for header read in getAmFieldGroups().
- * v1.9 - FieldMapService migration: getAMFieldGroups() now delegates to
- *         FieldMapService.getFieldsByGroup() for sheet-driven field groups
- *         instead of hardcoded groupDefs. Computed/Summary fields pulled from
- *         FieldMapService. Label/map building in generateAIDataSheet() now
- *         uses FieldMapService.buildDisplayLabels() and buildLabelToRawMap().
- *         Removed inline FIELD_DISPLAY_MAP reference comment.
- * v1.10 - Adopted CONFIG.TIMEZONE across all Utilities.formatDate() calls (#8).
- * v1.11 - Saved Custom Data Sheet Reports: generateAIDataSheet() returns savedSpec,
- *         savedFields, savedPrompt, savedBracket in result for AP to offer "Save as
- *         Template". New functions: saveCustomDataSheetSpec(), listSavedDataSheetReports(),
- *         runSavedDataSheetReport(). Specs stored in LU_SavedReports (G2N_Lookups).
- *         Re-running a saved report applies the spec to fresh data with zero API tokens.
- * v1.12 - Phone Number formatted as (XXX) XXX-XXXX in Custom Data Sheet output
- *         (applySpecAndWriteSheet output rows) and in sample data sent to Claude
- *         (generateAIDataSheet sample row builder). Uses formatPhoneNumber_() from
- *         ReportService.gs (shared GAS project scope).
- * v1.13 - Report Builder: conversational chat interface. processReportBuilderTurn(),
- *         callClaudeAPIMultiTurn(). getAMFieldGroups() result unwrap fix.
- *         Known report templates in system prompt. Fallback to raw headers.
- * v1.14 - Cost tracking: calculateRequestCost_(), trackCumulativeCost_(),
- *         getAICostSummary(), resetAICostTracker(). processReportBuilderTurn()
- *         returns requestCost and cumulativeCost. No Anthropic balance API.
- * v1.15 - _buildReportTemplateContext_(): live getReportColumns() calls replace
- *         hardcoded template strings. generateFromReportBuilderSpec(): no-API-call
- *         generate path. listRecentGrantsReports(): Grants folder file browser.
- * v1.16 - applySpecAndWriteSheet(): added groupBy/aggCols aggregation mode.
- *         When spec.groupBy + spec.aggCols are present, outputs one row per unique
- *         group value with aggregate columns (count/countDistinct/sum/avg/pct)
- *         and a bold TOTAL row. Raw-row mode unchanged.
- *         processReportBuilderTurn(): system prompt completely rewritten — describes
- *         both engine modes accurately, includes SPEC JSON structure for groupBy/
- *         aggCols, and a DECISION GUIDE so Claude chooses MODE 1 vs MODE 2 correctly.
- * v1.17 - processReportBuilderTurn(): added conversation rules 11-13 — field removal,
- *         field addition, and approval phrase handling.
- * v1.18 - processReportBuilderTurn(): pre-reads Hygiene Stats workbook each turn.
- *         DATA SOURCE SCOPE section added. Rule 14 for Hygiene Stats reports.
- *         generateFromReportBuilderSpec() routes source="hygiene" to
- *         _generateFromHygieneSpec_(). _generateFromPrebuiltData_() shared writer.
- * v1.19 - Pre-reads grant/distribution data; routes source="grant"/"distribution".
- * v1.20 - _generateFromHygieneSpec_(): full rewrite with groupBy/aggCols support.
- *         Rule 13 rewritten to force <SPEC> on approval phrases. Rule 14 updated
- *         with complete Hygiene spec example.
- * v1.21 - generateFromReportBuilderSpec(): fixed guard that blocked groupBy specs.
- *         _generateFromHygieneSpec_(): fixed two bugs:
- *         (1) Month Name blank — Distribution Date Range stored as GAS Date object
- *             not string; now handles both Date objects and "M/d/yyyy - M/d/yyyy"
- *             strings to extract start date and derive Month Name/Number/Year.
- *         (2) % No Pick Up shown as decimal (0.35%) — sheet stores value as fraction
- *             (0.35 = 35%); now detects fraction vs percentage (<=1 = fraction) and
- *             multiplies by 100 before storing; avg aggregation then formats correctly.
  */
 
 // ============ AI CONFIGURATION ============
@@ -1442,21 +1373,10 @@ function extractJSON(text) {
 
 /**
  * Apply AI-generated spec to raw data and write formatted Google Sheet
- * Handles filtering, sorting, and computed summary metrics.
- * v1.7: Resolves display label field names back to raw AM headers for data lookup.
- *        Uses display labels for output sheet column headers.
  * @param {Object} spec - AI spec { title, outputColumns, filters, sort, computations, notes }
  * @param {Array} headers - All headers (including computed)
  * @param {Array} rows - All data rows (including computed columns)
  * @param {Array} validFields - Selected field names (raw AM headers)
- * @param {Array} fieldIndices - Column indices for selected fields
- * @param {string} fromDate - Report start date
- * @param {string} toDate - Report end date
- * @param {number} tokensUsed - API tokens consumed
- * @param {Array} autoSummary - Pre-computed summary rows [[label,value],...]
- * @param {Object} labelToRaw - Map of display labels to raw header names
- * @param {Array} displayLabels - Friendly labels parallel to validFields
- * @returns {Object} { success, reportUrl, downloadUrl, message, tokensUsed }
  */
 function applySpecAndWriteSheet(spec, headers, rows, validFields, fieldIndices, fromDate, toDate, tokensUsed, autoSummary, labelToRaw, displayLabels) {
     try {
@@ -2697,24 +2617,10 @@ function _buildReportTemplateContext_() {
 
 /**
  * Process one turn of the Report Builder conversation.
- *
- * Each call receives the full message history (alternating user/assistant).
- * Claude either asks a clarifying question OR returns a JSON spec wrapped in
- * <SPEC>...</SPEC> tags when it has enough information.
- *
- * When a spec is detected:
- *   - The report is generated immediately using applySpecAndWriteSheet.
- *   - Result includes reportUrl, downloadUrl, spec (for saving), and tokensUsed.
- *   - If generate=false is passed the spec is returned without generating.
- *
- * v1.13 - New function.
- *
  * @param {Array}   messages   - Full conversation history [{role, content}]
  * @param {string}  fromDate   - YYYY-MM-DD
  * @param {string}  toDate     - YYYY-MM-DD
  * @param {boolean} generate   - If true and spec ready, generate the report now
- * @returns {Object} { success, reply, specReady, spec, reportUrl, downloadUrl,
- *                     tokensUsed, error }
  */
 function processReportBuilderTurn(messages, fromDate, toDate, generate) {
     try {
