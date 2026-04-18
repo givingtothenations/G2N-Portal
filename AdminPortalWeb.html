@@ -134,6 +134,26 @@
   v7.4 - Edit Applicant email field: added autocomplete="off" to prevent browser
          autofill from populating the applicant's email field with the admin's
          own email address when creating or editing a record.
+  v7.5 - AI Reports: Report Builder conversational interface. New dropdown option
+         'Report Builder' shows a chat panel — user describes report in plain English,
+         Claude asks clarifying questions and produces a spec, then generates the
+         Google Sheet. Print Chat button prints the full conversation. Spec saved
+         via existing Save as Template flow. onAIReportTypeChange() updated to
+         show/hide builder panel. generateAIReport() guarded against builder type.
+  v7.6 - Report Builder fixes: (1) Cost display — per-request token count and ~$
+         estimate shown after each turn; running cumulative cost shown; View Balance
+         link opens console.anthropic.com/settings/billing. (2) Spec-ready panel
+         now scrolls into view automatically. (3) Sending a new chat message hides
+         the prior report links and spec panel. Print chat now includes cost line.
+  v7.7 - Report Builder: saveAITemplate() was checking aiLastSpec which is only
+         set by the Custom Data Sheet flow — fixed by populating aiLastSpec in
+         generateReportBuilderReport() success handler.
+  v7.8 - Report Builder: generateReportBuilderReport() calls generateFromReportBuilderSpec()
+         directly. Added Find recent reports button and rbFindRecentReports().
+  v7.9 - Report Builder: sendReportBuilderMessage() now shows a ⚠️ warning bubble
+         when spec parse fails (Claude included JSON but it couldn't be extracted).
+         generateReportBuilderReport() shows actionable error message when rbCurrentSpec
+         is null, directing user to type "create the spec".
 -->
 
 <!DOCTYPE html>
@@ -967,6 +987,22 @@
                 <div id="processMessage" class="alert hidden"></div>
 
                 <div id="processLog" class="processing-log hidden"></div>
+
+                <hr style="margin: 25px 0; border: none; border-top: 2px solid #dadce0;">
+
+                <h3>Returned to Stock (Restock) Report</h3>
+                <div class="alert alert-info">
+                    Reads the Hygiene Box Distribution Stats workbook and summarizes
+                    Restock recipients and percentage across all distribution centers.
+                </div>
+                <button class="btn-primary btn-block" onclick="generateRestockReport()" id="restockReportBtn">
+                    Generate Restock Report
+                </button>
+                <div id="restockMessage" class="alert hidden"></div>
+                <div id="restockResults" class="hidden" style="margin-top:12px;">
+                    <div id="restockTable"></div>
+                    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;" id="restockLinks"></div>
+                </div>
             </div>
 
             <!-- Grants Reports Tab -->
@@ -1091,6 +1127,7 @@
                     <select id="aiReportType" onchange="onAIReportTypeChange()">
                         <option value="">-- Select Report --</option>
                         <optgroup label="── AI-Generated (uses API tokens) ──">
+                            <option value="reportBuilder">⚡ Report Builder (Conversational)</option>
                             <option value="grantNarrative">Grant Narrative</option>
                             <option value="trendAnalysis">Data Trend Analysis</option>
                             <option value="testimonialSummary">Testimonial Summary</option>
@@ -1141,6 +1178,65 @@
                     <div style="margin-top:8px; font-size:12px; color:#666;">
                         <span id="aiFieldCount">0 fields selected</span>
                         — Leave empty and use instructions only for free-text mode
+                    </div>
+                </div>
+
+                <!-- Report Builder Chat Panel -->
+                <div id="aiReportBuilderPanel" class="hidden" style="margin-bottom:15px;">
+                    <div style="background:#f0f4ff; border:1px solid #c5d3f0; border-radius:6px; padding:12px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <p style="margin:0; font-weight:600; color:#1a3e8c;">💬 Report Builder</p>
+                            <button type="button" onclick="printReportBuilderChat()"
+                                    style="background:#e8f0fe; border:1px solid #aaa; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer;">
+                                🖨 Print Chat
+                            </button>
+                        </div>
+                        <p style="margin:0 0 10px; font-size:12px; color:#555;">
+                            Describe the report you want in plain English. Claude will ask clarifying questions,
+                            then build and generate the report. You can save it as a reusable template.
+                        </p>
+                        <!-- Chat history -->
+                        <div id="rbChatHistory" style="max-height:340px; overflow-y:auto; background:#fff; border:1px solid #ddd; border-radius:4px; padding:10px; margin-bottom:10px; font-size:13px;"></div>
+                        <!-- Input row -->
+                        <div style="display:flex; gap:8px; align-items:flex-start;">
+                            <textarea id="rbUserInput" rows="2"
+                                      style="flex:1; padding:7px; border:1px solid #ccc; border-radius:4px; resize:vertical; font-size:13px;"
+                                      placeholder="e.g. Show me Franklin County families with income under $30k, sorted by last name..."
+                                      onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault(); sendReportBuilderMessage();}"></textarea>
+                            <button class="btn-primary" onclick="sendReportBuilderMessage()" id="rbSendBtn"
+                                    style="padding:8px 16px; white-space:nowrap; align-self:flex-end;">
+                                Send
+                            </button>
+                        </div>
+                        <div style="margin-top:6px; font-size:11px; color:#888;">Press Enter to send · Shift+Enter for new line</div>
+                    </div>
+                    <!-- Spec ready actions -->
+                    <div id="rbSpecReadyPanel" class="hidden" style="margin-top:10px; background:#e6f4ea; border:1px solid #81c995; border-radius:6px; padding:12px;">
+                        <p style="margin:0 0 8px; font-weight:600; color:#1e7e34;">✅ Report spec is ready</p>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                            <button class="btn-primary" onclick="generateReportBuilderReport()" id="rbGenerateBtn" style="padding:8px 16px;">
+                                Generate Report
+                            </button>
+                            <button class="btn-secondary" onclick="rbReviseSpec()" style="padding:8px 16px;">
+                                Revise
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Find recent Report Builder reports -->
+                    <div style="margin-top:8px; text-align:right;">
+                        <button type="button" onclick="rbFindRecentReports()"
+                                style="background:none; border:none; color:#1a73e8; font-size:12px; cursor:pointer; text-decoration:underline; padding:0;">
+                            📂 Find recent reports in Grants folder
+                        </button>
+                    </div>
+                    <div id="rbRecentReports" class="hidden" style="margin-top:6px; background:#fff; border:1px solid #ddd; border-radius:4px; padding:8px; font-size:12px;"></div>
+                    <!-- Cost / token display -->
+                    <div id="rbCostDisplay" class="hidden" style="margin-top:8px; padding:8px 10px; background:#f8f9fa; border:1px solid #e0e0e0; border-radius:4px; font-size:12px; color:#555; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <span id="rbCostText"></span>
+                        <span>
+                            <a id="rbBalanceLink" href="https://console.anthropic.com/settings/billing" target="_blank"
+                               style="color:#1a73e8; text-decoration:none; font-weight:500;">View Balance ↗</a>
+                        </span>
                     </div>
                 </div>
 
@@ -2694,6 +2790,83 @@
         // ============ PHASE 4: ACTIVE SCHED DISB CODES DROPDOWN ============
 
         /**
+         * Generate Restock Report from Hygiene Box Distribution Stats workbook.
+         * Reads all sheets, summarises Restock-# Recipients per distribution center.
+         */
+        function generateRestockReport() {
+            document.getElementById('restockReportBtn').disabled = true;
+            document.getElementById('restockReportBtn').textContent = 'Generating...';
+            showMessage('restockMessage', 'Reading Hygiene Box Distribution Stats workbook...', 'info');
+            document.getElementById('restockResults').classList.add('hidden');
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    document.getElementById('restockReportBtn').disabled = false;
+                    document.getElementById('restockReportBtn').textContent = 'Generate Restock Report';
+
+                    if (!result.success) {
+                        showMessage('restockMessage', result.error || 'Failed to generate report', 'error');
+                        return;
+                    }
+
+                    showMessage('restockMessage', 'Report generated — ' + result.totalRows + ' distribution records across ' + result.centerCount + ' centers.', 'success');
+
+                    // Build summary table
+                    var html = '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+                    html += '<thead><tr style="background:#1a73e8; color:white; font-weight:bold;">' +
+                        '<th style="padding:7px 10px; text-align:left;">Distribution Center</th>' +
+                        '<th style="padding:7px 10px; text-align:right;">Distributions</th>' +
+                        '<th style="padding:7px 10px; text-align:right;">Total Scheduled</th>' +
+                        '<th style="padding:7px 10px; text-align:right;">Restock Recipients</th>' +
+                        '<th style="padding:7px 10px; text-align:right;">Avg % No Pick Up</th>' +
+                        '</tr></thead><tbody>';
+
+                    result.centers.forEach(function (c, i) {
+                        var bg = i % 2 === 1 ? '#f8f9fa' : '#fff';
+                        html += '<tr style="background:' + bg + ';">' +
+                            '<td style="padding:6px 10px; font-weight:bold;">' + c.center + '</td>' +
+                            '<td style="padding:6px 10px; text-align:right;">' + c.distributions + '</td>' +
+                            '<td style="padding:6px 10px; text-align:right;">' + c.totalScheduled.toLocaleString() + '</td>' +
+                            '<td style="padding:6px 10px; text-align:right; color:' + (c.totalRestock > 0 ? '#d93025' : '#34a853') + '; font-weight:bold;">' +
+                            c.totalRestock.toLocaleString() + '</td>' +
+                            '<td style="padding:6px 10px; text-align:right;">' + c.avgPctNoPickup + '%</td>' +
+                            '</tr>';
+                    });
+
+                    // Totals row
+                    html += '<tr style="background:#e8f0fe; font-weight:bold; border-top:2px solid #1a73e8;">' +
+                        '<td style="padding:7px 10px;">TOTAL</td>' +
+                        '<td style="padding:7px 10px; text-align:right;">' + result.totalRows + '</td>' +
+                        '<td style="padding:7px 10px; text-align:right;">' + result.grandTotalScheduled.toLocaleString() + '</td>' +
+                        '<td style="padding:7px 10px; text-align:right; color:#d93025;">' + result.grandTotalRestock.toLocaleString() + '</td>' +
+                        '<td style="padding:7px 10px; text-align:right;">' + result.grandAvgPct + '%</td>' +
+                        '</tr>';
+                    html += '</tbody></table>';
+
+                    document.getElementById('restockTable').innerHTML = html;
+
+                    // Links
+                    var linksHtml = '';
+                    if (result.reportUrl) {
+                        linksHtml += '<a href="' + result.reportUrl + '" target="_blank" ' +
+                            'style="display:inline-block; padding:10px 18px; background:#34a853; color:white; border-radius:5px; text-decoration:none; font-weight:600;">Open Report ↗</a>';
+                    }
+                    if (result.downloadUrl) {
+                        linksHtml += '<a href="' + result.downloadUrl + '" target="_blank" ' +
+                            'style="display:inline-block; padding:10px 18px; background:#1a73e8; color:white; border-radius:5px; text-decoration:none; font-weight:600; margin-left:8px;">Download Excel</a>';
+                    }
+                    document.getElementById('restockLinks').innerHTML = linksHtml;
+                    document.getElementById('restockResults').classList.remove('hidden');
+                })
+                .withFailureHandler(function (err) {
+                    document.getElementById('restockReportBtn').disabled = false;
+                    document.getElementById('restockReportBtn').textContent = 'Generate Restock Report';
+                    showMessage('restockMessage', 'Failed: ' + (err.message || 'Unknown error'), 'error');
+                })
+                .generateRestockReport();
+        }
+
+        /**
          * Phase 4B.3: Loads active SchedDisbCodes into both Distribution Reports
          * and Process Distribution dropdowns, caches full details for auto-fill
          */
@@ -3640,6 +3813,7 @@
         // ============ AI REPORTS ============
 
         var aiReportDescriptions = {
+            reportBuilder: 'Describe the report you want in plain English. Claude asks clarifying questions, builds a spec, then generates the Google Sheet. Save as a reusable template for future runs.',
             grantNarrative: 'Generates a polished, data-driven grant narrative from demographics, income, distribution, and testimonial data. Ideal for grant applications and funder reports.',
             trendAnalysis: 'Analyzes monthly volume trends, geographic distribution shifts, demographic patterns, and service delivery metrics. Highlights concerns and opportunities.',
             testimonialSummary: 'Synthesizes individual client testimonials into themed impact statements. Groups by gratitude, life impact, family benefit, and community connection.',
@@ -3648,6 +3822,297 @@
         };
 
         var aiFieldGroupsLoaded = false;
+
+        // ── Report Builder state ──────────────────────────────────────────────
+        var rbMessages = [];   // full conversation history [{role,content}]
+        var rbCurrentSpec = null; // last spec Claude produced
+        var rbTotalTokens = 0;    // running token total for this session
+
+        /**
+         * Reset Report Builder state when switching away or starting fresh.
+         */
+        function rbReset() {
+            rbMessages = [];
+            rbCurrentSpec = null;
+            rbTotalTokens = 0;
+            document.getElementById('rbChatHistory').innerHTML = '';
+            document.getElementById('rbUserInput').value = '';
+            document.getElementById('rbSpecReadyPanel').classList.add('hidden');
+            document.getElementById('rbCostDisplay').classList.add('hidden');
+            document.getElementById('rbCostText').textContent = '';
+            document.getElementById('aiReportLinks').classList.add('hidden');
+            document.getElementById('aiMessage').classList.add('hidden');
+        }
+
+        /**
+         * Append a bubble to the chat history display.
+         * @param {'user'|'assistant'} role
+         * @param {string} text
+         */
+        function rbAppendBubble(role, text) {
+            var hist = document.getElementById('rbChatHistory');
+            var div = document.createElement('div');
+            div.style.cssText = 'margin-bottom:10px;';
+            var isUser = role === 'user';
+            div.innerHTML =
+                '<div style="font-size:11px; color:#888; margin-bottom:2px;">' +
+                (isUser ? '👤 You' : '🤖 Claude') + '</div>' +
+                '<div style="background:' + (isUser ? '#e8f0fe' : '#f1f3f4') + ';' +
+                'border-radius:8px; padding:8px 12px; font-size:13px; white-space:pre-wrap; line-height:1.5;">' +
+                escapeHtml(text) + '</div>';
+            hist.appendChild(div);
+            hist.scrollTop = hist.scrollHeight;
+        }
+
+        /**
+         * Escape HTML special characters for safe innerHTML insertion.
+         */
+        function escapeHtml(str) {
+            return (str || '').toString()
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        /**
+         * Send a user message to the Report Builder backend.
+         */
+        function sendReportBuilderMessage() {
+            var input = document.getElementById('rbUserInput');
+            var text = (input.value || '').trim();
+            if (!text) return;
+
+            var fromDate = document.getElementById('aiFromDate').value;
+            var toDate = document.getElementById('aiToDate').value;
+            if (!fromDate || !toDate) {
+                showMessage('aiMessage', 'Please enter From Date and To Date before chatting.', 'error');
+                return;
+            }
+
+            // Fix 3: Hide prior report links and spec panel when user sends a new message
+            document.getElementById('aiReportLinks').classList.add('hidden');
+            document.getElementById('rbSpecReadyPanel').classList.add('hidden');
+            document.getElementById('aiMessage').classList.add('hidden');
+
+            // Add to history and display
+            rbMessages.push({ role: 'user', content: text });
+            rbAppendBubble('user', text);
+            input.value = '';
+
+            // Disable send while waiting
+            document.getElementById('rbSendBtn').disabled = true;
+            document.getElementById('rbSendBtn').textContent = '...';
+
+            // Thinking bubble
+            var hist = document.getElementById('rbChatHistory');
+            var thinking = document.createElement('div');
+            thinking.id = 'rbThinking';
+            thinking.style.cssText = 'margin-bottom:10px; color:#888; font-style:italic; font-size:13px;';
+            thinking.textContent = '🤖 Claude is thinking...';
+            hist.appendChild(thinking);
+            hist.scrollTop = hist.scrollHeight;
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    var t = document.getElementById('rbThinking');
+                    if (t) t.remove();
+                    document.getElementById('rbSendBtn').disabled = false;
+                    document.getElementById('rbSendBtn').textContent = 'Send';
+
+                    if (!result.success) {
+                        rbAppendBubble('assistant', 'Error: ' + result.error);
+                        return;
+                    }
+
+                    // Add assistant reply to history
+                    rbMessages.push({ role: 'assistant', content: result.reply });
+                    rbAppendBubble('assistant', result.reply);
+
+                    // Fix 1: Update cost display
+                    rbTotalTokens += result.tokensUsed || 0;
+                    var costText = '';
+                    if (result.requestCost !== undefined) {
+                        costText = 'This message: ' + result.tokensUsed.toLocaleString() +
+                            ' tokens (~$' + result.requestCost.toFixed(4) + ')';
+                    }
+                    if (result.cumulativeCost !== undefined) {
+                        costText += '  |  Session total: ~$' + result.cumulativeCost.toFixed(4);
+                    }
+                    if (costText) {
+                        document.getElementById('rbCostText').textContent = costText;
+                        document.getElementById('rbCostDisplay').classList.remove('hidden');
+                    }
+
+                    // Fix 2: Show spec-ready panel and scroll into view
+                    if (result.specReady && result.spec) {
+                        rbCurrentSpec = result.spec;
+                        var specPanel = document.getElementById('rbSpecReadyPanel');
+                        specPanel.classList.remove('hidden');
+                        setTimeout(function () {
+                            specPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        }, 100);
+                    } else if (!result.specReady) {
+                        // Check if Claude tried but failed — prompt user to ask again
+                        var replyLower = (result.reply || '').toLowerCase();
+                        if (replyLower.indexOf('"source"') !== -1 || replyLower.indexOf('groupby') !== -1 ||
+                            replyLower.indexOf('spec') !== -1) {
+                            rbAppendBubble('assistant',
+                                '⚠️ The spec could not be parsed. Please type "create the spec" to try again, ' +
+                                'or rephrase your request.');
+                        }
+                    }
+                })
+                .withFailureHandler(function (err) {
+                    var t = document.getElementById('rbThinking');
+                    if (t) t.remove();
+                    document.getElementById('rbSendBtn').disabled = false;
+                    document.getElementById('rbSendBtn').textContent = 'Send';
+                    rbAppendBubble('assistant', 'Error: ' + (err.message || 'Unknown error'));
+                })
+                .processReportBuilderTurn(rbMessages, fromDate, toDate, false);
+        }
+
+        /**
+         * Generate the report from the current spec.
+         * Uses rbCurrentSpec captured from Claude's last response directly —
+         * does NOT make another API call to Claude.
+         */
+        function generateReportBuilderReport() {
+            if (!rbCurrentSpec) {
+                showMessage('aiMessage',
+                    'No report spec available. Type "create the spec" in the chat to have Claude generate one, then click Generate Report.',
+                    'error');
+                return;
+            }
+            var fromDate = document.getElementById('aiFromDate').value;
+            var toDate = document.getElementById('aiToDate').value;
+
+            document.getElementById('rbGenerateBtn').disabled = true;
+            document.getElementById('rbGenerateBtn').textContent = 'Generating...';
+            showMessage('aiMessage', 'Generating report from spec...', 'info');
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    document.getElementById('rbGenerateBtn').disabled = false;
+                    document.getElementById('rbGenerateBtn').textContent = 'Generate Report';
+
+                    if (!result.success) {
+                        showMessage('aiMessage', 'Error: ' + result.error, 'error');
+                        return;
+                    }
+
+                    if (result.cumulativeCost !== undefined) {
+                        document.getElementById('rbCostText').textContent =
+                            'Report generated  |  Session total: ~$' + result.cumulativeCost.toFixed(4);
+                        document.getElementById('rbCostDisplay').classList.remove('hidden');
+                    }
+
+                    // Store spec for saving
+                    aiLastSpec = rbCurrentSpec;
+                    aiLastFields = rbCurrentSpec.outputColumns || [];
+                    aiLastPrompt = rbCurrentSpec.notes || '';
+                    aiLastBracket = 'asis';
+
+                    // Show report links
+                    document.getElementById('aiReportFormat').textContent = 'Google Sheet';
+                    document.getElementById('aiTokensUsed').textContent = 'Report Builder (no extra tokens)';
+                    document.getElementById('aiOpenUrl').href = result.reportUrl;
+                    document.getElementById('aiDownloadUrl').href = result.downloadUrl;
+                    document.getElementById('aiReportLinks').classList.remove('hidden');
+                    document.getElementById('aiSaveTemplatePanel').classList.remove('hidden');
+                    showMessage('aiMessage', 'Report generated successfully!', 'success');
+                    rbAppendBubble('assistant', '✅ Report generated! Use the links below to open or download it.');
+                })
+                .withFailureHandler(function (err) {
+                    document.getElementById('rbGenerateBtn').disabled = false;
+                    document.getElementById('rbGenerateBtn').textContent = 'Generate Report';
+                    showMessage('aiMessage', 'Failed: ' + (err.message || 'Unknown error'), 'error');
+                })
+                .generateFromReportBuilderSpec(rbCurrentSpec, fromDate, toDate);
+        }
+
+        /**
+         * Let the user revise the spec — hides spec panel, re-enables chat.
+         */
+        function rbReviseSpec() {
+            document.getElementById('rbSpecReadyPanel').classList.add('hidden');
+            document.getElementById('rbUserInput').focus();
+            rbAppendBubble('assistant', 'Sure — what would you like to change?');
+            rbMessages.push({ role: 'assistant', content: 'Sure — what would you like to change?' });
+        }
+
+        /**
+         * Find recent Report Builder / Custom Data Sheet reports in the Grants folder.
+         */
+        function rbFindRecentReports() {
+            var panel = document.getElementById('rbRecentReports');
+            panel.classList.remove('hidden');
+            panel.innerHTML = '<span style="color:#888; font-style:italic;">Searching Grants folder...</span>';
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (!result.success || !result.files || result.files.length === 0) {
+                        panel.innerHTML = '<span style="color:#888;">No recent reports found in the Grants folder.</span>';
+                        return;
+                    }
+                    var html = '<strong>Recent reports (last 30 days):</strong><br>';
+                    result.files.forEach(function (f) {
+                        html += '<div style="margin-top:5px;">' +
+                            '<a href="' + f.url + '" target="_blank" style="color:#1a73e8;">' + f.name + '</a>' +
+                            ' <span style="color:#888;">(' + f.date + ')</span></div>';
+                    });
+                    panel.innerHTML = html;
+                })
+                .withFailureHandler(function (err) {
+                    panel.innerHTML = '<span style="color:#d93025;">Error: ' + (err.message || 'Unknown error') + '</span>';
+                })
+                .listRecentGrantsReports();
+        }
+
+        /**
+         * Print the Report Builder conversation.
+         * Opens a minimal print window with the full chat history.
+         */
+        function printReportBuilderChat() {
+            var fromDate = document.getElementById('aiFromDate').value || '';
+            var toDate = document.getElementById('aiToDate').value || '';
+
+            var lines = ['<h2 style="font-family:sans-serif;">G2N Report Builder Conversation</h2>'];
+            if (fromDate && toDate) {
+                lines.push('<p style="font-family:sans-serif; color:#555; margin-top:0;">Date range: ' +
+                    fromDate + ' to ' + toDate + '</p>');
+            }
+            lines.push('<hr>');
+
+            rbMessages.forEach(function (msg) {
+                var isUser = msg.role === 'user';
+                var label = isUser ? 'You' : 'Claude';
+                var bg = isUser ? '#e8f0fe' : '#f1f3f4';
+                lines.push(
+                    '<div style="margin-bottom:14px; font-family:sans-serif;">' +
+                    '<div style="font-size:11px; color:#888; margin-bottom:3px;">' + label + '</div>' +
+                    '<div style="background:' + bg + '; border-radius:6px; padding:8px 12px; ' +
+                    'font-size:13px; white-space:pre-wrap; line-height:1.5;">' +
+                    escapeHtml(msg.content) + '</div></div>'
+                );
+            });
+
+            var costEl = document.getElementById('rbCostText');
+            var costLine = costEl ? costEl.textContent : '';
+            if (costLine) {
+                lines.push('<p style="font-family:sans-serif; font-size:11px; color:#888;">' +
+                    escapeHtml(costLine) + '</p>');
+            }
+
+            var win = window.open('', '_blank', 'width=700,height=600');
+            win.document.write(
+                '<!DOCTYPE html><html><head><title>Report Builder Chat</title>' +
+                '<style>body{margin:20px; max-width:680px;} @media print{body{margin:0.5in;}}</style>' +
+                '</head><body>' + lines.join('\n') + '</body></html>'
+            );
+            win.document.close();
+            win.focus();
+            win.print();
+        }
 
         /**
          * Check AI configuration on tab load and show/hide setup status.
@@ -3776,6 +4241,7 @@
             var descText = document.getElementById('aiReportDescText');
             var fieldPanel = document.getElementById('aiFieldPickerPanel');
             var formatGroup = document.getElementById('aiOutputFormatGroup');
+            var rbPanel = document.getElementById('aiReportBuilderPanel');
 
             if (reportType && aiReportDescriptions[reportType]) {
                 descText.textContent = aiReportDescriptions[reportType];
@@ -3784,18 +4250,22 @@
                 descEl.classList.add('hidden');
             }
 
-            // Show/hide field picker, income bracket, and output format based on report type
+            // Reset all variant panels
+            fieldPanel.classList.add('hidden');
+            document.getElementById('aiIncomeBracketGroup').classList.add('hidden');
+            rbPanel.classList.add('hidden');
+
             if (reportType === 'customDataSheet') {
                 fieldPanel.classList.remove('hidden');
                 formatGroup.classList.add('hidden');
                 document.getElementById('aiIncomeBracketGroup').classList.remove('hidden');
-                if (!aiFieldGroupsLoaded) {
-                    loadAIFieldGroups();
-                }
+                if (!aiFieldGroupsLoaded) loadAIFieldGroups();
+            } else if (reportType === 'reportBuilder') {
+                rbPanel.classList.remove('hidden');
+                formatGroup.classList.add('hidden');
+                rbReset();
             } else {
-                fieldPanel.classList.add('hidden');
                 formatGroup.classList.remove('hidden');
-                document.getElementById('aiIncomeBracketGroup').classList.add('hidden');
             }
 
             document.getElementById('aiReportLinks').classList.add('hidden');
@@ -3924,6 +4394,11 @@
 
             if (!reportType) {
                 showMessage('aiMessage', 'Please select a report type', 'error');
+                return;
+            }
+            // reportBuilder uses its own chat UI — this button should not be visible, but guard anyway
+            if (reportType === 'reportBuilder') {
+                showMessage('aiMessage', 'Use the chat interface above to build and generate your report.', 'info');
                 return;
             }
             if (!fromDate || !toDate) {

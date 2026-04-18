@@ -13,7 +13,8 @@
  *       inserts stats into Hygiene Box Distribution Stats workbook
  *   - Process Scheduling Report: Reads report, updates AM SchedDisbCode/Status
  *   - Archive: Bulk moves aged records to G2N_Archive workbook
- *   - File Cleanup: Deletes report files older than 3 months (excl. Distribution)
+ *   - File Cleanup: Deletes report files older than 1 month (excl. Distribution);
+ *                  Distribution folder deletes files for inactive SchedDisbCodes
  *
  * v4.0 - Phase 4: Scheduling Report enhancements (History column,
  *         data validation, sort by ID, magenta highlight, auto-detect
@@ -114,129 +115,1033 @@
  *          colWidths updated for 2 new columns; both long-text columns wrapped.
  *          After successful generation calls appendLastScheduledId() to record
  *          endId + report date in LU_LastScheduled for Beginning ID auto-population.
- * v5.19 - createDistributionReportSpreadsheet: added Sheet 2 "Quick Reference" —
- *          compact printable table of Last Name, First Name, Baby Box, Extra Box,
- *          Distribution Code, sorted by Last Name/First Name. Useful for distribution
- *          day quick lookup without scrolling address columns.
- *          getLastAmId: added missing var maxId = 0 declaration (was ReferenceError).
+ * v5.19 - generateSchedulingReport: removed beginId/endId parameters entirely.
+ *          Report now includes ALL records from Applicants_Master (no archive,
+ *          no ID range, no 1-year date filter).
+ *          Report name is date-only (no ID range in title).
+ *          Removed magenta AM highlight and appendLastScheduledId() call.
+ *          Added 'Learned How' column after 'Referrer Title' in reportColumns.
+ *          Confirmed 'How Products Help' immediately after 'Current Situation'
+ *          in additionalColumns.
+ *          Report column headers now written via getReportHeader_() from
+ *          LU_FieldMap; rawKeyHeaders array used internally for column position
+ *          tracking (data validation, wrap, etc.) so no raw-name indexOf needed.
+ *          Assistance column text wrapping applied.
+ *          colWidths updated to 45 columns (inserted Learned How at index 14).
+ *          processSchedulingReport: rptIdCol / rptSchedCodeCol / rptStatusCol
+ *          lookups changed from resolveAMField_() to getReportHeader_() to match
+ *          the report headers now written by generateSchedulingReport.
+ *          AdminPortalWeb v7.3: removed Beginning ID field, loadLastScheduledId(),
+ *          and related client-side logic.
+ * v5.20 - LU_ReportColumns integration for generateSchedulingReport().
+ *          Column definitions (previously hardcoded reportColumns,
+ *          ageBracketPairs, additionalColumns arrays) now read from
+ *          LU_ReportColumns 'Scheduling' via ReportColumnService.
+ *          Column widths applied via applyReportColumnFormatting().
+ *          Falls back to v5.19 hardcoded arrays when LU_ReportColumns empty.
+ *          processSchedulingReport() unchanged — still uses getReportHeader_()
+ *          for column lookups since it reads the generated report back.
+ * v5.21 - createDistributionReportSpreadsheet(): replaced per-row setValue()
+ *         loop with single batch setValues() call for data rows.
+ *         Alternating row background applied as a single loop of setBackground()
+ *         per-row (not per-cell). Eliminates 800+ API calls for a 80-record
+ *         report; fixes "running forever" / 6-minute GAS timeout.
+ *   v5.22 - Re-added generateDistributionReport() which was missing from the file.
+ *           Filters AM by Scheduled Distribution Code, builds record objects,
+ *           calls createDistributionReportSpreadsheet() (batch write, v5.21).
+ * v5.23 - Removed duplicate generateSchedulingReport() declaration (GAS error).
+ *          generateSchedulingReport(beginId): accepts beginId parameter; auto-detects
+ *          endId as max AM ID. New-record rows (ID >= beginId) highlighted light pink
+ *          (#FFD9D9) and bold. First Name and Last Name cells highlighted yellow for
+ *          ALL rows. AM row at endId highlighted magenta after report generation.
+ *          appendLastScheduledId(endId, reportDate) called on success so LU_SchedID
+ *          is updated for next report's Beginning ID pre-fill.
+ * v5.24 - generateDistributionReport(): collects additional contact-info fields.
+ *          createDistributionReportSpreadsheet(): adds second sheet tab
+ *          "Distribution Contact Info" with 18 contact/service columns sorted in
+ *          the same order as the primary sheet.
+ * v5.25 - executeArchiveBatch / previewArchive: Reports folder file cutoff changed
+ *          from 3 months to 1 month. Distribution folder no longer skipped — instead
+ *          deleteInactiveDistributionFiles() deletes files whose code matches an
+ *          inactive entry in LU_SchedDisbCodes. Added deleteInactiveDistributionFiles(),
+ *          countInactiveDistributionFiles(), and getInactiveSchedDisbCodes_() helpers.
+ * v5.26 - Distribution Report: Sheet1 renamed to "Scheduled". New third sheet tab
+ *          "Products Needed" added by _addProductsNeededSheet_(). Looks up the
+ *          distribCode in LU_SchedDisbCodes to get Box1/Box2/Box3 codes, then reads
+ *          Distributed_Products for each box code and sums Quantity by ProductName.
+ *          Recipient count per box: Box1/Box3 = all records; Box2 = extraBox='X' count.
+ *          Sheet is grouped by BoxCode with a sub-total per box and a grand total.
+ * v5.29 - generateDistributionReport: hasExtraBox now driven by LU_SchedDisbCodes Box3
+ *          (not per-row AM Scheduled Box Code 3); all scheduled recipients get 'X' in
+ *          Extra Box column when Box3 has a value. extraBox set uniformly for all records.
+ *          Products Needed sheet: counts based on scheduledRecords (Scheduled-sheet rows)
+ *          not allRecords; recipient count and babyCount both from scheduled set.
+ *          processSchedulingReport: fixed corrupted MIME type string (was arithmetic
+ *          expression, caused zero files matched — report never processed).
+ *          Added active-code filter: rows whose SchedDisbCode is not active in
+ *          LU_SchedDisbCodes are skipped and logged. Status written as report's
+ *          Service Status value when present, else defaults to 'Scheduled'.
+ *          Return now includes skippedCount.
+ * v5.34 - archiveOrphanedProducts(): ID-only sweep called after archiveProductRecords().
+ *          Catches product rows missed due to date-format mismatch in composite key.
+ *          Integrated into executeArchiveBatch() immediately after the composite-key
+ *          archive pass. Moves remaining rows for archived IDs to Products_Archive.
+ * v5.35 - processDistributionSheet: converted all per-row setValue() calls to
+ *          in-memory updates of masterData[], with a single setValues() per changed
+ *          row after the loop. Eliminates 200-500 individual Sheets API calls per
+ *          run (was causing GAS timeouts and partial writes, especially for Restock
+ *          rows where Date Picked Up is blank). Restock logic unchanged: sets
+ *          Service Status=Restock, Last Date Served/Final Service Contact Date/
+ *          Next Service Avail to the end date from the Available Dates header.
+ * v5.36 - findDistributionReportByCode: fixed malformed MIME type string
+ *          (was arithmetic expression `application / vnd.google - apps.spreadsheet`
+ *          causing ReferenceError "application is not defined" on Process Distribution).
+ *          generateSchedulingReport: SchedDisbCode dropdown now only includes active
+ *          codes (was already filtered via getAllDistribCodes_() but the Scheduling
+ *          Report rows themselves were not filtered — rows with inactive SchedDisbCode
+ *          values in AM are now excluded from the generated report).
+ *          _addProductsNeededSheet_: added 'QtyPerBox' and 'QtyDistributed' as
+ *          fallback column names for 'Quantity' in Distributed_Products.
+ * v5.37 - _addProductsNeededSheet_: added diagnostic Logger.log showing all BoxCodes
+ *          present in Distributed_Products and the box codes being searched, so
+ *          mismatches between LU_SchedDisbCodes box values and Distributed_Products
+ *          BoxCode column are visible in the Execution Log. Changed empty-section
+ *          handling from silent skip to an error message on the sheet itself.
+ * v5.38 - generateRestockReport(): reads Hygiene Stats workbook, two-sheet output.
+ * v5.39 - getDistributionReportData(): new public function returning scheduled
+ *         records, all-records, and Products Needed data for a SchedDisbCode
+ *         without writing any spreadsheet. Called by Report Builder in
+ *         AIReportService so it works from the same data as Distribution Reports.
+ * v5.33 - _addProductsNeededSheet_: section headers now show "Box 1 — DG2 (N recipients)"
+ *          instead of "Box Code: DG2" so users can identify which box number each
+ *          section represents. Sub-total rows updated to match.
+ * v5.32 - _addProductsNeededSheet_: fixed case-sensitive BoxCode mismatch between
+ *          LU_SchedDisbCodes Box1/2/3 values and Distributed_Products BoxCode column.
+ *          sumProductsByBox now compares both sides uppercased; boxCode stored in
+ *          sections array as uppercase. Was silently producing empty product lists.
+ * v5.31 - _addProductsNeededSheet_: confirmed three-box logic (docstring only).
+ *          Box1 × allCount, Box2 × babyCount, Box3 × allCount (same as Box1).
+ * v5.28 - _addProductsNeededSheet_: fixed undefined extraCount reference in footer
+ *          (extraCount was removed in v5.27 when Box3 changed to allCount; now
+ *          footer correctly shows babyCount as "Baby Box Recipients").
+ *          Corrected JSDoc: Box1/Box3 = allCount; Box2 = babyBox='X' count.
+ * v5.27 - Scheduling Report: Service Status dropdown reads from LU_ServiceStatus
+ *          instead of hardcoded list.
+ *          Distribution Report Scheduled sheet: excludes rows where Service Status
+ *          is not 'Scheduled' or blank (only status-eligible rows shown).
+ *          Distribution Contact Info sheet: includes ALL rows for the selected
+ *          Sched Distrib Code (not filtered by status); adds Service Status column
+ *          after Income Level. createDistributionReportSpreadsheet() gains optional
+ *          allRecords param for unfiltered Contact Info data.
+ *          Column name fixes in generateDistributionReport(): Referral Info, Referrer
+ *          Name, Additional Info, Apartment #, Phone Type, Best Contact, Income Level
+ *          now use the actual AM raw headers via LU_FieldMap COL_* equivalents.
+ *          Products Needed Box2: recipient count now uses Take Baby Box = X count
+ *          (babyBox) instead of Extra Box count. Box3 uses allCount (same as Box1).
  */
+
+'use strict';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Age bracket pair map for combined M+F columns
+// Maps each [Calc] column key to the two raw AM headers whose values are summed.
+// Used by _buildSchedRow_() to resolve combined bracket columns.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @type {Object.<string, {male: string, female: string}>} */
+var SCHED_AGE_BRACKET_MAP_ = {
+    '[Calc] Under 5': { male: '[Males under 5]', female: '[Females under 5]' },
+    '[Calc] 5-9': { male: '[Males 5-9]', female: '[Females 5-9]' },
+    '[Calc] 10-14': { male: '[Males 10-14]', female: '[Females 10-14]' },
+    '[Calc] 15-17': { male: '[Males 15-17]', female: '[Females 15-17]' },
+    '[Calc] 18-24': { male: '[Males 18-24]', female: '[Females 18-24]' },
+    '[Calc] 25-34': { male: '[Males 25-34]', female: '[Females 25-34]' },
+    '[Calc] 35-44': { male: '[Males 35-44]', female: '[Females 35-44]' },
+    '[Calc] 45-54': { male: '[Males 45-54]', female: '[Females 45-54]' },
+    '[Calc] 55-64': { male: '[Males 55-64]', female: '[Females 55-64]' },
+    '[Calc] 65-84': { male: '[Males 65-84]', female: '[Females 65-84]' },
+    '[Calc] 85 and Over': { male: '[Males 85 and Over]', female: '[Females 85 and Over]' }
+};
 
 /**
- * Generates a Distribution Report spreadsheet filtered by distribution code
- * Sorts by Last Name, First Name; includes Baby Box indicator if applicable
- * Moves report to Distribution folder in Google Drive
- * @param {string} distribCode - Scheduled Distribution Code to filter by
- * @param {string} startDate - Report start date
- * @param {string} endDate - Report end date
- * @param {string} pickupTimes - Pickup time text for report header
- * @returns {Object} { success, reportUrl, downloadUrl, recordCount }
+ * v5.19 hardcoded column fallback for the Scheduling Report.
+ * Returned by _getSchedFallbackCols_() when LU_ReportColumns is empty.
+ * These exactly match the v5.19 reportColumns + ageBracketPairs + additionalColumns
+ * arrays, reshaped to {key, label, width, wrapText} format.
+ *
+ * Once LU_ReportColumns is populated, this function is never called.
+ *
+ * @private
+ * @returns {Object[]} [{key, label, width, wrapText}]
  */
-function generateDistributionReport(distribCode, startDate, endDate, pickupTimes) {
-    try {
-        if (!distribCode) {
-            return { success: false, error: 'Distribution Code is required' };
+function _getSchedFallbackCols_() {
+    var raw = [
+        // History flag (special — not an AM column)
+        { key: 'History', width: 55 },
+        // Report columns (first block)
+        { key: 'Scheduled Distribution Code', width: 99 },
+        { key: 'Service Status', width: 91 },
+        { key: 'Admin Notes', width: 200 },
+        { key: 'Take Baby Box?', width: 44 },
+        { key: 'ID', width: 59 },
+        { key: 'Request Type', width: 63 },
+        { key: 'Request Date', width: 85 },
+        { key: 'Last Date Served', width: 106 },
+        { key: 'Next Service Availability Date', width: 101 },
+        { key: 'Last Name', width: 95 },
+        { key: 'First Name', width: 75 },
+        { key: 'More information about the person or organization that referred you.', width: 172 },
+        { key: 'What is the title or position of the person who referred you?', width: 172 },
+        { key: 'How did you learn about our program?', width: 128 },
+        { key: "What is the person's name who referred you?", width: 128 },
+        { key: 'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.', width: 244 },
+        { key: 'Are you currently homeless?', width: 87 },
+        { key: 'Street Address', width: 145 },
+        { key: 'Apartment #, Upper, Lower, or Lot #', width: 84 },
+        { key: 'City', width: 76 },
+        { key: 'State', width: 66 },
+        { key: 'County', width: 57 },
+        { key: 'Address type?', width: 126 },
+        { key: 'Phone Number', width: 94 },
+        { key: 'Phone type?', width: 79 },
+        { key: 'Email', width: 186 },
+        { key: 'Best contact method (What is the best way to get ahold of you?)', width: 141 },
+        // Age bracket columns (combined M+F)
+        { key: '[Calc] Under 5', width: 52 },
+        { key: '[Calc] 5-9', width: 26 },
+        { key: '[Calc] 10-14', width: 41 },
+        { key: '[Calc] 15-17', width: 41 },
+        { key: '[Calc] 18-24', width: 41 },
+        { key: '[Calc] 25-34', width: 41 },
+        { key: '[Calc] 35-44', width: 41 },
+        { key: '[Calc] 45-54', width: 41 },
+        { key: '[Calc] 55-64', width: 41 },
+        { key: '[Calc] 65-84', width: 41 },
+        { key: '[Calc] 85 and Over', width: 77 },
+        // Additional columns (after age brackets)
+        { key: 'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.', width: 221, wrapText: true },
+        { key: 'Are you currently employed?', width: 86 },
+        { key: 'Total annual household income. (How much money does your family make in 1 year?)', width: 172 },
+        { key: 'Was there an emergency situation which caused you to contact us?', width: 97 },
+        { key: 'Briefly explain your current situation.', width: 732, wrapText: true },
+        { key: 'How will receiving personal and home cleaning products help you?', width: 732, wrapText: true }
+    ];
+    return raw.map(function (d) {
+        return {
+            key: d.key,
+            // getReportHeader_() resolves LU_FieldMap Report Header; 'History' has no LU entry so passes through
+            label: getReportHeader_(d.key) || d.key,
+            width: d.width || 70,
+            wrapText: d.wrapText || false
+        };
+    });
+}
+
+/**
+ * Build a single Scheduling Report output row from a record and column definitions.
+ *
+ * Three types of columns are handled:
+ *   1. 'History'          → rec.isHistory ? 'History' : ''
+ *   2. '[Calc] x-y' keys  → combined sum of male + female bracket from SCHED_AGE_BRACKET_MAP_
+ *   3. All other keys     → direct AM column value via colIndexMap
+ *
+ * Special value transforms applied (same as v5.19):
+ *   - Dates → formatted M/d/yyyy
+ *   - Scheduled Distribution Code → uppercase
+ *   - Phone Number → (XXX) XXX-XXXX via formatPhoneNumber_()
+ *
+ * @private
+ * @param {Object}  rec        - { rowData: Array, isHistory: boolean }
+ * @param {Object[]} cols      - From getReportColumns('Scheduling') or _getSchedFallbackCols_()
+ * @param {Object}  colIndexMap- { rawKey: colIndex } built from AM headers
+ * @returns {Array} Single row of cell values
+ */
+function _buildSchedRow_(rec, cols, colIndexMap) {
+    return cols.map(function (col) {
+        var key = col.key;
+
+        // ── History flag ──────────────────────────────────────────────────────
+        if (key === 'History') {
+            return rec.isHistory ? 'History' : '';
         }
 
-        // Force uppercase
+        // ── Combined age bracket (M + F) ──────────────────────────────────────
+        var bracketPair = SCHED_AGE_BRACKET_MAP_[key];
+        if (bracketPair) {
+            var mi = colIndexMap[bracketPair.male];
+            var fi = colIndexMap[bracketPair.female];
+            var mv = mi !== undefined ? (parseInt(rec.rowData[mi]) || 0) : 0;
+            var fv = fi !== undefined ? (parseInt(rec.rowData[fi]) || 0) : 0;
+            var tot = mv + fv;
+            return tot > 0 ? tot : '';  // blank (not 0) when no one in this bracket
+        }
+
+        // ── Direct AM column lookup ───────────────────────────────────────────
+        var idx = colIndexMap[key];
+        if (idx === undefined) return '';
+
+        var val = rec.rowData[idx];
+        if (val instanceof Date) {
+            return Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
+        }
+        if (key === 'Scheduled Distribution Code' && val) {
+            return val.toString().toUpperCase();
+        }
+        if (key === 'Phone Number') {
+            return formatPhoneNumber_(val);
+        }
+        return val || '';
+    });
+}
+
+/**
+ * Get all ACTIVE Scheduled Distribution Codes for data validation dropdowns.
+ *
+ * Reads from LU_SchedDisbCodes (CONFIG.LOOKUPS.SCHED_DISB_CODES), which is the
+ * authoritative source for scheduled distribution codes. Filters to Active = TRUE
+ * rows only, matching the same logic used by the Distribution Reports tab dropdown.
+ *
+ * Delegates to getActiveSchedDisbCodes() in LookupService.gs which already
+ * handles Active column filtering, date formatting, and caching correctly.
+ *
+ * NOTE: This was previously reading from LU_DistribCodes (wrong sheet — that table
+ * holds generic distribution/pickup codes, not scheduled distribution codes).
+ *
+ * Only add this function if it doesn't already exist in your ReportService.js.
+ *
+ * @private
+ * @returns {string[]} Sorted array of active SchedDisbCode strings
+ */
+function getAllDistribCodes_() {
+    try {
+        // getActiveSchedDisbCodes() is in LookupService.gs — reads LU_SchedDisbCodes,
+        // filters Active = TRUE, returns [{code, startDate, interval, ...}]
+        var activeCodes = getActiveSchedDisbCodes();
+        if (!activeCodes || activeCodes.length === 0) return [];
+        return activeCodes
+            .map(function (c) { return (c.code || '').toString().trim().toUpperCase(); })
+            .filter(function (c) { return c !== ''; })
+            .sort();
+    } catch (e) {
+        Logger.log('getAllDistribCodes_ error (non-fatal): ' + e.message);
+        return [];
+    }
+}
+
+/**
+ * Generate a Returned to Stock (Restock) Products report.
+ *
+ * For each distribution run recorded in the Hygiene Box Distribution Stats
+ * workbook where Restock-# Recipients > 0:
+ *   1. Looks up Box1/Box2/Box3 codes from LU_SchedDisbCodes for that run's
+ *      Scheduled Distrib Code.
+ *   2. Looks up each box's products and per-box quantity from Distributed_Products.
+ *   3. Calculates total returned quantity = Restock Recipients × Qty per box.
+ *
+ * Output: two sheets
+ *   - "By Distribution Center" — one row per center+product combination,
+ *     summed across all runs for that center.
+ *   - "All Run Detail" — one row per run+box+product with full drill-down.
+ *
+ * v5.38 - New function (initial version tracked recipients only).
+ * v5.39 - Rebuilt: now cross-references LU_SchedDisbCodes and Distributed_Products
+ *          to report actual product quantities returned to stock per distribution center.
+ *
+ * @returns {Object} { success, centerCount, totalRestockUnits, reportUrl, downloadUrl, error }
+ */
+function generateRestockReport() {
+    try {
+        if (!CONFIG.HYGIENE_STATS_WORKBOOK_ID) {
+            return { success: false, error: 'HYGIENE_STATS_WORKBOOK_ID not configured.' };
+        }
+
+        // ── Step 1: Load LU_SchedDisbCodes → { code: {box1,box2,box3} } ─────
+        var lookupsWb = getLookupsWorkbook();
+        var schedSheet = lookupsWb.getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
+        if (!schedSheet) return { success: false, error: 'LU_SchedDisbCodes sheet not found.' };
+
+        var schedData = schedSheet.getDataRange().getValues();
+        var schedHeaders = trimHeaders(schedData[0]);
+        var scCode = schedHeaders.indexOf('SchedDisbCode');
+        var scBox1 = schedHeaders.indexOf('Box 1'); if (scBox1 === -1) scBox1 = schedHeaders.indexOf('Box1');
+        var scBox2 = schedHeaders.indexOf('Box 2'); if (scBox2 === -1) scBox2 = schedHeaders.indexOf('Box2');
+        var scBox3 = schedHeaders.indexOf('Box 3'); if (scBox3 === -1) scBox3 = schedHeaders.indexOf('Box3');
+        var scGeneric = schedHeaders.indexOf('Generic Distribution Code');
+        if (scCode === -1) return { success: false, error: 'SchedDisbCode column not found in LU_SchedDisbCodes.' };
+
+        // Build index: SchedDisbCode (upper) → {box1,box2,box3,genericCode}
+        // Also index by generic code as fallback
+        var codeIndex = {};  // full code → boxes
+        var genericIndex = {}; // generic code → boxes (last one wins — same generic=same boxes)
+        for (var si = 1; si < schedData.length; si++) {
+            var code = (schedData[si][scCode] || '').toString().trim().toUpperCase();
+            if (!code) continue;
+            var entry = {
+                box1: scBox1 !== -1 ? (schedData[si][scBox1] || '').toString().trim() : '',
+                box2: scBox2 !== -1 ? (schedData[si][scBox2] || '').toString().trim() : '',
+                box3: scBox3 !== -1 ? (schedData[si][scBox3] || '').toString().trim() : '',
+                genericCode: scGeneric !== -1 ? (schedData[si][scGeneric] || '').toString().trim() : ''
+            };
+            codeIndex[code] = entry;
+            if (entry.genericCode) genericIndex[entry.genericCode.toUpperCase()] = entry;
+        }
+
+        // ── Step 2: Load Distributed_Products → { boxCode: [{name,qty}] } ──
+        var dataWb = getDataWorkbook();
+        var dpSheet = dataWb.getSheetByName(CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS);
+        if (!dpSheet || dpSheet.getLastRow() < 2) {
+            return { success: false, error: 'Distributed_Products sheet not found or empty.' };
+        }
+
+        var dpData = dpSheet.getDataRange().getValues();
+        var dpHeaders = trimHeaders(dpData[0]);
+        var dpBoxCol = dpHeaders.indexOf('BoxCode');
+        var dpNameCol = dpHeaders.indexOf('ProductName');
+        var dpQtyCol = dpHeaders.indexOf('Quantity');
+        if (dpQtyCol === -1) dpQtyCol = dpHeaders.indexOf('QtyPerBox');
+        if (dpQtyCol === -1) dpQtyCol = dpHeaders.indexOf('Qty');
+
+        if (dpBoxCol === -1 || dpNameCol === -1 || dpQtyCol === -1) {
+            return { success: false, error: 'Distributed_Products missing required columns (BoxCode, ProductName, Quantity).' };
+        }
+
+        // Build product map: boxCode (upper) → [{productName, qtyPerBox}]
+        var productMap = {};
+        for (var di = 1; di < dpData.length; di++) {
+            var bc = (dpData[di][dpBoxCol] || '').toString().trim().toUpperCase();
+            var name = (dpData[di][dpNameCol] || '').toString().trim();
+            var qty = parseFloat(dpData[di][dpQtyCol]) || 0;
+            if (!bc || !name) continue;
+            if (!productMap[bc]) productMap[bc] = [];
+            productMap[bc].push({ productName: name, qtyPerBox: qty });
+        }
+
+        // ── Step 3: Read Hygiene Stats workbook ──────────────────────────────
+        var statsWB = SpreadsheetApp.openById(CONFIG.HYGIENE_STATS_WORKBOOK_ID);
+        var sheets = statsWB.getSheets();
+
+        var detailRows = []; // {center, schedCode, dateRange, box, productName, restockRecipients, qtyPerBox, totalQty}
+        var noBoxWarnings = [];
+
+        sheets.forEach(function (sheet) {
+            var centerName = sheet.getName();
+            if (sheet.getLastRow() < 2) return;
+
+            var data = sheet.getDataRange().getValues();
+            var headers = trimHeaders(data[0]);
+
+            var colSched = headers.indexOf('Scheduled Distrib Code');
+            var colDate = headers.indexOf('Distribution Date Range');
+            var colRestock = headers.indexOf('Restock-# Recipients');
+            if (colRestock === -1) return;
+
+            for (var i = 1; i < data.length; i++) {
+                var row = data[i];
+                var restock = parseInt(row[colRestock]) || 0;
+                if (restock <= 0) continue;
+
+                var schedCode = colSched !== -1 ? (row[colSched] || '').toString().trim().toUpperCase() : '';
+                var dateRange = colDate !== -1 ? (row[colDate] || '').toString().trim() : '';
+
+                // Look up boxes: try full code, then strip to generic code
+                var boxes = codeIndex[schedCode];
+                if (!boxes) {
+                    var gen = schedCode.replace(/[0-9\-]/g, '').toUpperCase();
+                    boxes = genericIndex[gen] || null;
+                }
+
+                if (!boxes) {
+                    noBoxWarnings.push(centerName + ' / ' + schedCode);
+                    // Still record a row with no product detail so the recipient count isn't lost
+                    detailRows.push({
+                        center: centerName, schedCode: schedCode, dateRange: dateRange,
+                        box: '', productName: '(no box code found)', restockRecipients: restock,
+                        qtyPerBox: 0, totalQty: 0
+                    });
+                    continue;
+                }
+
+                // For each box that exists, expand to one row per product
+                [
+                    { label: 'Box 1', code: boxes.box1 },
+                    { label: 'Box 2', code: boxes.box2 },
+                    { label: 'Box 3', code: boxes.box3 }
+                ].forEach(function (b) {
+                    if (!b.code) return;
+                    var products = productMap[b.code.toUpperCase()] || [];
+                    if (products.length === 0) {
+                        detailRows.push({
+                            center: centerName, schedCode: schedCode, dateRange: dateRange,
+                            box: b.label + ' (' + b.code + ')',
+                            productName: '(no products in Distributed_Products)',
+                            restockRecipients: restock, qtyPerBox: 0, totalQty: 0
+                        });
+                    } else {
+                        products.forEach(function (p) {
+                            detailRows.push({
+                                center: centerName, schedCode: schedCode, dateRange: dateRange,
+                                box: b.label + ' (' + b.code + ')',
+                                productName: p.productName,
+                                restockRecipients: restock,
+                                qtyPerBox: p.qtyPerBox,
+                                totalQty: p.qtyPerBox * restock
+                            });
+                        });
+                    }
+                });
+            }
+        });
+
+        // ── Step 4: Build center summary { center → { product → totalQty, totalRecipients } }
+        var centerProductMap = {};  // center|product → {box, totalQty, totalRecipients}
+        detailRows.forEach(function (r) {
+            var key = r.center + '||' + r.productName;
+            if (!centerProductMap[key]) {
+                centerProductMap[key] = {
+                    center: r.center, productName: r.productName, box: r.box,
+                    totalQty: 0, totalRecipients: 0
+                };
+            }
+            centerProductMap[key].totalQty += r.totalQty;
+            centerProductMap[key].totalRecipients = Math.max(
+                centerProductMap[key].totalRecipients, r.restockRecipients
+            );
+        });
+
+        var summaryRows = [];
+        for (var k in centerProductMap) summaryRows.push(centerProductMap[k]);
+        summaryRows.sort(function (a, b) {
+            var cc = a.center.localeCompare(b.center);
+            return cc !== 0 ? cc : b.totalQty - a.totalQty;
+        });
+
+        var grandTotalUnits = summaryRows.reduce(function (s, r) { return s + r.totalQty; }, 0);
+
+        // ── Step 5: Write report spreadsheet ─────────────────────────────────
+        var datestamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd_HHmm');
+        var ss = SpreadsheetApp.create('Restock_Products_Report_' + datestamp);
+
+        // Sheet 1 — Summary by Center & Product
+        var sumSheet = ss.getActiveSheet();
+        sumSheet.setName('By Center & Product');
+
+        var sumHdrs = ['Distribution Center', 'Product Name', 'Box', 'Total Units Returned to Stock'];
+        sumSheet.getRange(1, 1, 1, sumHdrs.length).setValues([sumHdrs])
+            .setFontWeight('bold').setBackground('#1a73e8').setFontColor('white')
+            .setHorizontalAlignment('center');
+        sumSheet.setFrozenRows(1);
+
+        if (summaryRows.length > 0) {
+            var sumData = summaryRows.map(function (r) {
+                return [r.center, r.productName, r.box, r.totalQty];
+            });
+            // Total row
+            sumData.push(['GRAND TOTAL', '', '', grandTotalUnits]);
+            sumSheet.getRange(2, 1, sumData.length, sumHdrs.length).setValues(sumData);
+
+            // Alternate shading + bold total
+            for (var ri = 1; ri < sumData.length - 1; ri += 2) {
+                sumSheet.getRange(ri + 2, 1, 1, sumHdrs.length).setBackground('#f8f9fa');
+            }
+            sumSheet.getRange(sumData.length + 1, 1, 1, sumHdrs.length)
+                .setFontWeight('bold').setBackground('#e8f0fe');
+
+            // Color quantity column
+            sumSheet.getRange(2, 4, sumData.length, 1).setFontColor('#d93025').setFontWeight('bold');
+        }
+        for (var sc = 1; sc <= sumHdrs.length; sc++) sumSheet.autoResizeColumn(sc);
+
+        // Sheet 2 — All Run Detail
+        var detSheet = ss.insertSheet('All Run Detail');
+        var detHdrs = ['Distribution Center', 'Sched Distrib Code', 'Date Range',
+            'Box', 'Product Name', 'Restock Recipients', 'Qty per Box', 'Total Units Returned'];
+        detSheet.getRange(1, 1, 1, detHdrs.length).setValues([detHdrs])
+            .setFontWeight('bold').setBackground('#4a86e8').setFontColor('white')
+            .setHorizontalAlignment('center');
+        detSheet.setFrozenRows(1);
+
+        if (detailRows.length > 0) {
+            var detData = detailRows.map(function (r) {
+                return [r.center, r.schedCode, r.dateRange, r.box, r.productName,
+                r.restockRecipients, r.qtyPerBox, r.totalQty];
+            });
+            detSheet.getRange(2, 1, detData.length, detHdrs.length).setValues(detData);
+            for (var dr = 1; dr < detData.length; dr += 2) {
+                detSheet.getRange(dr + 2, 1, 1, detHdrs.length).setBackground('#f8f9fa');
+            }
+        }
+        for (var dc = 1; dc <= detHdrs.length; dc++) detSheet.autoResizeColumn(dc);
+
+        if (noBoxWarnings.length > 0) {
+            Logger.log('generateRestockReport: no box codes found for: ' + noBoxWarnings.join('; '));
+        }
+
+        // Unique distribution centers from detail rows
+        var centerSet = {};
+        detailRows.forEach(function (r) { centerSet[r.center] = true; });
+        var centerCount = Object.keys(centerSet).length;
+
+        moveToFolder(ss.getId(), CONFIG.REPORTS_FOLDER_ID);
+        logAudit('REPORT', null, 'Generated Restock Products Report: ' + centerCount +
+            ' centers, ' + grandTotalUnits + ' total units returned to stock');
+
+        return {
+            success: true,
+            centerCount: centerCount,
+            totalRestockUnits: grandTotalUnits,
+            detailCount: detailRows.length,
+            warnings: noBoxWarnings.length,
+            reportUrl: ss.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export?format=xlsx'
+        };
+
+    } catch (e) {
+        Logger.log('generateRestockReport error: ' + e.message);
+        return { success: false, error: 'Restock report failed: ' + e.message };
+    }
+}
+
+
+/**
+ * Returns fully-computed distribution report data for a given SchedDisbCode
+ * without writing any spreadsheet. Exposes the same data pipeline as
+ * generateDistributionReport() + _addProductsNeededSheet_() so the Report
+ * Builder can work from identical source data.
+ *
+ * Returns three data sets:
+ *   - scheduled: records for the Scheduled sheet (Status = Scheduled or blank)
+ *   - all:       all records matching the distribCode
+ *   - products:  Products Needed data [{label, boxCode, recipients, products:{name:qty}}]
+ *
+ * v5.39 - New function. Named getDistributionRecordsForBuilder to avoid collision
+ *          with existing getDistributionReportData(reportId) at Phase 4B.4.
+ * @param {string} distribCode - Scheduled Distribution Code (will be uppercased)
+ * @returns {Object} { success, distribCode, scheduledHeaders, scheduledRows,
+ *                     allHeaders, allRows, scheduledCount, totalCount, products, error }
+ */
+function getDistributionRecordsForBuilder(distribCode) {
+    try {
+        if (!distribCode) return { success: false, error: 'Distribution Code is required.' };
         distribCode = distribCode.toString().toUpperCase();
 
-        const sheet = getMasterSheet();
-        if (!sheet) {
-            return { success: false, error: 'Master sheet not found' };
-        }
+        var sheet = getMasterSheet();
+        if (!sheet) return { success: false, error: 'Applicants_Master not found.' };
 
-        const data = sheet.getDataRange().getValues();
-        const headers = trimHeaders(data[0]);
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
 
-        const colIndices = {
+        var colIdx = {
             id: headers.indexOf(resolveAMField_('ID')),
             firstName: headers.indexOf(resolveAMField_('First Name')),
             lastName: headers.indexOf(resolveAMField_('Last Name')),
             address1: headers.indexOf(resolveAMField_('Street Address')),
-            address2: headers.indexOf(resolveAMField_('Apartment #, Upper, Lower, or Lot #')),
+            address2: headers.indexOf(resolveAMField_('Apartment # or Upper or Lower or Lot #')),
             city: headers.indexOf(resolveAMField_('City')),
             phone: headers.indexOf(resolveAMField_('Phone Number')),
             schedDistribCode: headers.indexOf(resolveAMField_('Scheduled Distribution Code')),
-            originalFormId: headers.indexOf(resolveAMField_('Original Form ID')),
             babyBox: headers.indexOf(resolveAMField_('Take Baby Box?')),
-            schedBoxCode3: headers.indexOf(resolveAMField_('Scheduled Box Code 3')),  // v5.12
-            distribStartDate: headers.indexOf(resolveAMField_('Distribution Start Date')),
-            distribInterval: headers.indexOf(resolveAMField_('Distribution Interval'))
+            serviceStatus: headers.indexOf(resolveAMField_('Service Status')),
+            adminNotes: headers.indexOf(resolveAMField_('Admin Notes')),
+            requestDate: headers.indexOf(resolveAMField_('Request Date')),
+            email: headers.indexOf(resolveAMField_('Email')),
+            incomeLevel: headers.indexOf(resolveAMField_('Total annual household income. (How much money does your family make in 1 year?)'))
         };
 
-        const filteredRecords = [];
-        let hasBabyBox = false;
-        let hasExtraBox = false;  // v5.12: true when any row has Scheduled Box Code 3
+        if (colIdx.schedDistribCode === -1)
+            return { success: false, error: 'Scheduled Distribution Code column not found.' };
 
-        for (let i = 1; i < data.length; i++) {
-            const row = data[i];
-            const rowDistribCode = row[colIndices.schedDistribCode];
+        // ── Box3 from LU_SchedDisbCodes ───────────────────────────────────────
+        var hasExtraBox = false;
+        try {
+            var luDet = getSchedDisbCodeDetails(distribCode);
+            if (luDet && luDet.success) hasExtraBox = !!(luDet.box3);
+        } catch (e) { /* non-fatal */ }
 
-            if (rowDistribCode && rowDistribCode.toString().toUpperCase() === distribCode) {
-                // v5.12: Extra Box = 'X' when Scheduled Box Code 3 has any non-empty value
-                const boxCode3 = colIndices.schedBoxCode3 !== -1
-                    ? (row[colIndices.schedBoxCode3] || '').toString().trim() : '';
-                const extraBox = boxCode3.length > 0 ? 'X' : '';
-                if (extraBox) hasExtraBox = true;
+        // ── Build record objects ──────────────────────────────────────────────
+        var allRecords = [];
+        for (var i = 1; i < data.length; i++) {
+            var rowCode = (data[i][colIdx.schedDistribCode] || '').toString().toUpperCase();
+            if (rowCode !== distribCode) continue;
+            var babyVal = colIdx.babyBox !== -1
+                ? (data[i][colIdx.babyBox] || '').toString().trim().toUpperCase() : '';
+            var reqDate = colIdx.requestDate !== -1 ? data[i][colIdx.requestDate] : '';
+            var reqDateStr = '';
+            if (reqDate instanceof Date && !isNaN(reqDate.getTime()))
+                reqDateStr = Utilities.formatDate(reqDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+            else if (reqDate) reqDateStr = reqDate.toString().trim();
 
-                const record = {
-                    firstName: row[colIndices.firstName] || '',
-                    lastName: row[colIndices.lastName] || '',
-                    address1: row[colIndices.address1] || '',
-                    address2: row[colIndices.address2] || '',
-                    city: row[colIndices.city] || '',
-                    phone: row[colIndices.phone] || '',
-                    distribCode: rowDistribCode,
-                    submissionId: row[colIndices.id] || '',
-                    babyBox: row[colIndices.babyBox] || '',
-                    extraBox: extraBox  // v5.12
-                };
-
-                if (record.babyBox === 'X' || record.babyBox === 'x') {
-                    hasBabyBox = true;
-                    record.babyBox = 'X';
-                } else {
-                    record.babyBox = '';
-                }
-
-                filteredRecords.push(record);
-            }
+            allRecords.push({
+                id: colIdx.id !== -1 ? (data[i][colIdx.id] || '').toString().trim() : '',
+                firstName: colIdx.firstName !== -1 ? (data[i][colIdx.firstName] || '').toString().trim() : '',
+                lastName: colIdx.lastName !== -1 ? (data[i][colIdx.lastName] || '').toString().trim() : '',
+                address1: colIdx.address1 !== -1 ? (data[i][colIdx.address1] || '').toString().trim() : '',
+                address2: colIdx.address2 !== -1 ? (data[i][colIdx.address2] || '').toString().trim() : '',
+                city: colIdx.city !== -1 ? (data[i][colIdx.city] || '').toString().trim() : '',
+                phone: colIdx.phone !== -1 ? (data[i][colIdx.phone] || '').toString().trim() : '',
+                babyBox: babyVal === 'X' ? 'X' : '',
+                extraBox: hasExtraBox ? 'X' : '',
+                serviceStatus: colIdx.serviceStatus !== -1 ? (data[i][colIdx.serviceStatus] || '').toString().trim() : '',
+                adminNotes: colIdx.adminNotes !== -1 ? (data[i][colIdx.adminNotes] || '').toString().trim() : '',
+                email: colIdx.email !== -1 ? (data[i][colIdx.email] || '').toString().trim() : '',
+                incomeLevel: colIdx.incomeLevel !== -1 ? (data[i][colIdx.incomeLevel] || '').toString().trim() : '',
+                requestDate: reqDateStr
+            });
         }
 
-        if (filteredRecords.length === 0) {
-            return { success: false, error: 'No records found for Distribution Code: ' + distribCode };
-        }
-
-        filteredRecords.sort(function (a, b) {
-            const lastNameCompare = a.lastName.localeCompare(b.lastName);
-            if (lastNameCompare !== 0) return lastNameCompare;
-            return a.firstName.localeCompare(b.firstName);
+        allRecords.sort(function (a, b) {
+            var lc = a.lastName.localeCompare(b.lastName);
+            return lc !== 0 ? lc : a.firstName.localeCompare(b.firstName);
         });
 
-        const reportSpreadsheet = createDistributionReportSpreadsheet(
-            distribCode,
-            filteredRecords,
-            hasBabyBox,
-            hasExtraBox,
-            startDate,
-            endDate,
-            pickupTimes
-        );
+        var scheduledRecords = allRecords.filter(function (r) {
+            var s = r.serviceStatus.toUpperCase();
+            return s === 'SCHEDULED' || s === '';
+        });
 
-        logAudit('REPORT', null, 'Generated Distribution Report for ' + distribCode + ' with ' + filteredRecords.length + ' records');
+        // ── Flat headers/rows for Report Builder consumption ──────────────────
+        var recHeaders = ['ID', 'First Name', 'Last Name', 'Address', 'City', 'Phone',
+            'Baby Box', 'Extra Box', 'Service Status', 'Admin Notes',
+            'Email', 'Income Level', 'Request Date'];
+        var toRow = function (r) {
+            return [r.id, r.firstName, r.lastName,
+            r.address1 + (r.address2 ? ' ' + r.address2 : ''),
+            r.city, r.phone, r.babyBox, r.extraBox,
+            r.serviceStatus, r.adminNotes, r.email, r.incomeLevel, r.requestDate];
+        };
+
+        // ── Products Needed ───────────────────────────────────────────────────
+        var productsData = [];
+        try {
+            var lookupsWb = getLookupsWorkbook();
+            var schedSheet2 = lookupsWb.getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
+            if (schedSheet2 && schedSheet2.getLastRow() > 1) {
+                var sd = schedSheet2.getDataRange().getValues();
+                var sdH = trimHeaders(sd[0]);
+                var scCodeCol = sdH.indexOf('SchedDisbCode');
+                var scBox1Col = sdH.indexOf('Box 1'); if (scBox1Col === -1) scBox1Col = sdH.indexOf('Box1');
+                var scBox2Col = sdH.indexOf('Box 2'); if (scBox2Col === -1) scBox2Col = sdH.indexOf('Box2');
+                var scBox3Col = sdH.indexOf('Box 3'); if (scBox3Col === -1) scBox3Col = sdH.indexOf('Box3');
+                var box1Code = '', box2Code = '', box3Code = '';
+                for (var si = 1; si < sd.length; si++) {
+                    if ((sd[si][scCodeCol] || '').toString().trim().toUpperCase() === distribCode) {
+                        box1Code = scBox1Col !== -1 ? (sd[si][scBox1Col] || '').toString().trim() : '';
+                        box2Code = scBox2Col !== -1 ? (sd[si][scBox2Col] || '').toString().trim() : '';
+                        box3Code = scBox3Col !== -1 ? (sd[si][scBox3Col] || '').toString().trim() : '';
+                        break;
+                    }
+                }
+                var dataWb2 = getDataWorkbook();
+                var dpSheet2 = dataWb2.getSheetByName(CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS);
+                if (dpSheet2 && dpSheet2.getLastRow() > 1) {
+                    var dpData2 = dpSheet2.getDataRange().getValues();
+                    var dpH2 = trimHeaders(dpData2[0]);
+                    var dpBoxCol2 = dpH2.indexOf('BoxCode');
+                    var dpNameCol2 = dpH2.indexOf('ProductName');
+                    var dpQtyCol2 = dpH2.indexOf('Quantity');
+                    if (dpQtyCol2 === -1) dpQtyCol2 = dpH2.indexOf('QtyPerBox');
+                    if (dpQtyCol2 === -1) dpQtyCol2 = dpH2.indexOf('Qty');
+                    var sumByBox = function (boxCode) {
+                        var totals = {};
+                        if (!boxCode) return totals;
+                        var ub = boxCode.toUpperCase();
+                        for (var di = 1; di < dpData2.length; di++) {
+                            var rb = (dpData2[di][dpBoxCol2] || '').toString().trim().toUpperCase();
+                            if (rb !== ub) continue;
+                            var nm = (dpData2[di][dpNameCol2] || '').toString().trim();
+                            var qt = parseFloat(dpData2[di][dpQtyCol2]) || 0;
+                            if (nm) totals[nm] = (totals[nm] || 0) + qt;
+                        }
+                        return totals;
+                    };
+                    var allCount2 = scheduledRecords.length;
+                    var babyCount2 = scheduledRecords.filter(function (r) { return r.babyBox === 'X'; }).length;
+                    if (box1Code) productsData.push({
+                        label: 'Box 1', boxCode: box1Code.toUpperCase(),
+                        recipients: allCount2, products: sumByBox(box1Code)
+                    });
+                    if (box2Code) productsData.push({
+                        label: 'Box 2', boxCode: box2Code.toUpperCase(),
+                        recipients: babyCount2, products: sumByBox(box2Code)
+                    });
+                    if (box3Code) productsData.push({
+                        label: 'Box 3', boxCode: box3Code.toUpperCase(),
+                        recipients: allCount2, products: sumByBox(box3Code)
+                    });
+                }
+            }
+        } catch (prodErr) {
+            Logger.log('getDistributionReportData products (non-fatal): ' + prodErr.message);
+        }
 
         return {
             success: true,
-            message: 'Report generated successfully',
-            recordCount: filteredRecords.length,
-            hasBabyBox: hasBabyBox,
-            reportUrl: reportSpreadsheet.getUrl(),
-            reportId: reportSpreadsheet.getId()
+            distribCode: distribCode,
+            scheduledHeaders: recHeaders,
+            scheduledRows: scheduledRecords.map(toRow),
+            allHeaders: recHeaders,
+            allRows: allRecords.map(toRow),
+            scheduledCount: scheduledRecords.length,
+            totalCount: allRecords.length,
+            hasBabyBox: allRecords.some(function (r) { return r.babyBox === 'X'; }),
+            products: productsData
         };
 
-    } catch (error) {
-        Logger.log('Report generation error: ' + error.message);
-        return { success: false, error: 'Report generation failed: ' + error.message };
+    } catch (e) {
+        Logger.log('getDistributionReportData error: ' + e.message);
+        return { success: false, error: 'Failed: ' + e.message };
+    }
+}
+
+
+/**
+ * Generate Scheduling Report for ALL Applicants_Master records.
+ *
+ * Report includes every active AM record — no ID range, no date filter,
+ * no archive workbooks. Columns are driven by LU_ReportColumns 'Scheduling'.
+ *
+ * HISTORY FLAG:
+ *   For each unique first+last name, the highest ID = current record.
+ *   All lower IDs for the same name are marked 'History' in the first column.
+ *
+ * HIGHLIGHTING (v5.23):
+ *   - Rows with ID >= beginId highlighted light pink (#FFD9D9) and bold.
+ *   - First Name and Last Name cells highlighted yellow for ALL data rows.
+ *   - AM row whose ID = endId highlighted magenta after report creation.
+ *   - appendLastScheduledId(endId, date) called so LU_SchedID is updated.
+ *
+ * DATA VALIDATION:
+ *   Scheduled Distribution Code column gets a dropdown from LU_SchedDisbCodes.
+ *   Service Status column gets a dropdown with standard status values.
+ *
+ * SORT ORDER: Last Name, First Name, ID (ascending).
+ *
+ * COLUMN HEADERS: Resolved via LU_FieldMap Report Headers (getReportHeader_()).
+ *
+ * v5.19 — All AM rows included; Learned How column added; no ID range params
+ * v5.20 — Column definitions from LU_ReportColumns 'Scheduling' via
+ *          ReportColumnService. _buildSchedRow_() replaces inline row builder.
+ *          applyReportColumnFormatting() replaces hardcoded colWidths array.
+ *          Falls back to v5.19 hardcoded column set when LU_ReportColumns empty.
+ * v5.23 — beginId parameter; new-record row highlighting; yellow name cells;
+ *          magenta AM row at endId; appendLastScheduledId() call on success.
+ *
+ * @param {number} [beginId=0] - First AM ID considered a "new" record (from LU_SchedID)
+ * @returns {{ success, reportUrl, downloadUrl, reportId, recordCount, endId }}
+ */
+function generateSchedulingReport(beginId) {
+    try {
+        beginId = parseInt(beginId) || 0;
+
+        var sheet = getMasterSheet();
+        if (!sheet) return { success: false, error: 'Master sheet not found' };
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var idCol = headers.indexOf(resolveAMField_('ID'));
+        var fnCol = headers.indexOf(resolveAMField_('First Name'));
+        var lnCol = headers.indexOf(resolveAMField_('Last Name'));
+        if (idCol === -1) return { success: false, error: 'ID column not found in Applicants_Master' };
+
+        // ── Auto-detect endId as maximum AM ID ────────────────────────────────
+        var endId = 0;
+        for (var r = 1; r < data.length; r++) {
+            var rid = parseInt(data[r][idCol]) || 0;
+            if (rid > endId) endId = rid;
+        }
+
+        // ── Get column definitions from LU_ReportColumns (with v5.19 fallback) ──
+        var cols = getReportColumns('Scheduling');
+        if (cols.length === 0) {
+            cols = _getSchedFallbackCols_();
+        }
+
+        // ── Build colIndexMap ─────────────────────────────────────────────────
+        var colIndexMap = {};
+        cols.forEach(function (col) {
+            var key = col.key;
+            if (key === 'History') return;
+            var bracketPair = SCHED_AGE_BRACKET_MAP_[key];
+            if (bracketPair) {
+                var mi = headers.indexOf(resolveAMField_(bracketPair.male));
+                var fi = headers.indexOf(resolveAMField_(bracketPair.female));
+                if (mi !== -1) colIndexMap[bracketPair.male] = mi;
+                if (fi !== -1) colIndexMap[bracketPair.female] = fi;
+                return;
+            }
+            var idx = headers.indexOf(resolveAMField_(key));
+            if (idx !== -1) colIndexMap[key] = idx;
+        });
+
+        // ── Collect records — skip rows with inactive SchedDisbCodes ─────────
+        // v5.36: Build set of active codes; rows whose stored Scheduled Distribution
+        // Code is present but inactive are excluded from the report.
+        var activeCodeSet = {};
+        try {
+            getActiveSchedDisbCodes().forEach(function (c) {
+                if (c && c.code) activeCodeSet[c.code.toString().trim().toUpperCase()] = true;
+            });
+        } catch (acErr) {
+            Logger.log('generateSchedulingReport: active codes lookup (non-fatal): ' + acErr.message);
+        }
+        var schedDisbCodeColIdx = headers.indexOf(resolveAMField_('Scheduled Distribution Code'));
+
+        var records = [];
+        for (var i = 1; i < data.length; i++) {
+            var fn = (data[i][fnCol] || '').toString().trim();
+            var ln = (data[i][lnCol] || '').toString().trim();
+            if (!fn && !ln) continue;
+
+            // v5.36: Exclude rows where SchedDisbCode is set to an inactive code
+            if (schedDisbCodeColIdx !== -1) {
+                var rowCode = (data[i][schedDisbCodeColIdx] || '').toString().trim().toUpperCase();
+                if (rowCode && !activeCodeSet[rowCode]) continue;
+            }
+
+            records.push({
+                rowData: data[i],
+                lastName: ln,
+                firstName: fn,
+                rowId: parseInt(data[i][idCol]) || 0,
+                amRowIndex: i + 1,  // 1-based row in AM sheet
+                isHistory: false
+            });
+        }
+        if (records.length === 0)
+            return { success: false, error: 'No records found in Applicants_Master' };
+
+        // ── Sort: Last Name, First Name, ID ───────────────────────────────────
+        records.sort(function (a, b) {
+            var lc = a.lastName.localeCompare(b.lastName); if (lc) return lc;
+            var fc = a.firstName.localeCompare(b.firstName); if (fc) return fc;
+            return a.rowId - b.rowId;
+        });
+
+        // ── History flag ──────────────────────────────────────────────────────
+        var maxIdPerName = {};
+        records.forEach(function (rec) {
+            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            maxIdPerName[k] = Math.max(maxIdPerName[k] || 0, rec.rowId);
+        });
+        records.forEach(function (rec) {
+            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+            rec.isHistory = rec.rowId < (maxIdPerName[k] || rec.rowId);
+        });
+
+        // ── Create spreadsheet ────────────────────────────────────────────────
+        var reportDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+        var reportName = 'Scheduling_' + reportDate;
+        var spreadsheet = SpreadsheetApp.create(reportName);
+        var reportSheet = spreadsheet.getActiveSheet();
+        if (CONFIG.SCHEDULING_FOLDER_ID && CONFIG.SCHEDULING_FOLDER_ID.length > 0) {
+            try { moveToFolder(spreadsheet.getId(), CONFIG.SCHEDULING_FOLDER_ID); }
+            catch (fe) { Logger.log('ERROR moving to Scheduling folder: ' + fe.message); }
+        }
+
+        // ── Write header row ──────────────────────────────────────────────────
+        var allReportHeaders = cols.map(function (c) { return c.label; });
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length)
+            .setFontWeight('bold')
+            .setBackground('#4a86e8')
+            .setFontColor('white');
+
+        // ── Build and write data rows ─────────────────────────────────────────
+        var dataRows = records.map(function (rec) {
+            return _buildSchedRow_(rec, cols, colIndexMap);
+        });
+        if (dataRows.length > 0) {
+            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
+        }
+
+        // ── Apply column widths and wrap ──────────────────────────────────────
+        applyReportColumnFormatting(reportSheet, cols, 2, dataRows.length + 1);
+
+        // ── Data validation dropdowns ─────────────────────────────────────────
+        var schedCodeLabel = getReportHeader_('Scheduled Distribution Code') || 'Scheduled Distribution Code';
+        var svcStatusLabel = getReportHeader_('Service Status') || 'Service Status';
+        var schedCodeColNum = allReportHeaders.indexOf(schedCodeLabel) + 1;
+        var svcStatusColNum = allReportHeaders.indexOf(svcStatusLabel) + 1;
+
+        if (dataRows.length > 0) {
+            var distribCodes = getAllDistribCodes_();
+            if (schedCodeColNum > 0 && distribCodes.length > 0) {
+                var schedRule = SpreadsheetApp.newDataValidation()
+                    .requireValueInList(distribCodes, true)
+                    .setAllowInvalid(true).build();
+                reportSheet.getRange(2, schedCodeColNum, dataRows.length, 1).setDataValidation(schedRule);
+            }
+            // v5.27: read from LU_ServiceStatus instead of hardcoded list
+            var statusValues = getLookupValues('SERVICE_STATUS', 'Status');
+            if (!statusValues || statusValues.length === 0) {
+                statusValues = ['Picked Up', 'Delivered', 'Cancelled', 'Open', 'Pending', 'Scheduled'];
+            }
+            if (svcStatusColNum > 0) {
+                var statusRule = SpreadsheetApp.newDataValidation()
+                    .requireValueInList(statusValues, true)
+                    .setAllowInvalid(true).build();
+                reportSheet.getRange(2, svcStatusColNum, dataRows.length, 1).setDataValidation(statusRule);
+            }
+        }
+
+        // ── v5.23: Row highlighting ───────────────────────────────────────────
+        // Find First Name and Last Name column positions (1-based)
+        var fnLabel = getReportHeader_('First Name') || 'First Name';
+        var lnLabel = getReportHeader_('Last Name') || 'Last Name';
+        var fnColNum = allReportHeaders.indexOf(fnLabel) + 1;  // 1-based; 0 if not found
+        var lnColNum = allReportHeaders.indexOf(lnLabel) + 1;
+
+        for (var ri = 0; ri < records.length; ri++) {
+            var reportRowNum = ri + 2;  // 1-based; row 1 is header
+            var rec = records[ri];
+
+            // Pink + bold for new records (ID within [beginId, endId])
+            if (beginId > 0 && rec.rowId >= beginId && rec.rowId <= endId) {
+                reportSheet.getRange(reportRowNum, 1, 1, allReportHeaders.length)
+                    .setBackground('#FFD9D9')
+                    .setFontWeight('bold');
+            }
+
+            // Yellow on First Name and Last Name cells for ALL rows
+            if (fnColNum > 0) reportSheet.getRange(reportRowNum, fnColNum).setBackground('#FFFF00');
+            if (lnColNum > 0) reportSheet.getRange(reportRowNum, lnColNum).setBackground('#FFFF00');
+        }
+
+        // ── Freeze header row ─────────────────────────────────────────────────
+        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
+        reportSheet.setFrozenRows(1);
+
+        // ── v5.23: Highlight AM row at endId magenta ──────────────────────────
+        if (endId > 0) {
+            for (var ai = 1; ai < data.length; ai++) {
+                if ((parseInt(data[ai][idCol]) || 0) === endId) {
+                    sheet.getRange(ai + 1, 1, 1, headers.length).setBackground('#FF00FF');
+                    break;
+                }
+            }
+        }
+
+        // ── v5.23: Record this run in LU_SchedID ─────────────────────────────
+        var reportDateFormatted = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy');
+        try { appendLastScheduledId(endId, reportDateFormatted); }
+        catch (ae) { Logger.log('appendLastScheduledId error (non-fatal): ' + ae.message); }
+
+        logAudit('REPORT', null, 'Generated Scheduling Report — ' + records.length +
+            ' records, beginId=' + beginId + ', endId=' + endId);
+
+        return {
+            success: true,
+            message: 'Scheduling Report generated with ' + records.length + ' records',
+            reportUrl: spreadsheet.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+            reportId: spreadsheet.getId(),
+            recordCount: records.length,
+            endId: endId
+        };
+
+    } catch (e) {
+        Logger.log('generateSchedulingReport error: ' + e.message);
+        return { success: false, error: 'Report generation failed: ' + e.message };
     }
 }
 
@@ -255,29 +1160,36 @@ function formatPhoneNumber_(raw) {
 }
 
 /**
- * Creates the Distribution Report spreadsheet with formatted headers and data
- * @param {string} distribCode - Distribution code
- * @param {Object[]} records - Filtered/sorted record objects
- * @param {boolean} hasBabyBox  - Whether to include Baby Box column
- * @param {boolean} hasExtraBox - v5.12: Whether to include Extra Box column (any row has Box Code 3)
- * @param {string} startDate - Report start date
- * @param {string} endDate - Report end date
- * @param {string} pickupTimes - Pickup times text
- * @returns {Object} { reportUrl, downloadUrl, spreadsheetId }
+ * Creates the Distribution Report spreadsheet with formatted headers and data.
+ *
+ * v5.12: Baby Box and Extra Box are optional columns inserted after Date Picked Up.
+ * v5.21: Data rows now written as a single batch setValues() call instead of
+ *        per-row setValue() loops. Eliminates 800+ individual API calls per
+ *        report generation; fixes GAS 6-minute execution timeout.
+ *
+ * @param {string}   distribCode  - Distribution code
+ * @param {Object[]} records      - Filtered/sorted record objects (Scheduled status only)
+ * @param {boolean}  hasBabyBox   - Whether to include Baby Box column
+ * @param {boolean}  hasExtraBox  - Whether to include Extra Box column (v5.12)
+ * @param {string}   startDate    - Report start date string
+ * @param {string}   endDate      - Report end date string
+ * @param {string}   pickupTimes  - Pickup times text
+ * @param {Object[]} [allRecords] - All records for this distribCode (v5.27 Contact Info sheet)
+ * @returns {GoogleAppsScript.Spreadsheet.Spreadsheet} The created spreadsheet
  */
-function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, hasExtraBox, startDate, endDate, pickupTimes) {
-    const reportName = 'Distribution_' + distribCode + '_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, hasExtraBox,
+    startDate, endDate, pickupTimes, allRecords) {
+    const reportName = 'Distribution_' + distribCode + '_' +
+        Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
     const spreadsheet = SpreadsheetApp.create(reportName);
     const sheet = spreadsheet.getActiveSheet();
+    sheet.setName('Scheduled'); // v5.26: rename from default "Sheet1"
 
-    // Move to Distribution Reports folder
+    // Move to Distribution folder
     const folderId = CONFIG.DISTRIBUTION_FOLDER_ID;
-    Logger.log('DISTRIBUTION_FOLDER_ID: ' + folderId);
-
     if (folderId && folderId.length > 0) {
         try {
             moveToFolder(spreadsheet.getId(), folderId);
-            Logger.log('Report successfully moved to Distribution folder');
         } catch (folderError) {
             Logger.log('ERROR moving to Distribution folder: ' + folderError.message);
         }
@@ -287,21 +1199,20 @@ function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, h
 
     let currentRow = 1;
 
-    // === HEADER SECTION ===
-    sheet.getRange(currentRow, 1).setValue('Total Recipients: ' + records.length);
-    sheet.getRange(currentRow, 1).setFontWeight('bold');
+    // ── Header section (few cells — individual writes are fine here) ──────────
+    sheet.getRange(currentRow, 1).setValue('Total Recipients: ' + records.length)
+        .setFontWeight('bold');
     currentRow++;
 
-    sheet.getRange(currentRow, 1).setValue('Giving to the Nations');
-    sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(14);
+    sheet.getRange(currentRow, 1).setValue('Giving to the Nations')
+        .setFontWeight('bold').setFontSize(14);
     currentRow++;
 
-    sheet.getRange(currentRow, 1).setValue('Cleaning Box Distribution');
-    sheet.getRange(currentRow, 1).setFontWeight('bold').setFontSize(12);
+    sheet.getRange(currentRow, 1).setValue('Cleaning Box Distribution')
+        .setFontWeight('bold').setFontSize(12);
     currentRow++;
 
-    let dateLabel = 'Available Dates: ' + startDate + '-' + endDate;
-    sheet.getRange(currentRow, 1).setValue(dateLabel);
+    sheet.getRange(currentRow, 1).setValue('Available Dates: ' + startDate + '-' + endDate);
     currentRow++;
 
     if (pickupTimes) {
@@ -309,80 +1220,90 @@ function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, h
         currentRow++;
     }
 
-    const createdDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yy');
-    sheet.getRange(currentRow, 1).setValue('Created: ' + createdDate);
+    sheet.getRange(currentRow, 1).setValue(
+        'Created: ' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yy'));
     currentRow++;
 
-    currentRow++;
+    currentRow++; // blank row before data header
 
-    // === DATA HEADER ROW ===
+    // ── Data header row ───────────────────────────────────────────────────────
     const headerRow = currentRow;
-    let col = 1;
 
-    // v5.12: Baby Box and Extra Box are optional columns inserted after Date Picked Up
+    // v5.12: Baby Box and Extra Box are optional columns
     const dataHeaders = ['Date Picked Up'];
     if (hasBabyBox) dataHeaders.push('Baby Box');
     if (hasExtraBox) dataHeaders.push('Extra Box');
-    dataHeaders.push('First Name', 'Last Name', getReportHeader_('Street Address'), getReportHeader_('Apartment #, Upper, Lower, or Lot #'), 'City', 'Phone', 'Distribution Code', 'Submission #');
+    dataHeaders.push(
+        'First Name', 'Last Name',
+        getReportHeader_('Street Address'),
+        getReportHeader_('Apartment #, Upper, Lower, or Lot #'),
+        'City', 'Phone', 'Distribution Code', 'Submission #'
+    );
 
-    for (let i = 0; i < dataHeaders.length; i++) {
-        sheet.getRange(headerRow, col + i).setValue(dataHeaders[i]);
-    }
-
-    styleReportHeader(sheet, headerRow, dataHeaders.length);
-
+    const numCols = dataHeaders.length;
+    sheet.getRange(headerRow, 1, 1, numCols).setValues([dataHeaders]);
+    styleReportHeader(sheet, headerRow, numCols);
     currentRow++;
 
-    // === DATA ROWS ===
-    for (let i = 0; i < records.length; i++) {
-        const record = records[i];
-        col = 1;
+    // ── Data rows — SINGLE batch write (v5.21) ────────────────────────────────
+    // Build entire 2D array in memory first, then write in one setValues() call.
+    // Previous implementation used ~11 setValue() calls per record; for 80 records
+    // that was 880+ API calls. This version uses exactly 1 regardless of row count.
+    if (records.length > 0) {
+        const dataRows = records.map(function (record) {
+            const row = [
+                ''    // Date Picked Up — blank for staff to fill in
+            ];
+            if (hasBabyBox) row.push(record.babyBox || '');
+            if (hasExtraBox) row.push(record.extraBox || '');
+            row.push(
+                record.firstName || '',
+                record.lastName || '',
+                record.address1 || '',
+                record.address2 || '',
+                record.city || '',
+                formatPhoneNumber_(record.phone),
+                record.distribCode || '',
+                record.submissionId || ''
+            );
+            return row;
+        });
 
-        sheet.getRange(currentRow, col++).setValue('');           // Date Picked Up (blank for staff)
-        if (hasBabyBox) sheet.getRange(currentRow, col++).setValue(record.babyBox);
-        if (hasExtraBox) sheet.getRange(currentRow, col++).setValue(record.extraBox);  // v5.12
+        // Single API call for all data
+        sheet.getRange(currentRow, 1, dataRows.length, numCols).setValues(dataRows);
 
-        sheet.getRange(currentRow, col++).setValue(record.firstName);
-        sheet.getRange(currentRow, col++).setValue(record.lastName);
-        sheet.getRange(currentRow, col++).setValue(record.address1);
-        sheet.getRange(currentRow, col++).setValue(record.address2);
-        sheet.getRange(currentRow, col++).setValue(record.city);
-        sheet.getRange(currentRow, col++).setValue(formatPhoneNumber_(record.phone));
-        sheet.getRange(currentRow, col++).setValue(record.distribCode);
-        sheet.getRange(currentRow, col++).setValue(record.submissionId);
+        // Border around entire data range
+        sheet.getRange(headerRow + 1, 1, records.length, numCols)
+            .setBorder(true, true, true, true, true, true);
 
-        currentRow++;
-    }
-
-    const dataRange = sheet.getRange(headerRow + 1, 1, records.length, dataHeaders.length);
-    dataRange.setBorder(true, true, true, true, true, true);
-
-    for (let i = 0; i < records.length; i++) {
-        if (i % 2 === 1) {
-            sheet.getRange(headerRow + 1 + i, 1, 1, dataHeaders.length).setBackground('#f3f3f3');
+        // Alternating row shading — one setBackground() per other-row (not per cell)
+        for (let i = 1; i < records.length; i += 2) {
+            sheet.getRange(headerRow + 1 + i, 1, 1, numCols).setBackground('#f3f3f3');
         }
+
+        currentRow += records.length;
     }
 
-    // Footer notes for Baby Box and/or Extra Box
+    // ── Footer notes ──────────────────────────────────────────────────────────
     const footerLines = [];
     if (hasBabyBox) {
-        footerLines.push('Note: Recipients with "X" in the \'Baby Box\' column will receive 2 boxes, 1 large box and 1 small box. All others receive 1 large box.');
+        footerLines.push(
+            "Note: Recipients with \"X\" in the 'Baby Box' column will receive 2 boxes, " +
+            "1 large box and 1 small box. All others receive 1 large box.");
     }
     if (hasExtraBox) {
-        footerLines.push('Note: Recipients with "X" in the \'Extra Box\' column will receive a special box in addition to the Scheduled Box.');
-
+        footerLines.push(
+            "Note: Recipients with \"X\" in the 'Extra Box' column will receive a special " +
+            "box in addition to the Scheduled Box.");
     }
-    if (footerLines.length > 0) {
-        for (const line of footerLines) {
-            currentRow++;
-            sheet.getRange(currentRow, 1).setValue(line);
-            sheet.getRange(currentRow, 1, 1, dataHeaders.length).merge();
-            sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setWrap(true);
-        }
+    for (const line of footerLines) {
+        currentRow++;
+        sheet.getRange(currentRow, 1).setValue(line);
+        sheet.getRange(currentRow, 1, 1, numCols).merge();
+        sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setWrap(true);
     }
 
-    // Column widths — built dynamically to match actual column order
-    // Cols: [Date Picked Up, (Baby Box?), (Extra Box?), First Name, Last Name, Addr1, Addr2, City, Phone, Distrib Code, Submission #]
+    // ── Column widths ─────────────────────────────────────────────────────────
     const widths = [100];
     if (hasBabyBox) widths.push(70);
     if (hasExtraBox) widths.push(70);
@@ -391,68 +1312,303 @@ function createDistributionReportSpreadsheet(distribCode, records, hasBabyBox, h
         sheet.setColumnWidth(c + 1, widths[c]);
     }
 
-    // v5.19: Sheet 2 — Quick Reference (compact printable table for distribution day)
-    const refSheet = spreadsheet.insertSheet('Quick Reference');
+    // ── v5.24: Distribution Contact Info second sheet ─────────────────────────
+    // v5.27: pass allRecords (unfiltered by status) so Contact Info shows everyone
+    _addDistributionContactInfoSheet_(spreadsheet, distribCode, allRecords || records);
 
-    // Header block
-    refSheet.getRange(1, 1).setValue('Distribution Code: ' + distribCode).setFontWeight('bold');
-    refSheet.getRange(2, 1).setValue('Available Dates: ' + startDate + '-' + endDate);
-    if (pickupTimes) {
-        refSheet.getRange(3, 1).setValue('Available Pick Up Times: ' + pickupTimes);
-    }
-    refSheet.getRange(4, 1).setValue('Total Recipients: ' + records.length).setFontWeight('bold');
-    const refCreatedDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yy');
-    refSheet.getRange(5, 1).setValue('Created: ' + refCreatedDate);
-    const refStartRow = 7;
-
-    // Build reference headers — Last Name, First Name; optional Baby/Extra Box columns
-    const refHeaders = ['Last Name', 'First Name'];
-    if (hasBabyBox) refHeaders.push('Baby Box');
-    if (hasExtraBox) refHeaders.push('Extra Box');
-    refHeaders.push('Distribution Code', 'Submission #');
-
-    refSheet.getRange(refStartRow, 1, 1, refHeaders.length).setValues([refHeaders]);
-    styleReportHeader(refSheet, refStartRow, refHeaders.length);
-
-    // Data rows (records already sorted Last Name / First Name)
-    const refDataRows = [];
-    for (let i = 0; i < records.length; i++) {
-        const rec = records[i];
-        const row = [rec.lastName, rec.firstName];
-        if (hasBabyBox) row.push(rec.babyBox);
-        if (hasExtraBox) row.push(rec.extraBox);
-        row.push(rec.distribCode, rec.submissionId);
-        refDataRows.push(row);
-    }
-    if (refDataRows.length > 0) {
-        refSheet.getRange(refStartRow + 1, 1, refDataRows.length, refHeaders.length).setValues(refDataRows);
-        refSheet.getRange(refStartRow + 1, 1, refDataRows.length, refHeaders.length)
-            .setBorder(true, true, true, true, true, true);
-        for (let i = 0; i < refDataRows.length; i++) {
-            if (i % 2 === 1) {
-                refSheet.getRange(refStartRow + 1 + i, 1, 1, refHeaders.length).setBackground('#f3f3f3');
-            }
-        }
-    }
-
-    // Column widths for reference sheet
-    const refWidths = [130, 110];
-    if (hasBabyBox) refWidths.push(70);
-    if (hasExtraBox) refWidths.push(70);
-    refWidths.push(110, 90);
-    for (let c = 0; c < refWidths.length; c++) {
-        refSheet.setColumnWidth(c + 1, refWidths[c]);
-    }
-    refSheet.setFrozenRows(refStartRow);
-
-    // Return to Sheet 1 as active
-    spreadsheet.setActiveSheet(sheet);
+    // ── v5.26: Products Needed third sheet ───────────────────────────────────
+    // v5.29: counts based on scheduled-sheet records (records), not allRecords
+    _addProductsNeededSheet_(spreadsheet, distribCode, records);
 
     return spreadsheet;
 }
 
+
 /**
- * Preview of distribution report â€” returns record count without generating report
+ * Adds a "Distribution Contact Info" sheet to the distribution report spreadsheet.
+ * Sorted in the same Last Name / First Name order as the primary sheet.
+ * v5.24 — New helper called by createDistributionReportSpreadsheet().
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss - The report spreadsheet
+ * @param {string} distribCode - Scheduled Distribution Code
+ * @param {Object[]} records   - Filtered/sorted record objects
+ * @private
+ */
+function _addDistributionContactInfoSheet_(ss, distribCode, records) {
+    try {
+        var ciSheet = ss.insertSheet('Distribution Contact Info');
+        // v5.27: added Service Status after Income Level
+        var ciHeaders = [
+            'Sched Distrib Code', 'Admin Notes', 'Take Baby Box', 'ID',
+            'Service How', 'Request Date', 'Last Name', 'First Name',
+            'Referral Info', 'Referrer Name', 'Additional Info',
+            'Street Address', 'Apartment #, Upper, Lower, or Lot #',
+            'Phone Number', 'Phone Type', 'Email', 'Best Contact', 'Income Level',
+            'Service Status'
+        ];
+        var numCols = ciHeaders.length;
+        ciSheet.getRange(1, 1, 1, numCols).setValues([ciHeaders]);
+        styleReportHeader(ciSheet, 1, numCols);
+        ciSheet.setFrozenRows(1);
+        if (records.length > 0) {
+            var ciRows = records.map(function (rec) {
+                return [
+                    rec.distribCode || '',
+                    rec.adminNotes || '',
+                    rec.babyBox || '',
+                    rec.submissionId || '',
+                    rec.serviceHow || '',
+                    rec.requestDate || '',
+                    rec.lastName || '',
+                    rec.firstName || '',
+                    rec.referralInfo || '',
+                    rec.referrerName || '',
+                    rec.additionalInfo || '',
+                    rec.address1 || '',
+                    rec.address2 || '',
+                    formatPhoneNumber_(rec.phone),
+                    rec.phoneType || '',
+                    rec.email || '',
+                    rec.bestContact || '',
+                    rec.incomeLevel || '',
+                    rec.serviceStatus || ''   // v5.27
+                ];
+            });
+            ciSheet.getRange(2, 1, ciRows.length, numCols).setValues(ciRows);
+            for (var i = 1; i < ciRows.length; i += 2) {
+                ciSheet.getRange(i + 2, 1, 1, numCols).setBackground('#f3f3f3');
+            }
+        }
+        // v5.27: added width for Service Status
+        var ciWidths = [120, 140, 90, 60, 100, 90, 110, 110, 120, 120, 140, 160, 100, 120, 80, 160, 90, 120, 90];
+        for (var c = 0; c < ciWidths.length && c < numCols; c++) {
+            ciSheet.setColumnWidth(c + 1, ciWidths[c]);
+        }
+        ciSheet.getRange(1, 1, 1, numCols).setWrap(true);
+    } catch (e) {
+        Logger.log('_addDistributionContactInfoSheet_ error (non-fatal): ' + e.message);
+    }
+}
+
+/**
+ * Adds a "Products Needed" sheet to the distribution report spreadsheet.
+ * v5.26 - New helper called by createDistributionReportSpreadsheet().
+ * v5.29 - records param receives scheduledRecords (Scheduled-sheet rows only);
+ *          allCount and babyCount computed from that set.
+ * v5.31 - Confirmed three-box logic (no code change; docstring only):
+ *          Box1: each ProductName × allCount (all scheduled recipients)
+ *          Box2: each ProductName × babyCount (Baby Box = 'X' recipients)
+ *          Box3: each ProductName × allCount (same logic as Box1)
+ *          Each box section is only rendered when its code is present in LU_SchedDisbCodes.
+ *
+ * Non-fatal: logs and returns silently on any error so the main report is unaffected.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} ss          - The report spreadsheet
+ * @param {string}                                   distribCode  - Scheduled Distribution Code
+ * @param {Object[]}                                 records      - Scheduled-sheet records
+ * @private
+ */
+function _addProductsNeededSheet_(ss, distribCode, records) {
+    try {
+        // ── Step 1: look up Box1/Box2/Box3 for this distribCode ──────────────
+        var lookupsWb = getLookupsWorkbook();
+        var schedSheet = lookupsWb.getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
+        if (!schedSheet || schedSheet.getLastRow() < 2) {
+            Logger.log('_addProductsNeededSheet_: LU_SchedDisbCodes not found or empty');
+            return;
+        }
+
+        var schedData = schedSheet.getDataRange().getValues();
+        var schedHeaders = trimHeaders(schedData[0]);
+        var scCodeCol = schedHeaders.indexOf('SchedDisbCode');
+        var scBox1Col = schedHeaders.indexOf('Box 1'); if (scBox1Col === -1) scBox1Col = schedHeaders.indexOf('Box1');
+        var scBox2Col = schedHeaders.indexOf('Box 2'); if (scBox2Col === -1) scBox2Col = schedHeaders.indexOf('Box2');
+        var scBox3Col = schedHeaders.indexOf('Box 3'); if (scBox3Col === -1) scBox3Col = schedHeaders.indexOf('Box3');
+
+        if (scCodeCol === -1) {
+            Logger.log('_addProductsNeededSheet_: SchedDisbCode column not found');
+            return;
+        }
+
+        var box1Code = '', box2Code = '', box3Code = '';
+        var upperCode = distribCode.toString().toUpperCase();
+        for (var si = 1; si < schedData.length; si++) {
+            if ((schedData[si][scCodeCol] || '').toString().trim().toUpperCase() === upperCode) {
+                box1Code = scBox1Col !== -1 ? (schedData[si][scBox1Col] || '').toString().trim() : '';
+                box2Code = scBox2Col !== -1 ? (schedData[si][scBox2Col] || '').toString().trim() : '';
+                box3Code = scBox3Col !== -1 ? (schedData[si][scBox3Col] || '').toString().trim() : '';
+                break;
+            }
+        }
+
+        // ── Step 2: read Distributed_Products once ───────────────────────────
+        var dataWb = getDataWorkbook();
+        var dpSheet = dataWb.getSheetByName(CONFIG.DATA_SHEETS.DISTRIBUTED_PRODUCTS);
+        if (!dpSheet || dpSheet.getLastRow() < 2) {
+            Logger.log('_addProductsNeededSheet_: Distributed_Products sheet not found or empty');
+            return;
+        }
+
+        var dpData = dpSheet.getDataRange().getValues();
+        var dpHeaders = trimHeaders(dpData[0]);
+        var dpBoxCol = dpHeaders.indexOf('BoxCode');
+        var dpNameCol = dpHeaders.indexOf('ProductName');
+        // v5.36: support multiple possible quantity column names
+        var dpQtyCol = dpHeaders.indexOf('Quantity');
+        if (dpQtyCol === -1) dpQtyCol = dpHeaders.indexOf('QtyPerBox');
+        if (dpQtyCol === -1) dpQtyCol = dpHeaders.indexOf('QtyDistributed');
+        if (dpQtyCol === -1) dpQtyCol = dpHeaders.indexOf('Qty');
+
+        if (dpBoxCol === -1 || dpNameCol === -1 || dpQtyCol === -1) {
+            Logger.log('_addProductsNeededSheet_: Distributed_Products missing columns. Headers found: ' + dpHeaders.join(', '));
+            return;
+        }
+
+        // v5.37: Log all unique BoxCodes in Distributed_Products for diagnosis
+        var dpBoxCodes = {};
+        for (var dbi = 1; dbi < dpData.length; dbi++) {
+            var bc = (dpData[dbi][dpBoxCol] || '').toString().trim();
+            if (bc) dpBoxCodes[bc] = true;
+        }
+        Logger.log('_addProductsNeededSheet_: Distributed_Products has ' + (dpData.length - 1) +
+            ' rows. BoxCodes present: ' + Object.keys(dpBoxCodes).join(', ') +
+            '. Looking for box1=[' + box1Code + '] box2=[' + box2Code + '] box3=[' + box3Code + ']');
+
+        /**
+         * Build {ProductName: summedQty} for a given box code from Distributed_Products.
+         * Case-insensitive BoxCode match (v5.32).
+         * @param {string} boxCode
+         * @returns {Object} { productName: totalQty }
+         */
+        function sumProductsByBox(boxCode) {
+            var totals = {};
+            if (!boxCode) return totals;
+            var upperBox = boxCode.toUpperCase();
+            for (var di = 1; di < dpData.length; di++) {
+                var rowBox = (dpData[di][dpBoxCol] || '').toString().trim().toUpperCase();
+                if (rowBox !== upperBox) continue;
+                var name = (dpData[di][dpNameCol] || '').toString().trim();
+                var qty = parseFloat(dpData[di][dpQtyCol]) || 0;
+                if (!name) continue;
+                totals[name] = (totals[name] || 0) + qty;
+            }
+            return totals;
+        }
+
+        // ── Step 3: compute recipient counts per box ─────────────────────────
+        var allCount = records.length;
+        // Box2 = recipients with Take Baby Box = X
+        var babyCount = records.filter(function (r) { return r.babyBox === 'X'; }).length;
+
+        // Build an ordered list of box sections to render
+        // [ {label, boxCode, products: {name:qty}, recipientCount} ]
+        var sections = [];
+        if (box1Code) sections.push({ label: 'Box 1', boxCode: box1Code.toUpperCase(), products: sumProductsByBox(box1Code), recipients: allCount });
+        if (box2Code) sections.push({ label: 'Box 2', boxCode: box2Code.toUpperCase(), products: sumProductsByBox(box2Code), recipients: babyCount });
+        if (box3Code) sections.push({ label: 'Box 3', boxCode: box3Code.toUpperCase(), products: sumProductsByBox(box3Code), recipients: allCount });
+
+        if (sections.length === 0) {
+            Logger.log('_addProductsNeededSheet_: no box codes found for ' + distribCode + ' — skipping sheet');
+            return;
+        }
+
+        // ── Step 4: write the sheet ──────────────────────────────────────────
+        var pnSheet = ss.insertSheet('Products Needed');
+        var row = 1;
+
+        // Sheet title
+        pnSheet.getRange(row, 1).setValue('Products Needed — ' + distribCode);
+        pnSheet.getRange(row, 1, 1, 4)
+            .setFontWeight('bold').setFontSize(13).setBackground('#1a73e8').setFontColor('white').merge();
+        row++;
+
+        pnSheet.getRange(row, 1).setValue(
+            'Generated: ' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'MMMM d, yyyy h:mm a') +
+            '  |  Total Recipients: ' + allCount +
+            (babyCount > 0 ? '  |  Baby Box Recipients: ' + babyCount : ''));
+        pnSheet.getRange(row, 1, 1, 4).merge().setFontStyle('italic').setFontSize(10);
+        row++;
+
+        // Column headers (written per section)
+        var colHeaders = ['Product Name', 'Qty per Box', 'Recipients', 'Total Needed'];
+        var grandTotal = 0;
+
+        sections.forEach(function (section) {
+            var productNames = Object.keys(section.products);
+
+            row++; // blank row before each section
+
+            // Box Code header row — v5.33: explicit "Box N — CODE (N recipients)" label
+            pnSheet.getRange(row, 1).setValue(
+                section.label + ' — ' + section.boxCode +
+                '  (' + section.recipients + ' recipient' + (section.recipients !== 1 ? 's' : '') + ')');
+            pnSheet.getRange(row, 1, 1, 4)
+                .setFontWeight('bold').setBackground('#4a86e8').setFontColor('white').merge();
+            row++;
+
+            if (productNames.length === 0) {
+                // v5.37: show diagnostic instead of silently skipping
+                pnSheet.getRange(row, 1).setValue(
+                    'No products found in Distributed_Products for box code: ' + section.boxCode);
+                pnSheet.getRange(row, 1, 1, 4).merge().setFontStyle('italic').setFontColor('#ea4335');
+                row++;
+                return;
+            }
+
+            // Sort product names alphabetically
+            productNames.sort();
+
+            // Column header row
+            pnSheet.getRange(row, 1, 1, 4).setValues([colHeaders])
+                .setFontWeight('bold').setBackground('#d0e4ff');
+            row++;
+
+            // Data rows
+            var sectionTotal = 0;
+            var dataRows = [];
+            productNames.forEach(function (name) {
+                var qtyPerBox = section.products[name];
+                var totalNeeded = qtyPerBox * section.recipients;
+                sectionTotal += totalNeeded;
+                dataRows.push([name, qtyPerBox, section.recipients, totalNeeded]);
+            });
+            if (dataRows.length > 0) {
+                pnSheet.getRange(row, 1, dataRows.length, 4).setValues(dataRows);
+                // Alternate shading
+                for (var dr = 0; dr < dataRows.length; dr += 2) {
+                    pnSheet.getRange(row + dr, 1, 1, 4).setBackground('#f0f4ff');
+                }
+                row += dataRows.length;
+            }
+
+            // Sub-total row
+            pnSheet.getRange(row, 1, 1, 4)
+                .setValues([['Sub-Total — ' + section.label + ' (' + section.boxCode + ')', '', '', sectionTotal]])
+                .setFontWeight('bold').setBackground('#cfe2ff');
+            grandTotal += sectionTotal;
+            row++;
+        });
+
+        // Grand total row
+        row++;
+        pnSheet.getRange(row, 1, 1, 4)
+            .setValues([['GRAND TOTAL (all boxes)', '', '', grandTotal]])
+            .setFontWeight('bold').setFontSize(11).setBackground('#1a73e8').setFontColor('white');
+
+        // Column widths
+        pnSheet.setColumnWidth(1, 220); // Product Name
+        pnSheet.setColumnWidth(2, 100); // Qty per Box
+        pnSheet.setColumnWidth(3, 110); // Recipients
+        pnSheet.setColumnWidth(4, 120); // Total Needed
+
+        Logger.log('_addProductsNeededSheet_: wrote ' + sections.length + ' box sections for ' + distribCode);
+
+    } catch (e) {
+        Logger.log('_addProductsNeededSheet_ error (non-fatal): ' + e.message);
+    }
+}
+
+/**
+ * Preview of distribution report - returns record count without generating report
  * @param {string} distribCode - Distribution code to preview
  * @returns {Object} { success, count }
  */
@@ -508,6 +1664,173 @@ function previewDistributionReport(distribCode) {
     } catch (e) {
         Logger.log('previewDistributionReport error: ' + e.message);
         return { success: false, error: 'Preview failed: ' + e.message };
+    }
+}
+
+/**
+ * Generate Distribution Report Google Sheet for a given Scheduled Distribution Code.
+ *
+ * Reads all Applicants_Master rows where Scheduled Distribution Code matches
+ * distribCode, builds a record object per row, sorts by Last Name / First Name,
+ * and calls createDistributionReportSpreadsheet() to write the sheet.
+ *
+ * hasBabyBox  — true if ANY matched row has Take Baby Box? = 'X'
+ * hasExtraBox — true if ANY matched row has a non-blank Scheduled Box Code 3
+ *
+ * Called from AP: generateDistributionReport(distribCode, startDate, endDate, pickupTimes)
+ *
+ * v5.22 — Restored (was missing from file; caused indefinite hang on generate)
+ *
+ * @param {string} distribCode  - Scheduled Distribution Code (will be uppercased)
+ * @param {string} startDate    - Display start date string (e.g. '3/15/26')
+ * @param {string} endDate      - Display end date string (e.g. '3/29/26')
+ * @param {string} pickupTimes  - Pickup times text for report header
+ * @returns {{ success, recordCount, reportUrl, downloadUrl, reportId }}
+ */
+function generateDistributionReport(distribCode, startDate, endDate, pickupTimes) {
+    try {
+        if (!distribCode) {
+            return { success: false, error: 'Distribution Code is required' };
+        }
+
+        distribCode = distribCode.toString().toUpperCase();
+
+        var sheet = getMasterSheet();
+        if (!sheet) {
+            return { success: false, error: 'Master sheet not found' };
+        }
+
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+
+        var colIdx = {
+            id: headers.indexOf(resolveAMField_('ID')),
+            firstName: headers.indexOf(resolveAMField_('First Name')),
+            lastName: headers.indexOf(resolveAMField_('Last Name')),
+            address1: headers.indexOf(resolveAMField_('Street Address')),
+            // v5.27: corrected to actual AM column name from LU_FieldMap
+            address2: headers.indexOf(resolveAMField_('Apartment # or Upper or Lower or Lot #')),
+            city: headers.indexOf(resolveAMField_('City')),
+            phone: headers.indexOf(resolveAMField_('Phone Number')),
+            schedDistribCode: headers.indexOf(resolveAMField_('Scheduled Distribution Code')),
+            babyBox: headers.indexOf(resolveAMField_('Take Baby Box?')),
+            schedBoxCode3: headers.indexOf(resolveAMField_('Scheduled Box Code 3')),
+            serviceStatus: headers.indexOf(resolveAMField_('Service Status')),  // v5.27
+            // v5.24: Contact Info sheet fields
+            adminNotes: headers.indexOf(resolveAMField_('Admin Notes')),
+            serviceHow: headers.indexOf(resolveAMField_('Service How')),
+            requestDate: headers.indexOf(resolveAMField_('Request Date')),
+            // v5.27: corrected to actual AM raw headers per LU_FieldMap
+            referralInfo: headers.indexOf(resolveAMField_('More information about the person or organization that referred you.')),
+            referrerName: headers.indexOf(resolveAMField_("What is the person's name who referred you?")),
+            additionalInfo: headers.indexOf(resolveAMField_('Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.')),
+            phoneType: headers.indexOf(resolveAMField_('Phone type?')),
+            email: headers.indexOf(resolveAMField_('Email')),
+            bestContact: headers.indexOf(resolveAMField_('Best contact method (What is the best way to get ahold of you?)')),
+            incomeLevel: headers.indexOf(resolveAMField_('Total annual household income. (How much money does your family make in 1 year?)'))
+        };
+
+        if (colIdx.schedDistribCode === -1) {
+            return { success: false, error: 'Scheduled Distribution Code column not found in Applicants_Master' };
+        }
+
+        // v5.29: hasExtraBox driven by LU_SchedDisbCodes Box3 (not per-row AM Scheduled Box Code 3).
+        // If Box3 has a value for this distribCode every scheduled recipient gets an 'X'.
+        var luBox3ForReport = '';
+        try {
+            var luDetForReport = getSchedDisbCodeDetails(distribCode);
+            if (luDetForReport && luDetForReport.success) {
+                luBox3ForReport = luDetForReport.box3 || '';
+            }
+        } catch (luDetErr) {
+            Logger.log('generateDistributionReport: Box3 LU lookup (non-fatal): ' + luDetErr.message);
+        }
+        var hasExtraBox = luBox3ForReport !== '';
+
+        var filteredRecords = [];
+        var hasBabyBox = false;
+
+        for (var i = 1; i < data.length; i++) {
+            var rowCode = (data[i][colIdx.schedDistribCode] || '').toString().toUpperCase();
+            if (rowCode !== distribCode) continue;
+
+            var babyVal = colIdx.babyBox !== -1 ? (data[i][colIdx.babyBox] || '').toString().trim().toUpperCase() : '';
+            if (babyVal === 'X') hasBabyBox = true;
+
+            var reqDate = colIdx.requestDate !== -1 ? data[i][colIdx.requestDate] : '';
+            var reqDateStr = '';
+            if (reqDate instanceof Date && !isNaN(reqDate.getTime())) {
+                reqDateStr = Utilities.formatDate(reqDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+            } else if (reqDate) {
+                reqDateStr = reqDate.toString().trim();
+            }
+
+            filteredRecords.push({
+                submissionId: colIdx.id !== -1 ? (data[i][colIdx.id] || '').toString().trim() : '',
+                firstName: colIdx.firstName !== -1 ? (data[i][colIdx.firstName] || '').toString().trim() : '',
+                lastName: colIdx.lastName !== -1 ? (data[i][colIdx.lastName] || '').toString().trim() : '',
+                address1: colIdx.address1 !== -1 ? (data[i][colIdx.address1] || '').toString().trim() : '',
+                address2: colIdx.address2 !== -1 ? (data[i][colIdx.address2] || '').toString().trim() : '',
+                city: colIdx.city !== -1 ? (data[i][colIdx.city] || '').toString().trim() : '',
+                phone: colIdx.phone !== -1 ? (data[i][colIdx.phone] || '').toString().trim() : '',
+                distribCode: distribCode,
+                babyBox: babyVal === 'X' ? 'X' : '',
+                extraBox: hasExtraBox ? 'X' : '',  // v5.29: X for ALL when LU Box3 present
+                // v5.27: include service status for filtering and Contact Info sheet
+                serviceStatus: colIdx.serviceStatus !== -1 ? (data[i][colIdx.serviceStatus] || '').toString().trim() : '',
+                // Contact Info fields (v5.24)
+                adminNotes: colIdx.adminNotes !== -1 ? (data[i][colIdx.adminNotes] || '').toString().trim() : '',
+                serviceHow: colIdx.serviceHow !== -1 ? (data[i][colIdx.serviceHow] || '').toString().trim() : '',
+                requestDate: reqDateStr,
+                referralInfo: colIdx.referralInfo !== -1 ? (data[i][colIdx.referralInfo] || '').toString().trim() : '',
+                referrerName: colIdx.referrerName !== -1 ? (data[i][colIdx.referrerName] || '').toString().trim() : '',
+                additionalInfo: colIdx.additionalInfo !== -1 ? (data[i][colIdx.additionalInfo] || '').toString().trim() : '',
+                phoneType: colIdx.phoneType !== -1 ? (data[i][colIdx.phoneType] || '').toString().trim() : '',
+                email: colIdx.email !== -1 ? (data[i][colIdx.email] || '').toString().trim() : '',
+                bestContact: colIdx.bestContact !== -1 ? (data[i][colIdx.bestContact] || '').toString().trim() : '',
+                incomeLevel: colIdx.incomeLevel !== -1 ? (data[i][colIdx.incomeLevel] || '').toString().trim() : ''
+            });
+        }
+
+        if (filteredRecords.length === 0) {
+            return { success: false, error: 'No records found for distribution code: ' + distribCode };
+        }
+
+        // Sort: Last Name, First Name (applied to all records)
+        filteredRecords.sort(function (a, b) {
+            var lc = a.lastName.localeCompare(b.lastName);
+            return lc !== 0 ? lc : a.firstName.localeCompare(b.firstName);
+        });
+
+        // v5.27: Scheduled sheet only includes rows with Service Status = 'Scheduled' or blank.
+        // Contact Info sheet uses all records (filteredRecords).
+        var scheduledRecords = filteredRecords.filter(function (r) {
+            var s = r.serviceStatus.toUpperCase();
+            return s === 'SCHEDULED' || s === '';
+        });
+
+        // v5.24: createDistributionReportSpreadsheet now also adds the Contact Info sheet
+        // v5.27: pass scheduledRecords for the Scheduled sheet, filteredRecords for Contact Info
+        var spreadsheet = createDistributionReportSpreadsheet(
+            distribCode, scheduledRecords, hasBabyBox, hasExtraBox,
+            startDate, endDate, pickupTimes, filteredRecords
+        );
+
+        logAudit('REPORT', null,
+            'Generated Distribution Report for ' + distribCode + ': ' +
+            filteredRecords.length + ' total, ' + scheduledRecords.length + ' scheduled');
+
+        return {
+            success: true,
+            recordCount: filteredRecords.length,
+            reportUrl: spreadsheet.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+            reportId: spreadsheet.getId()
+        };
+
+    } catch (e) {
+        Logger.log('generateDistributionReport error: ' + e.message);
+        return { success: false, error: 'Report generation failed: ' + e.message };
     }
 }
 
@@ -577,7 +1900,6 @@ function getLastAmId() {
         var headers = trimHeaders(data[0]);
         var idCol = headers.indexOf(resolveAMField_('ID'));
         if (idCol === -1) return 0;
-        var maxId = 0;  // v5.19: was missing, caused ReferenceError
         for (var i = 1; i < data.length; i++) {
             var id = parseInt(data[i][idCol]);
             if (!isNaN(id) && id > maxId) {
@@ -591,419 +1913,18 @@ function getLastAmId() {
     }
 }
 
-/**
- * Generates a Scheduling Report spreadsheet for a range of record IDs
- * Combines male/female age brackets, reorders columns for printing,
- * filters to records within 1 year, auto-uppercases distribution codes
- * Phase 4 enhancements:
- *   - If endId is 0 or omitted, uses last ID in AM
- *   - Adds "History" column marking rows with IDs outside beginId–endId range
- *   - Adds data validation dropdowns for Sched Distrib Code and Service Status
- *   - Sorts by Last Name, First Name, ID (not Request Date)
- *   - Highlights the endId row in AM with magenta background
- * @param {string|number} beginId - Start of ID range
- * @param {string|number} endId - End of ID range (0 = auto-detect last AM row)
- * @param {string} distribCode - Optional distribution code filter
- * @param {string} serviceStatus - Optional Service Status filter
- * @returns {Object} { success, reportUrl, downloadUrl, recordCount }
- */
-function generateSchedulingReport(beginId, endId, distribCode, serviceStatus) {
-    try {
-        if (!beginId) {
-            return { success: false, error: 'Beginning ID is required' };
-        }
 
-        const sheet = getMasterSheet();
-        if (!sheet) {
-            return { success: false, error: 'Master sheet not found' };
-        }
-
-        const data = sheet.getDataRange().getValues();
-        const rawHeaders = data[0];
-        const headers = trimHeaders(rawHeaders);
-
-        const idCol = headers.indexOf(resolveAMField_('ID'));
-        const firstNameCol = headers.indexOf(resolveAMField_('First Name'));
-        const lastNameCol = headers.indexOf(resolveAMField_('Last Name'));
-
-        // Phase 4A.2: Auto-detect endId if 0 or omitted
-        if (!endId || parseInt(endId) === 0) {
-            var maxId = 0;
-            for (var i = 1; i < data.length; i++) {
-                var rowId = parseInt(data[i][idCol]);
-                if (!isNaN(rowId) && rowId > maxId) maxId = rowId;
-            }
-            endId = maxId;
-            if (endId === 0) {
-                return { success: false, error: 'No records found in Applicants_Master' };
-            }
-        }
-
-        beginId = parseInt(beginId);
-        endId = parseInt(endId);
-
-        if (beginId > endId) {
-            return { success: false, error: 'Beginning ID must be less than or equal to Ending ID' };
-        }
-
-        const namesInRange = new Map();
-
-        for (let i = 1; i < data.length; i++) {
-            const id = parseInt(data[i][idCol]);
-            if (id >= beginId && id <= endId) {
-                const firstName = (data[i][firstNameCol] || '').toString().trim().toLowerCase();
-                const lastName = (data[i][lastNameCol] || '').toString().trim().toLowerCase();
-                if (firstName || lastName) {
-                    namesInRange.set(firstName + '|' + lastName, true);
-                }
-            }
-        }
-
-        if (namesInRange.size === 0) {
-            return { success: false, error: 'No records found in ID range ' + beginId + ' to ' + endId };
-        }
-
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-
-        // Report columns - reordered with Last Name, First Name after Next Service Availability Date
-        const reportColumns = [
-            'Scheduled Distribution Code',
-            'Service Status',
-            'Admin Notes',
-            'Take Baby Box?',
-            'ID',
-            'Request Type',
-            'Request Date',
-            'Last Date Served',
-            'Next Service Availability Date',
-            'Last Name',
-            'First Name',
-            'More information about the person or organization that referred you.',
-            'What is the title or position of the person who referred you?',    // v5.18: added after Referral Info
-            "What is the person's name who referred you?",
-            'Please tell us anything else you would like us to know about how you heard about Giving to the Nations or our program.',
-            'Are you currently homeless?',
-            'Street Address',
-            'Apartment #, Upper, Lower, or Lot #',
-            'City',
-            'State',
-            'County',
-            'Address type?',
-            'Phone Number',
-            'Phone type?',
-            'Email',
-            'Best contact method (What is the best way to get ahold of you?)'
-        ];
-
-        // Age brackets - we'll combine males and females
-        const ageBracketPairs = [
-            { label: 'Under 5', male: '[Males under 5]', female: '[Females under 5]' },
-            { label: '5-9', male: '[Males 5-9]', female: '[Females 5-9]' },
-            { label: '10-14', male: '[Males 10-14]', female: '[Females 10-14]' },
-            { label: '15-17', male: '[Males 15-17]', female: '[Females 15-17]' },
-            { label: '18-24', male: '[Males 18-24]', female: '[Females 18-24]' },
-            { label: '25-34', male: '[Males 25-34]', female: '[Females 25-34]' },
-            { label: '35-44', male: '[Males 35-44]', female: '[Females 35-44]' },
-            { label: '45-54', male: '[Males 45-54]', female: '[Females 45-54]' },
-            { label: '55-64', male: '[Males 55-64]', female: '[Females 55-64]' },
-            { label: '65-84', male: '[Males 65-84]', female: '[Females 65-84]' },
-            { label: '85 and Over', male: '[Males 85 and Over]', female: '[Females 85 and Over]' }
-        ];
-
-        // Additional columns after age brackets
-        const additionalColumns = [
-            'Are you receiving any assistance? Please select ALL boxes that apply to ANY ASSISTANCE your family is receiving.',
-            'Are you currently employed?',
-            'Total annual household income. (How much money does your family make in 1 year?)',
-            'Was there an emergency situation which caused you to contact us?',
-            'Briefly explain your current situation.',
-            'How will receiving personal and home cleaning products help you?'   // v5.18: added as last column
-        ];
-
-        const colIndexMap = {};
-        reportColumns.forEach(col => {
-            const idx = headers.indexOf(resolveAMField_(col));
-            if (idx !== -1) colIndexMap[col] = idx;
-        });
-        ageBracketPairs.forEach(pair => {
-            const maleIdx = headers.indexOf(resolveAMField_(pair.male));
-            const femaleIdx = headers.indexOf(resolveAMField_(pair.female));
-            if (maleIdx !== -1) colIndexMap[pair.male] = maleIdx;
-            if (femaleIdx !== -1) colIndexMap[pair.female] = femaleIdx;
-        });
-        additionalColumns.forEach(col => {
-            const idx = headers.indexOf(resolveAMField_(col));
-            if (idx !== -1) colIndexMap[col] = idx;
-        });
-
-        const requestDateCol = headers.indexOf(resolveAMField_('Request Date'));
-        const schedDistribCodeCol = headers.indexOf(resolveAMField_('Scheduled Distribution Code'));
-
-        const records = [];
-        for (let i = 1; i < data.length; i++) {
-            const firstName = (data[i][firstNameCol] || '').toString().trim().toLowerCase();
-            const lastName = (data[i][lastNameCol] || '').toString().trim().toLowerCase();
-            const nameKey = firstName + '|' + lastName;
-
-            if (!namesInRange.has(nameKey)) continue;
-
-            const requestDate = data[i][requestDateCol];
-            if (requestDate) {
-                const reqDate = new Date(requestDate);
-                if (reqDate < oneYearAgo) continue;
-            }
-
-            // Phase 4A.4: Determine if this row is "History" (ID outside the requested range)
-            const rowId = parseInt(data[i][idCol]) || 0;
-            const isHistory = rowId < beginId || rowId > endId;
-
-            records.push({
-                rowData: data[i],
-                lastName: data[i][lastNameCol] || '',
-                firstName: data[i][firstNameCol] || '',
-                requestDate: requestDate,
-                rowId: rowId,
-                isHistory: isHistory
-            });
-        }
-
-        if (records.length === 0) {
-            return { success: false, error: 'No records found within 1 year for the specified criteria' };
-        }
-
-        // Phase 4A.6: Sort by Last Name, First Name, ID (not Request Date)
-        records.sort((a, b) => {
-            const lastCmp = a.lastName.toString().localeCompare(b.lastName.toString());
-            if (lastCmp !== 0) return lastCmp;
-            const firstCmp = a.firstName.toString().localeCompare(b.firstName.toString());
-            if (firstCmp !== 0) return firstCmp;
-            return a.rowId - b.rowId;
-        });
-
-        // v5.18: Recompute History flag per name — the highest ID for each name is "current";
-        // all lower IDs for the same name are History, regardless of whether they fall in the
-        // beginId-endId range. This correctly flags older records for clients with multiple IDs.
-        const maxIdPerName = new Map();
-        for (const rec of records) {
-            const nameKey = rec.firstName.toString().toLowerCase() + '|' + rec.lastName.toString().toLowerCase();
-            const cur = maxIdPerName.get(nameKey) || 0;
-            if (rec.rowId > cur) maxIdPerName.set(nameKey, rec.rowId);
-        }
-        for (const rec of records) {
-            const nameKey = rec.firstName.toString().toLowerCase() + '|' + rec.lastName.toString().toLowerCase();
-            const maxId = maxIdPerName.get(nameKey) || rec.rowId;
-            rec.isHistory = rec.rowId < maxId;
-        }
-
-        const titleCode = beginId + '-' + endId;
-        const reportName = 'Scheduling_' + titleCode + '_' + Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-        const spreadsheet = SpreadsheetApp.create(reportName);
-        const reportSheet = spreadsheet.getActiveSheet();
-
-        // Move to Scheduling folder
-        const folderId = CONFIG.SCHEDULING_FOLDER_ID;
-        if (folderId && folderId.length > 0) {
-            try {
-                moveToFolder(spreadsheet.getId(), folderId);
-            } catch (folderError) {
-                Logger.log('ERROR moving to Scheduling folder: ' + folderError.message);
-            }
-        }
-
-        // Build header row - History + reportColumns + combined age bracket labels + additionalColumns
-        // Phase 4A.4: Add History as first column
-        const allReportHeaders = ['History', ...reportColumns];
-        ageBracketPairs.forEach(pair => {
-            allReportHeaders.push(pair.label);
-        });
-        allReportHeaders.push(...additionalColumns);
-
-        // Set headers - force plain text format first to prevent "5-9" being interpreted as dates
-        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setNumberFormat('@');
-        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setValues([allReportHeaders]);
-        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setFontWeight('bold').setBackground('#4a86e8').setFontColor('white');
-
-        // Build data rows
-        const dataRows = [];
-        for (const rec of records) {
-            const row = [];
-
-            // Phase 4A.4: History column first
-            row.push(rec.isHistory ? 'History' : '');
-
-            // Add regular columns
-            for (const col of reportColumns) {
-                const idx = colIndexMap[col];
-                if (idx !== undefined) {
-                    let val = rec.rowData[idx];
-                    if (val instanceof Date) {
-                        val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
-                    }
-                    // Auto-uppercase Scheduled Distribution Code values
-                    if (col === 'Scheduled Distribution Code' && val && typeof val === 'string') {
-                        val = val.toUpperCase();
-                    }
-                    // v5.12: Format phone number as (XXX) XXX-XXXX
-                    if (col === 'Phone Number') {
-                        val = formatPhoneNumber_(val);
-                    }
-                    row.push(val || '');
-                } else {
-                    row.push('');
-                }
-            }
-
-            // Add combined age brackets
-            for (const pair of ageBracketPairs) {
-                const maleIdx = colIndexMap[pair.male];
-                const femaleIdx = colIndexMap[pair.female];
-                const maleVal = maleIdx !== undefined ? (parseInt(rec.rowData[maleIdx]) || 0) : 0;
-                const femaleVal = femaleIdx !== undefined ? (parseInt(rec.rowData[femaleIdx]) || 0) : 0;
-                const combined = maleVal + femaleVal;
-                row.push(combined > 0 ? combined : '');
-            }
-
-            // Add additional columns
-            for (const col of additionalColumns) {
-                const idx = colIndexMap[col];
-                if (idx !== undefined) {
-                    let val = rec.rowData[idx];
-                    if (val instanceof Date) {
-                        val = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
-                    }
-                    row.push(val || '');
-                } else {
-                    row.push('');
-                }
-            }
-
-            dataRows.push(row);
-        }
-
-        if (dataRows.length > 0) {
-            reportSheet.getRange(2, 1, dataRows.length, allReportHeaders.length).setValues(dataRows);
-        }
-
-        // Set explicit column widths (History col first, then rest shifted by 1)
-        // v5.18: Added Referrer Title (172) after Referral Info at position 14,
-        //        and How Products Help (732) at the end as last column.
-        const colWidths = [55, 99, 91, 200, 44, 59, 63, 85, 106, 101, 95, 75, 172, 172, 128, 244, 87, 145, 84, 76, 66, 57, 126, 94, 79, 186, 141, 52, 26, 41, 41, 41, 41, 41, 41, 41, 41, 77, 221, 86, 172, 97, 732, 732];
-        for (let i = 0; i < colWidths.length && i < allReportHeaders.length; i++) {
-            reportSheet.setColumnWidth(i + 1, colWidths[i]);
-        }
-
-        // Wrap header row and freeze it
-        reportSheet.getRange(1, 1, 1, allReportHeaders.length).setWrap(true);
-        reportSheet.setFrozenRows(1);
-
-        // Wrap last 2 long-text columns (Briefly Explain + How Products Help) if present
-        const lastCol = allReportHeaders.length;
-        if (dataRows.length > 0) {
-            reportSheet.getRange(2, lastCol, dataRows.length, 1).setWrap(true);       // How Products Help
-            if (lastCol > 1) {
-                reportSheet.getRange(2, lastCol - 1, dataRows.length, 1).setWrap(true); // Briefly Explain
-            }
-        }
-
-        // Fix row 2 height (set to default height of 21)
-        if (dataRows.length > 0) {
-            reportSheet.setRowHeight(2, 21);
-        }
-
-        // Phase 4A.5: Add data validation dropdowns for Sched Distrib Code and Service Status
-        if (dataRows.length > 0) {
-            try {
-                // SchedDistribCode dropdown (column index in allReportHeaders)
-                var schedCodeColIdx = allReportHeaders.indexOf('Scheduled Distribution Code');
-                if (schedCodeColIdx !== -1) {
-                    var schedCodes = getLookupValues('SCHED_DISB_CODES', 'SchedDisbCode');
-                    if (schedCodes && schedCodes.length > 0) {
-                        var schedRule = SpreadsheetApp.newDataValidation()
-                            .requireValueInList(schedCodes, true)
-                            .setAllowInvalid(true) // Allow keeping existing values
-                            .build();
-                        reportSheet.getRange(2, schedCodeColIdx + 1, dataRows.length, 1).setDataValidation(schedRule);
-                    }
-                }
-
-                // Service Status dropdown
-                var statusColIdx = allReportHeaders.indexOf('Service Status');
-                if (statusColIdx !== -1) {
-                    var statusValues = getLookupValues('SERVICE_STATUS', 'Status');
-                    if (statusValues && statusValues.length > 0) {
-                        var statusRule = SpreadsheetApp.newDataValidation()
-                            .requireValueInList(statusValues, true)
-                            .setAllowInvalid(true)
-                            .build();
-                        reportSheet.getRange(2, statusColIdx + 1, dataRows.length, 1).setDataValidation(statusRule);
-                    }
-                }
-            } catch (valError) {
-                Logger.log('Data validation warning: ' + valError.message);
-            }
-        }
-
-        // Phase 4A.7: Highlight the endId row in AM with Magenta background
-        try {
-            var masterSheet = getMasterSheet();
-            if (masterSheet) {
-                var amData = masterSheet.getDataRange().getValues();
-                var amHeaders = trimHeaders(amData[0]);
-                var amIdCol = amHeaders.indexOf(resolveAMField_('ID'));
-                if (amIdCol !== -1) {
-                    for (var r = 1; r < amData.length; r++) {
-                        if (parseInt(amData[r][amIdCol]) === endId) {
-                            masterSheet.getRange(r + 1, 1, 1, amHeaders.length).setBackground('#FF00FF');
-                            break;
-                        }
-                    }
-                }
-            }
-        } catch (highlightError) {
-            Logger.log('Magenta highlight warning: ' + highlightError.message);
-        }
-
-        logAudit('REPORT', null, 'Generated Scheduling Report for IDs ' + beginId + '-' + endId + ' with ' + records.length + ' records');
-
-        // v5.18: Record endId and report date in LU_LastScheduled for next Beginning ID auto-fill
-        try {
-            var reportDate = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy');
-            appendLastScheduledId(endId, reportDate);
-        } catch (luErr) {
-            Logger.log('appendLastScheduledId warning (non-fatal): ' + luErr.message);
-        }
-
-        return {
-            success: true,
-            message: 'Scheduling report generated',
-            recordCount: records.length,
-            beginId: beginId,
-            endId: endId,
-            reportUrl: spreadsheet.getUrl(),
-            reportId: spreadsheet.getId()
-        };
-
-    } catch (error) {
-        Logger.log('Scheduling report error: ' + error.message);
-        return { success: false, error: 'Report generation failed: ' + error.message };
-    }
-}
 
 /**
- * Phase 4A.8: Processes the latest Scheduling Report
- * Finds the most recent report in the Scheduling folder, reads non-History rows,
- * and updates AM records:
- *   - If SchedDisbCode is present → looks up LU_SchedDisbCodes to get
- *     StartDate, Interval, FundingSource; writes SchedDisbCode to AM,
- *     sets Service Status to "Scheduled", sets Distribution Start Date
- *     to StartDate, sets Distribution Interval, sets Funding Source,
- *     extracts Generic Distribution Code from alpha prefix of code
- *   - If SchedDisbCode is blank but Service Status edited → writes status back,
- *     sets Last Date Served and Final Service Contact Date to current date,
- *     sets Next Service Availability Date to current date + 90 days
- * Uses caching to avoid repeated lookups for the same code
- * @returns {Object} { success, updatedCount, reportName, log[] }
+ * Processes the latest Scheduling Report from the Scheduling folder.
+ * Reads report rows, updates Applicants_Master SchedDisbCode/ServiceStatus,
+ * looks up LU_SchedDisbCodes for StartDate/Interval/FundingSource.
+ *
+ * v5.29 - Active-code filter: rows with SchedDisbCode not active in LU_SchedDisbCodes
+ *          are skipped (logged as 'skip'). Status written as report's Service Status
+ *          when present; defaults to 'Scheduled' when blank. Fixed corrupted MIME type.
+ *
+ * @returns {Object} { success, updatedCount, skippedCount, reportName, log[] }
  */
 function processSchedulingReport() {
     try {
@@ -1044,9 +1965,9 @@ function processSchedulingReport() {
 
         var rptHeaders = trimHeaders(reportData[0]);
         var historyCol = rptHeaders.indexOf('History');
-        var rptIdCol = rptHeaders.indexOf(resolveAMField_('ID'));
-        var rptSchedCodeCol = rptHeaders.indexOf(resolveAMField_('Scheduled Distribution Code'));
-        var rptStatusCol = rptHeaders.indexOf(resolveAMField_('Service Status'));
+        var rptIdCol = rptHeaders.indexOf(getReportHeader_('ID'));
+        var rptSchedCodeCol = rptHeaders.indexOf(getReportHeader_('Scheduled Distribution Code'));
+        var rptStatusCol = rptHeaders.indexOf(getReportHeader_('Service Status'));
 
         if (rptIdCol === -1) {
             return { success: false, error: 'Report missing ID column' };
@@ -1082,6 +2003,16 @@ function processSchedulingReport() {
             if (id) idToRow[id.toString()] = m + 1;
         }
 
+        // v5.29: build Set of active SchedDisbCodes — only active codes trigger AM updates
+        var activeDisbCodeSet = {};
+        try {
+            getActiveSchedDisbCodes().forEach(function (c) {
+                if (c.code) activeDisbCodeSet[c.code.toString().trim().toUpperCase()] = true;
+            });
+        } catch (acErr) {
+            Logger.log('processSchedulingReport: active codes lookup (non-fatal): ' + acErr.message);
+        }
+
         // Cache for LU_SchedDisbCodes lookups (avoid repeated lookups for same code)
         var codeDetailsCache = {};
 
@@ -1106,18 +2037,26 @@ function processSchedulingReport() {
 
             var schedCode = rptSchedCodeCol !== -1 ? (reportData[i][rptSchedCodeCol] || '').toString().trim() : '';
             var rptStatus = rptStatusCol !== -1 ? (reportData[i][rptStatusCol] || '').toString().trim() : '';
+            var logMsg = ''; // hoisted to avoid redeclaration across if/else blocks
 
-            // If SchedDisbCode is present → look up in LU_SchedDisbCodes and update AM
+            // If SchedDisbCode is present → validate active, then update AM
             if (schedCode) {
                 var upperCode = schedCode.toUpperCase();
+
+                // v5.29: skip rows whose SchedDisbCode is not active in LU_SchedDisbCodes
+                if (!activeDisbCodeSet[upperCode]) {
+                    log.push({ status: 'skip', message: 'ID ' + recId + ': SchedDisbCode ' + upperCode + ' not active — skipped' });
+                    continue;
+                }
 
                 // Write SchedDisbCode to AM
                 if (amSchedCodeCol !== -1) {
                     masterSheet.getRange(rowNum, amSchedCodeCol + 1).setValue(upperCode);
                 }
 
-                // Set status to "Scheduled"
-                masterSheet.getRange(rowNum, amStatusCol + 1).setValue('Scheduled');
+                // v5.29: use report's Service Status if present; default to 'Scheduled' if blank
+                var newStatus = rptStatus || 'Scheduled';
+                masterSheet.getRange(rowNum, amStatusCol + 1).setValue(newStatus);
 
                 // Look up code details from LU_SchedDisbCodes (cached)
                 if (!codeDetailsCache[upperCode]) {
@@ -1129,7 +2068,7 @@ function processSchedulingReport() {
                 }
 
                 var details = codeDetailsCache[upperCode];
-                var logMsg = 'ID ' + recId + ': Scheduled (' + upperCode + ')';
+                logMsg = 'ID ' + recId + ': Status → ' + newStatus + ' (' + upperCode + ')';
 
                 if (details && details.success) {
                     // Distribution Start Date = StartDate from LU_SchedDisbCodes
@@ -1171,7 +2110,7 @@ function processSchedulingReport() {
 
                 // Update date fields with current date
                 var today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'M/d/yyyy');
-                var logMsg = 'ID ' + recId + ': Status → ' + rptStatus;
+                logMsg = 'ID ' + recId + ': Status → ' + rptStatus;
 
                 if (amLastDateServedCol !== -1) {
                     masterSheet.getRange(rowNum, amLastDateServedCol + 1).setValue(today);
@@ -1199,6 +2138,7 @@ function processSchedulingReport() {
         return {
             success: true,
             updatedCount: updatedCount,
+            skippedCount: log.filter(function (l) { return l.status === 'skip'; }).length,
             reportName: latestFile.getName(),
             log: log
         };
@@ -1479,7 +2419,6 @@ function saveDistributionReportEdits(reportId, rows, distribCode) {
                 for (var c = 0; c < amBox3Changes.length; c++) {
                     masterSheet.getRange(amBox3Changes[c].rowNum, amBox3Col + 1).setValue(amBox3Changes[c].value);
                 }
-                Logger.log('saveDistributionReportEdits: updated AM Scheduled Box Code 3 for ' + amBox3Changes.length + ' row(s)');
             }
         }
 
@@ -1528,7 +2467,6 @@ function processDistributionSheet(reportId, distribCode) {
                 const dateParts = datesPart.split('-');
                 if (dateParts.length === 2) {
                     restockEndDate = dateParts[1].trim();
-                    Logger.log('Found end date for Restock: ' + restockEndDate);
                 }
                 break;
             }
@@ -1606,7 +2544,6 @@ function processDistributionSheet(reportId, distribCode) {
                     luBox2 = codeDetails.box2 || '';
                     luBox3 = codeDetails.box3 || '';
                 }
-                Logger.log('LU_SchedDisbCodes for ' + distribCode + ': Start=' + scheduledStartDate + ', Box1=' + luBox1 + ', Box2=' + luBox2 + ', Box3=' + luBox3);
             } catch (e) {
                 Logger.log('Error getting code details: ' + e.message);
             }
@@ -1623,6 +2560,7 @@ function processDistributionSheet(reportId, distribCode) {
         const log = [];
         let updatedCount = 0;
         const extraBoxProductUpdates = []; // v5.14: { id, requestDate } for DR/PF_Products QtyReceived copy
+        const changedRows = {}; // v5.35: track which masterData rows were modified → { sheetRow: true }
 
         for (let i = headerRowIndex + 1; i < reportData.length; i++) {
             const submissionId = reportData[i][submissionCol];
@@ -1659,86 +2597,75 @@ function processDistributionSheet(reportId, distribCode) {
                 effectiveDateObj = new Date(restockEndDate);
             }
 
+            // v5.35: Apply all changes in memory (masterData array), track changed rows
+            const dataRowIdx = rowNum - 1; // 0-based index into masterData
+
             // Set Service Status
-            masterSheet.getRange(rowNum, serviceStatusCol + 1).setValue(newStatus);
+            masterData[dataRowIdx][serviceStatusCol] = newStatus;
+            changedRows[rowNum] = true;
 
             // Set date fields using the effective date (Picked Up date or ending date)
             if (effectiveDate) {
                 // Last Date Served
-                masterSheet.getRange(rowNum, lastDateServedCol + 1).setValue(effectiveDate);
+                masterData[dataRowIdx][lastDateServedCol] = effectiveDate;
 
                 // Final Service Contact Date
                 if (finalServiceContactDateCol !== -1) {
-                    masterSheet.getRange(rowNum, finalServiceContactDateCol + 1).setValue(effectiveDate);
+                    masterData[dataRowIdx][finalServiceContactDateCol] = effectiveDate;
                 }
 
                 // Next Service Availability Date = effective date + 90 days
                 if (nextServiceAvailCol !== -1 && effectiveDateObj && !isNaN(effectiveDateObj.getTime())) {
                     const nextAvail = new Date(effectiveDateObj.getTime() + (90 * 24 * 60 * 60 * 1000));
-                    const nextAvailFormatted = Utilities.formatDate(nextAvail, CONFIG.TIMEZONE, 'M/d/yyyy');
-                    masterSheet.getRange(rowNum, nextServiceAvailCol + 1).setValue(nextAvailFormatted);
+                    masterData[dataRowIdx][nextServiceAvailCol] = Utilities.formatDate(nextAvail, CONFIG.TIMEZONE, 'M/d/yyyy');
                 }
 
-                // First Service Contact Date = Scheduled Start Date from LU_SchedDisbCodes
+                // First Service Contact Date = Scheduled Start Date (Picked Up rows only)
                 if (hasDate && firstServiceContactDateCol !== -1 && scheduledStartDate) {
-                    masterSheet.getRange(rowNum, firstServiceContactDateCol + 1).setValue(scheduledStartDate);
+                    masterData[dataRowIdx][firstServiceContactDateCol] = scheduledStartDate;
                 }
             }
 
-            // Write Box 1 from LU_SchedDisbCodes → Box Code, Scheduled Box Code 1, Received Product Code 1
+            // Box 1 from LU_SchedDisbCodes → Box Code, Scheduled Box Code 1, Received Product Code 1
             if (luBox1) {
-                if (boxCodeCol !== -1) {
-                    masterSheet.getRange(rowNum, boxCodeCol + 1).setValue(luBox1);
-                }
-                if (schedBoxCode1Col !== -1) {
-                    masterSheet.getRange(rowNum, schedBoxCode1Col + 1).setValue(luBox1);
-                }
-                if (receivedProductCode1Col !== -1) {
-                    masterSheet.getRange(rowNum, receivedProductCode1Col + 1).setValue(luBox1);
-                }
+                if (boxCodeCol !== -1) masterData[dataRowIdx][boxCodeCol] = luBox1;
+                if (schedBoxCode1Col !== -1) masterData[dataRowIdx][schedBoxCode1Col] = luBox1;
+                if (receivedProductCode1Col !== -1) masterData[dataRowIdx][receivedProductCode1Col] = luBox1;
             }
 
-            // Write Box 2 from LU_SchedDisbCodes → Scheduled Box Code 2, Received Product Code 2
+            // Box 2 from LU_SchedDisbCodes → Scheduled Box Code 2, Received Product Code 2
             if (luBox2) {
-                if (schedBoxCode2Col !== -1) {
-                    masterSheet.getRange(rowNum, schedBoxCode2Col + 1).setValue(luBox2);
-                }
-                if (receivedProductCode2Col !== -1) {
-                    masterSheet.getRange(rowNum, receivedProductCode2Col + 1).setValue(luBox2);
-                }
+                if (schedBoxCode2Col !== -1) masterData[dataRowIdx][schedBoxCode2Col] = luBox2;
+                if (receivedProductCode2Col !== -1) masterData[dataRowIdx][receivedProductCode2Col] = luBox2;
             }
 
-            // v5.15: Box 3 is per-client (set individually when scheduled), not from LU_SchedDisbCodes.
-            // Read AM Scheduled Box Code 3 directly; Extra Box = "X" in report confirms a value is present.
+            // v5.15: Box 3 is per-client; Extra Box = "X" in report confirms a value is present.
             const rowHasExtraBox = extraBoxCol !== -1
                 ? (reportData[i][extraBoxCol] || '').toString().trim().toUpperCase() === 'X'
-                : false;  // no Extra Box column → assume no Extra Box rows
+                : false;
             let amBox3Written = '';
             if (rowHasExtraBox) {
-                // Read the per-client Scheduled Box Code 3 already in AM
                 const amBox3 = schedBoxCode3Col !== -1
-                    ? (masterData[rowNum - 1][schedBoxCode3Col] || '').toString().trim()
-                    : (luBox3 || '');  // fallback to LU value if column missing
+                    ? (masterData[dataRowIdx][schedBoxCode3Col] || '').toString().trim()
+                    : (luBox3 || '');
                 const effectiveBox3 = amBox3 || luBox3;
                 if (effectiveBox3) {
-                    // Scheduled Box Code 3 already has the value; write it to Received Product Code 3
                     if (receivedProductCode3Col !== -1) {
-                        masterSheet.getRange(rowNum, receivedProductCode3Col + 1).setValue(effectiveBox3);
+                        masterData[dataRowIdx][receivedProductCode3Col] = effectiveBox3;
                     }
                     amBox3Written = effectiveBox3;
                 }
             }
 
-            // v5.15: Queue DR/PF_Products update if ANY scheduled box code in AM starts with DR or PF.
-            // luBox1/luBox2 are distribution-wide (same for all rows); amBox3 is per-row.
-            const amBox1Effective = luBox1 || (schedBoxCode1Col !== -1 ? (masterData[rowNum - 1][schedBoxCode1Col] || '').toString().trim() : '');
-            const amBox2Effective = luBox2 || (schedBoxCode2Col !== -1 ? (masterData[rowNum - 1][schedBoxCode2Col] || '').toString().trim() : '');
+            // v5.15: Queue DR/PF_Products update for DR/PF-coded rows
+            const amBox1Effective = luBox1 || (schedBoxCode1Col !== -1 ? (masterData[dataRowIdx][schedBoxCode1Col] || '').toString().trim() : '');
+            const amBox2Effective = luBox2 || (schedBoxCode2Col !== -1 ? (masterData[dataRowIdx][schedBoxCode2Col] || '').toString().trim() : '');
             const isDRPF = function (v) { var u = v.toUpperCase(); return u.indexOf('DR') === 0 || u.indexOf('PF') === 0; };
             const needsProductUpdate = (amBox1Effective && isDRPF(amBox1Effective))
                 || (amBox2Effective && isDRPF(amBox2Effective))
                 || (amBox3Written && isDRPF(amBox3Written));
             if (needsProductUpdate && requestDateCol !== -1) {
-                const rawReqDate = masterData[rowNum - 1][requestDateCol];
+                const rawReqDate = masterData[dataRowIdx][requestDateCol];
                 const normReqDate = normalizeDate(rawReqDate);
                 if (normReqDate) {
                     extraBoxProductUpdates.push({ id: submissionId.toString(), requestDate: normReqDate });
@@ -1757,6 +2684,13 @@ function processDistributionSheet(reportId, distribCode) {
             if (amBox3Written) logMsg += ', Box3(Rcvd): ' + amBox3Written + ' (Extra Box)';
             if (needsProductUpdate) logMsg += ', DR/PF queued';
             log.push({ status: 'success', message: logMsg });
+        }
+
+        // v5.35: Bulk write — one setValues() per changed AM row (replaces per-field setValue() calls)
+        const changedRowNums = Object.keys(changedRows).map(Number).sort(function (a, b) { return a - b; });
+        for (let cr = 0; cr < changedRowNums.length; cr++) {
+            const rn = changedRowNums[cr];
+            masterSheet.getRange(rn, 1, 1, masterData[0].length).setValues([masterData[rn - 1]]);
         }
 
         // v5.16: Copy QtyRequested → QtyReceived in DR/PF_Products for all DR/PF-coded rows.
@@ -1987,9 +2921,9 @@ function previewArchive(cutoffDateStr) {
             recordCutoffDate.setMonth(recordCutoffDate.getMonth() - 12);
         }
 
-        // Phase 5: File deletion is 3 months from today (except Distribution folder)
+        // File deletion: Reports folder = 1 month; Distribution folder = inactive codes
         const fileCutoffDate = new Date();
-        fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 3);
+        fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 1);
 
         const sheet = getMasterSheet();
         if (!sheet) {
@@ -2026,22 +2960,17 @@ function previewArchive(cutoffDateStr) {
 
         // Count matching product records
         let productRecordCount = 0;
-        let productDebug = { sheetFound: false, totalProdRows: 0, sampleArchiveKeys: [], sampleProdKeys: [], headers: [], error: '' };
         try {
             const dataWB = getDataWorkbook();
             const prodSheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
             if (prodSheet && prodSheet.getLastRow() > 1) {
-                productDebug.sheetFound = true;
                 const prodData = prodSheet.getDataRange().getValues();
                 const prodHeaders = trimHeaders(prodData[0]);
-                productDebug.headers = prodHeaders.slice(0, 10);
-                productDebug.totalProdRows = prodData.length - 1;
                 const prodIdCol = prodHeaders.indexOf('ID');
                 var prodReqDateCol = prodHeaders.indexOf('Request Date');
                 if (prodReqDateCol === -1) prodReqDateCol = prodHeaders.indexOf('RequestDate');
 
                 if (prodIdCol !== -1 && prodReqDateCol !== -1) {
-                    // Build set of ID|Date keys from records to archive
                     const archiveKeys = new Set();
                     archiveIds.forEach(function (rec) {
                         var dateKey = '';
@@ -2056,10 +2985,6 @@ function previewArchive(cutoffDateStr) {
                         archiveKeys.add(rec.id.toString().trim() + '|' + dateKey);
                     });
 
-                    // Capture sample archive keys for diagnostics
-                    var archiveKeyArr = Array.from(archiveKeys);
-                    productDebug.sampleArchiveKeys = archiveKeyArr.slice(0, 5);
-
                     for (let i = 1; i < prodData.length; i++) {
                         var prodId = (prodData[i][prodIdCol] || '').toString().trim();
                         var prodDate = prodData[i][prodReqDateCol];
@@ -2072,24 +2997,14 @@ function previewArchive(cutoffDateStr) {
                                 prodDateKey = Utilities.formatDate(parsed, CONFIG.TIMEZONE, 'M/d/yyyy');
                             }
                         }
-                        var prodKey = prodId + '|' + prodDateKey;
-                        // Capture sample product keys for diagnostics
-                        if (productDebug.sampleProdKeys.length < 5) {
-                            productDebug.sampleProdKeys.push(prodKey);
-                        }
-                        if (archiveKeys.has(prodKey)) {
+                        if (archiveKeys.has(prodId + '|' + prodDateKey)) {
                             productRecordCount++;
                         }
                     }
-                } else {
-                    productDebug.error = 'ID col: ' + prodIdCol + ', Request Date col: ' + prodReqDateCol;
                 }
-            } else {
-                productDebug.error = prodSheet ? 'Sheet empty (rows: ' + (prodSheet ? prodSheet.getLastRow() : 0) + ')' : 'Sheet not found: ' + CONFIG.PF_PRODUCTS_SHEET;
             }
         } catch (e) {
             Logger.log('Error counting product records: ' + e.message);
-            productDebug.error = e.message;
         }
 
         let fileCount = 0;
@@ -2099,6 +3014,16 @@ function previewArchive(cutoffDateStr) {
                 fileCount = countOldFilesInFolder(reportsFolderId, fileCutoffDate);
             } catch (folderError) {
                 Logger.log('Error counting files: ' + folderError.message);
+            }
+        }
+
+        // v5.25: Count Distribution folder files for inactive SchedDisbCodes separately
+        let distribFileCount = 0;
+        if (CONFIG.DISTRIBUTION_FOLDER_ID) {
+            try {
+                distribFileCount = countInactiveDistributionFiles();
+            } catch (e) {
+                Logger.log('Error counting inactive distribution files: ' + e.message);
             }
         }
 
@@ -2118,8 +3043,8 @@ function previewArchive(cutoffDateStr) {
             success: true,
             recordCount: recordCount,
             productRecordCount: productRecordCount,
-            productDebug: productDebug,
             fileCount: fileCount,
+            distribFileCount: distribFileCount,
             auditLogCount: auditLogCount,
             recordCutoffDate: Utilities.formatDate(recordCutoffDate, CONFIG.TIMEZONE, 'M/d/yyyy'),
             fileCutoffDate: Utilities.formatDate(fileCutoffDate, CONFIG.TIMEZONE, 'M/d/yyyy')
@@ -2178,7 +3103,8 @@ function countOldFilesInFolder(folderId, cutoffDate) {
  * 2. Writes archive rows to G2N_Archive workbook
  * 3. Archives matching product records from DR/PF_Products
  * 4. Rewrites AM with keep rows only (bulk clear + write)
- * 5. Deletes report files older than 3 months (excluding Distribution folder)
+ * 5. Deletes report files older than 1 month (Reports folder); deletes Distribution
+ *    folder files for inactive SchedDisbCodes
  * 6. Checks G2N_Archive capacity — auto-triggers year rollover if >= 85%
  * @param {string} cutoffDateStr - Cutoff date in YYYY-MM-DD format
  * @param {number} alreadyArchived - Count of previously archived records (for batching)
@@ -2196,9 +3122,9 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
             recordCutoffDate.setMonth(recordCutoffDate.getMonth() - 12);
         }
 
-        // Phase 5: File deletion is 3 months from today (except Distribution folder)
+        // v5.25: File deletion: Reports folder = 1 month; Distribution folder = inactive codes
         const fileCutoffDate = new Date();
-        fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 3);
+        fileCutoffDate.setMonth(fileCutoffDate.getMonth() - 1);
 
         const log = [];
 
@@ -2302,6 +3228,9 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
                 if (archivedProductCount > 0) {
                     log.push({ status: 'success', message: 'Archived ' + archivedProductCount + ' product records to Products_Archive' });
                 }
+                // v5.34: ID-only sweep catches rows missed by composite-key mismatch
+                const archivedIds = archiveIdDates.map(function (r) { return r.id.toString().trim(); });
+                archiveOrphanedProducts(archivedIds, archiveWorkbook, log);
             } catch (prodError) {
                 log.push({ status: 'error', message: 'Product archive error: ' + prodError.message });
             }
@@ -2338,17 +3267,31 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
 
         // ===== DELETE OLD FILES =====
         let deletedInBatch = 0;
-        log.push({ status: 'info', message: 'Now deleting files older than 3 months (excluding Distribution)...' });
+        log.push({ status: 'info', message: 'Deleting report files older than 1 month...' });
 
         const reportsFolderId = CONFIG.REPORTS_FOLDER_ID;
         if (reportsFolderId) {
             try {
                 deletedInBatch = deleteOldFilesInFolder(reportsFolderId, fileCutoffDate, log);
                 if (deletedInBatch === 0) {
-                    log.push({ status: 'info', message: 'No files older than 3 months found to delete' });
+                    log.push({ status: 'info', message: 'No report files older than 1 month found' });
                 }
             } catch (folderError) {
-                log.push({ status: 'error', message: 'Error deleting files: ' + folderError.message });
+                log.push({ status: 'error', message: 'Error deleting report files: ' + folderError.message });
+            }
+        }
+
+        // v5.25: Delete Distribution folder files for inactive SchedDisbCodes
+        if (CONFIG.DISTRIBUTION_FOLDER_ID) {
+            log.push({ status: 'info', message: 'Deleting distribution files for inactive SchedDisbCodes...' });
+            try {
+                var distribDeleted = deleteInactiveDistributionFiles(log);
+                deletedInBatch += distribDeleted;
+                if (distribDeleted === 0) {
+                    log.push({ status: 'info', message: 'No inactive distribution files found to delete' });
+                }
+            } catch (folderError) {
+                log.push({ status: 'error', message: 'Error deleting inactive distribution files: ' + folderError.message });
             }
         }
 
@@ -2497,7 +3440,88 @@ function archiveProductRecords(archiveIdDates, archiveWorkbook, log) {
 }
 
 /**
- * Recursively deletes files older than cutoff date in a Drive folder
+ * ID-only sweep of DR/PF_Products for a set of archived applicant IDs.
+ * Called immediately after archiveProductRecords() to catch any product rows
+ * that were missed due to date-format mismatches in the composite key.
+ * Only moves rows whose ID is in the archivedIdSet but are still in DR/PF_Products
+ * after the main composite-key archive pass.
+ *
+ * v5.34 - New function. archiveProductRecords() uses an ID+Date composite key;
+ *          when the RequestDate stored in DR/PF_Products doesn't match the date
+ *          format derived from AM (e.g. stored as YYYY-MM-DD string vs M/D/YYYY),
+ *          those product rows survive the first pass. This function catches them
+ *          with an ID-only check.
+ *
+ * @param {string[]}   archivedIds   - Array of applicant ID strings just archived
+ * @param {Spreadsheet} archiveWorkbook - Already-open G2N_Archive workbook
+ * @param {Array}      log           - Log array for messages
+ * @returns {number} Count of additional rows moved
+ */
+function archiveOrphanedProducts(archivedIds, archiveWorkbook, log) {
+    try {
+        if (!archivedIds || archivedIds.length === 0) return 0;
+
+        var dataWB = getDataWorkbook();
+        var prodSheet = dataWB.getSheetByName(CONFIG.PF_PRODUCTS_SHEET);
+        if (!prodSheet || prodSheet.getLastRow() <= 1) return 0;
+
+        var prodData = prodSheet.getDataRange().getValues();
+        var prodHeaders = trimHeaders(prodData[0]);
+        var idCol = prodHeaders.indexOf('ID');
+        if (idCol === -1) return 0;
+
+        var archivedSet = {};
+        archivedIds.forEach(function (id) { archivedSet[id.toString().trim()] = true; });
+
+        var keepRows = [];
+        var orphanRows = [];
+
+        for (var i = 1; i < prodData.length; i++) {
+            var rowId = (prodData[i][idCol] || '').toString().trim();
+            if (rowId && archivedSet[rowId]) {
+                orphanRows.push(prodData[i]);
+            } else {
+                keepRows.push(prodData[i]);
+            }
+        }
+
+        if (orphanRows.length === 0) {
+            log.push({ status: 'info', message: 'Orphaned product sweep: no additional rows found' });
+            return 0;
+        }
+
+        // Append to Products_Archive
+        var prodArchiveSheet = archiveWorkbook.getSheetByName('Products_Archive');
+        if (!prodArchiveSheet) {
+            prodArchiveSheet = archiveWorkbook.insertSheet('Products_Archive');
+            prodArchiveSheet.getRange(1, 1, 1, prodHeaders.length).setValues([prodData[0]]);
+            prodArchiveSheet.getRange(1, 1, 1, prodHeaders.length)
+                .setFontWeight('bold').setBackground('#f4b400').setFontColor('white');
+            prodArchiveSheet.setFrozenRows(1);
+        }
+        var lastRow = prodArchiveSheet.getLastRow();
+        prodArchiveSheet.getRange(lastRow + 1, 1, orphanRows.length, orphanRows[0].length)
+            .setValues(orphanRows);
+
+        // Rewrite DR/PF_Products without orphan rows
+        var totalRows = prodSheet.getMaxRows();
+        if (totalRows > 1) {
+            prodSheet.getRange(2, 1, totalRows - 1, prodSheet.getMaxColumns()).clearContent();
+        }
+        if (keepRows.length > 0) {
+            prodSheet.getRange(2, 1, keepRows.length, keepRows[0].length).setValues(keepRows);
+        }
+
+        log.push({ status: 'success', message: 'Orphaned product sweep: moved ' + orphanRows.length + ' additional rows to Products_Archive' });
+        return orphanRows.length;
+
+    } catch (e) {
+        log.push({ status: 'error', message: 'Orphaned product sweep error: ' + e.message });
+        return 0;
+    }
+}
+
+/**
  * Phase 5: Skips the Distribution folder
  * @param {string} folderId - Google Drive folder ID
  * @param {Date} cutoffDate - Files older than this are trashed
@@ -2537,6 +3561,98 @@ function deleteOldFilesInFolder(folderId, cutoffDate, log) {
     }
 
     return count;
+}
+
+/**
+ * Deletes files in the Distribution folder whose SchedDisbCode is inactive
+ * in LU_SchedDisbCodes. Filename pattern: Distribution_<code>_yyyy-MM-dd.
+ * v5.25 - New function replacing the previous "skip Distribution folder" logic.
+ * @param {Array} log - Log array for messages
+ * @returns {number} Count of deleted files
+ */
+function deleteInactiveDistributionFiles(log) {
+    var inactiveCodes = getInactiveSchedDisbCodes_();
+    if (inactiveCodes.length === 0) {
+        log.push({ status: 'info', message: 'Distribution folder: no inactive SchedDisbCodes — nothing to delete' });
+        return 0;
+    }
+
+    var count = 0;
+    try {
+        var folder = DriveApp.getFolderById(CONFIG.DISTRIBUTION_FOLDER_ID);
+        var files = folder.getFiles();
+        while (files.hasNext()) {
+            var file = files.next();
+            var name = file.getName();
+            var match = name.match(/^Distribution_(.+)_\d{4}-\d{2}-\d{2}/i);
+            if (match) {
+                var fileCode = match[1].toUpperCase();
+                if (inactiveCodes.indexOf(fileCode) !== -1) {
+                    file.setTrashed(true);
+                    count++;
+                    log.push({ status: 'success', message: 'Deleted inactive distribution file: ' + name });
+                }
+            }
+        }
+    } catch (e) {
+        Logger.log('deleteInactiveDistributionFiles error: ' + e.message);
+        log.push({ status: 'error', message: 'Error accessing Distribution folder: ' + e.message });
+    }
+    return count;
+}
+
+/**
+ * Counts Distribution folder files for inactive SchedDisbCodes (used by previewArchive).
+ * v5.25 - New function.
+ * @returns {number} Count of files that would be deleted
+ */
+function countInactiveDistributionFiles() {
+    var inactiveCodes = getInactiveSchedDisbCodes_();
+    if (inactiveCodes.length === 0) return 0;
+
+    var count = 0;
+    try {
+        var folder = DriveApp.getFolderById(CONFIG.DISTRIBUTION_FOLDER_ID);
+        var files = folder.getFiles();
+        while (files.hasNext()) {
+            var file = files.next();
+            var match = file.getName().match(/^Distribution_(.+)_\d{4}-\d{2}-\d{2}/i);
+            if (match && inactiveCodes.indexOf(match[1].toUpperCase()) !== -1) {
+                count++;
+            }
+        }
+    } catch (e) {
+        Logger.log('countInactiveDistributionFiles error: ' + e.message);
+    }
+    return count;
+}
+
+/**
+ * Returns uppercase SchedDisbCode strings that are inactive in LU_SchedDisbCodes.
+ * v5.25 - New private helper for distribution file cleanup.
+ * @returns {string[]}
+ */
+function getInactiveSchedDisbCodes_() {
+    try {
+        var sheet = getLookupsWorkbook().getSheetByName(CONFIG.LOOKUPS.SCHED_DISB_CODES);
+        if (!sheet || sheet.getLastRow() < 2) return [];
+        var data = sheet.getDataRange().getValues();
+        var headers = trimHeaders(data[0]);
+        var codeCol = headers.indexOf('SchedDisbCode');
+        var activeCol = headers.indexOf('Active');
+        if (codeCol === -1) return [];
+        var inactive = [];
+        for (var i = 1; i < data.length; i++) {
+            var code = (data[i][codeCol] || '').toString().trim().toUpperCase();
+            if (!code) continue;
+            if (activeCol !== -1 && isRowActive(data[i][activeCol])) continue;
+            inactive.push(code);
+        }
+        return inactive;
+    } catch (e) {
+        Logger.log('getInactiveSchedDisbCodes_ error: ' + e.message);
+        return [];
+    }
 }
 
 /**

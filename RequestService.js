@@ -32,9 +32,11 @@
  *         a semicolon-separated before→after string for every changed field.
  *         Added getApplicantEditData(): returns lookups + dropdownFields + fieldMapping
  *         for the Admin Portal Edit Applicant tab.
- * v3.4 - updateArchiveRecord(): added entry/step Logger.log calls to diagnose
- *         portal save timeouts. Console.log added to SV saveRecord() for
- *         client-side serialization visibility. Temporary — remove after fix confirmed.
+ * v3.4 - updateArchiveRecord(): added temporary diagnostic Logger.log calls.
+ *         Console.log added to SV saveRecord() for client-side visibility.
+ * v3.5 - Removed all temporary diagnostic Logger.log calls from updateArchiveRecord()
+ *         and console.log from SV saveRecord(). No logic change.
+ * v3.3 - getDemographicsStatus(recordId, archiveSource): reads Demographics-group
  *         fields from LU_FieldMap, checks the given record (AM or archive), and
  *         returns blankCount / totalCount / isMostlyBlank (>= 80%) so the SV portal
  *         can prompt staff to complete missing intake data.
@@ -216,7 +218,6 @@ function createNewRequest(formData) {
  * @returns {Object} { success, changesCount, message }
  */
 function updateArchiveRecord(recordId, archiveSource, formData) {
-    Logger.log('updateArchiveRecord ENTRY: recordId=' + recordId + ' archiveSource=' + archiveSource + ' formDataKeys=' + (formData ? Object.keys(formData).length : 'null'));
     try {
         if (!recordId) return { success: false, error: 'Record ID is required' };
         if (!archiveSource) return { success: false, error: 'Archive source is required' };
@@ -298,13 +299,10 @@ function updateArchiveRecord(recordId, archiveSource, formData) {
 
         // ── Bulk write if anything changed ──────────────────────────────────────
         if (changes.length > 0) {
-            Logger.log('updateArchiveRecord: writing ' + changes.length + ' changes to row ' + targetSheetRow);
             sheet.getRange(targetSheetRow, 1, 1, headers.length).setValues([updatedRow]);
-            Logger.log('updateArchiveRecord: setValues complete, logging audit');
             logAudit('ARCHIVE_UPDATE', recordId, archiveSource + ': ' + changes.join('; '));
-            Logger.log('updateArchiveRecord: audit logged');
         } else {
-            Logger.log('updateArchiveRecord: no changes detected');
+            Logger.log('updateArchiveRecord: no changes detected for ID ' + recordId);
         }
 
         return {

@@ -145,6 +145,8 @@
          (root cause was logAudit appendRow deadlock — fixed in Code.js v6.4, but
          auto-retry remains as a safety net). Second timeout shows error message
          with a manual Retry button. Watchdog stays at 45s for all record types.
+  v4.37- Removed temporary diagnostic console.log from saveRecord() archive path
+         (added in RequestService v3.4 session). No logic change.
   v4.33- Add/Edit Products buttons beside each Received Product Code dropdown.
          Received Product Code dropdown. Hidden when blank; shown when a value is
          selected (onchange updatePPButton) or when openRecord finds an existing value.
@@ -1980,11 +1982,6 @@
 
             // v4.29: Route to correct server function based on archive flag
             if (isArchivedRec) {
-                // v4.36 diagnostic: log to browser console to verify params before server call
-                try {
-                    console.log('[SV save] updateArchiveRecord: recId=' + recId +
-                        ' archiveSrc="' + archiveSrc + '" dataKeys=' + Object.keys(data).length);
-                } catch (logErr) { /* non-fatal */ }
                 google.script.run
                     .withSuccessHandler(function (result) {
                         finishSave();

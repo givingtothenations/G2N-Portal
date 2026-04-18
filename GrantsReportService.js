@@ -49,11 +49,46 @@
  *         NEW: _getColsWithFallback_()— returns LU cols or v3.9 hardcoded fallback
  *         All 5 report functions: data collection unchanged; header/row output LU-driven
  *         generateGrantSummaryReport() unchanged (narrative Doc — no column structure)
- * vX.Y - _buildGrantSummaryDoc_(): Income threshold now uses the upper limit
- *         of the selected income level (parseIncomeHighEnd) instead of the
- *         lower limit. isBelow check updated: a range is "below" when its
- *         high end <= threshold. Narrative and doc text updated accordingly.
- *         Added parseIncomeHighEnd() helper.
+ * v4.1 - generateDistributionStatsReport and generateTestimonialsReport: added
+ *         Service Status filter (Picked Up or Delivered). All six grant reports
+ *         now consistently exclude records that have not been picked up or delivered.
+ * v4.2 - Households and Distribution Stats: replaced single Assistance column with
+ *         individual indicator columns (0/1) for each active LU_IncomeSources.Source
+ *         value; replaced single Funding Code column with individual indicator columns
+ *         for each active LU_FundingSources.Code value. Row expansion (one row per
+ *         assistance source) removed — now one row per original record.
+ *         New helpers: _getDynamicGrantCols_(), _buildGrantRowsWithDynamic_(),
+ *         _writeGrantReportRaw_().
+ * v4.3 - _buildGrantSummaryDoc_(): fixed income bracket counts and percentages not
+ *         showing. The belowThresholdLevels array, belowThresholdCount accumulation,
+ *         and all narrative/doc creation were inside the for-in loop over incomeCounts,
+ *         so belowThresholdCount was always 0 and a new doc was created per iteration.
+ *         Moved all computation and doc creation outside the loop.
+ * v4.4 - Request Frequency: avgFreqDays now computed from consecutive request date
+ *         gaps (sorted asc) instead of Last Date Served per row — correctly shows
+ *         avg days between requests for applicants with >1 request.
+ *         Testimonials: added _writeTestimonialsReport_() with per-row pink highlight
+ *         (#FFD0D0) when May Use Info = 'No'. Permission column matched by key
+ *         substring to handle long COL_PERMISSION string.
+ *         Grant Summary: added Children Under 2 row to metrics table (Take Baby Box?
+ *         X→count). Added babyBox to colIdx. Added totalChildren2Under parameter to
+ *         _buildGrantSummaryDoc_().
+ *         Households/Distribution Stats: dynamic income source columns now teal
+ *         header (#0F9D58), funding code columns orange (#F4B400) in
+ *         _writeGrantReportRaw_() for visual differentiation.
+ * v4.5 - _getGrantResolvers_(): added short-key aliases for Testimonials columns
+ *         that LU_ReportColumns may abbreviate: 'May Use Info', 'May We Use Info',
+ *         'Permission', 'How Will Help', 'How Did Help', 'Current Situation',
+ *         'Emergency Situation'. Fixes blank May Use Info column when LU_ReportColumns
+ *         uses a short label instead of the full AM column name as the key.
+ * v4.6 - _writeTestimonialsReport_(): reads permission value directly from
+ *         records[ri].permission. COL_PERMISSION trailing period fix.
+ * v4.7 - getGrantReportData(): new public function exposing fully-computed data
+ *         (age brackets, products, applicant type, dynamic income/funding columns)
+ *         for Households, Distribution Stats, Open Requests, Request Frequency,
+ *         and Testimonials — without writing any spreadsheet. Called by the Report
+ *         Builder in AIReportService so it works from the same data pipeline as
+ *         the real grant reports.
  */
 
 'use strict';
@@ -91,7 +126,7 @@ var COL_EMERGENCY = 'Was there an emergency situation which caused you to contac
 var COL_SITUATION = 'Briefly explain your current situation.';
 var COL_HELP_1 = 'How will receiving personal and home cleaning products help you?';
 var COL_HELP_2 = 'If you have received cleaning products from us in the past, how has receiving these products helped you?';
-var COL_PERMISSION = 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real';
+var COL_PERMISSION = 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.';
 var COL_HOW_LEARNED = 'How did you learn about our program?';
 var COL_PERSON_ORG = 'More information about the person or organization that referred you.';
 var COL_TITLE_POS = 'What is the title or position of the person who referred you?';
@@ -487,6 +522,90 @@ function calculateProductCounts(id, productCode1, productCode2, productCode3,
  *
  * @returns {Object.<string, function(Object): *>}
  */
+
+/**
+ * Loads active Source values from LU_IncomeSources and Code values from
+ * LU_FundingSources. Used by Households and Distribution Stats to build
+ * dynamic per-source and per-code indicator columns.
+ * v4.2 - New helper.
+ * @returns {{ incomeSources: string[], fundingCodes: string[] }}
+ */
+function _getDynamicGrantCols_() {
+    return {
+        incomeSources: getLookupValues('INCOME_SOURCES', 'Source'),
+        fundingCodes: getLookupValues('FUNDING_SOURCES', 'Code')
+    };
+}
+
+/**
+ * Builds 2D output rows for reports that include dynamic income-source and
+ * funding-code indicator columns appended after the standard static cols.
+ *
+ * Dynamic columns appended in order:
+ *   1. One column per LU_IncomeSources.Source — value = 1 if the record's
+ *      rawAssistance array contains that source, 0 otherwise.
+ *   2. One column per LU_FundingSources.Code — value = 1 if the record's
+ *      fundingCode matches that code, 0 otherwise.
+ *
+ * v4.2 - New function. Replaces _buildGrantRows_() for Households and
+ *         Distribution Stats which previously expanded rows per assistance
+ *         source instead of using indicator columns.
+ *
+ * @param {Object[]} records        - Per-row record objects
+ * @param {Object[]} staticCols     - Standard cols from _getColsWithFallback_()
+ * @param {string[]} incomeSources  - From _getDynamicGrantCols_().incomeSources
+ * @param {string[]} fundingCodes   - From _getDynamicGrantCols_().fundingCodes
+ * @returns {{ headers: string[], rows: Array[] }}
+ *   headers — full column header array (static labels + dynamic keys)
+ *   rows    — 2D data array ready for setValues()
+ */
+function _buildGrantRowsWithDynamic_(records, staticCols, incomeSources, fundingCodes) {
+    var resolvers = _getGrantResolvers_();
+
+    // Build full header list: static col labels + income source names + funding codes
+    var headers = staticCols.map(function (c) { return c.label || c.key; });
+    for (var is = 0; is < incomeSources.length; is++) {
+        headers.push(incomeSources[is]);
+    }
+    for (var fc = 0; fc < fundingCodes.length; fc++) {
+        headers.push(fundingCodes[fc]);
+    }
+
+    // Build data rows
+    var rows = records.map(function (rec) {
+        // Static columns via resolvers
+        var cells = staticCols.map(function (col) {
+            var fn = resolvers[col.key];
+            if (!fn) {
+                Logger.log('_buildGrantRowsWithDynamic_: no resolver for key "' + col.key + '"');
+                return '';
+            }
+            return fn(rec);
+        });
+
+        // Income source indicator columns: 1 if this source is in rec.rawAssistance, else 0
+        var assistSources = rec.rawAssistance || [];
+        // Normalise to lowercase trimmed set for matching
+        var assistSet = {};
+        for (var a = 0; a < assistSources.length; a++) {
+            assistSet[assistSources[a].toLowerCase().trim()] = true;
+        }
+        for (var is2 = 0; is2 < incomeSources.length; is2++) {
+            cells.push(assistSet[incomeSources[is2].toLowerCase().trim()] ? 1 : 0);
+        }
+
+        // Funding code indicator columns: 1 if rec.fundingCode matches, else 0
+        var recFunding = (rec.fundingCode || '').toLowerCase().trim();
+        for (var fc2 = 0; fc2 < fundingCodes.length; fc2++) {
+            cells.push(recFunding === fundingCodes[fc2].toLowerCase().trim() ? 1 : 0);
+        }
+
+        return cells;
+    });
+
+    return { headers: headers, rows: rows };
+}
+
 function _getGrantResolvers_() {
     return {
         // ── Date prefix (computed from Request Date) ──────────────────────────
@@ -548,8 +667,16 @@ function _getGrantResolvers_() {
             function (r) { return r.help1 || ''; },
         'If you have received cleaning products from us in the past, how has receiving these products helped you?':
             function (r) { return r.help2 || ''; },
-        'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real':
+        'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.':
             function (r) { return r.permission || ''; },
+        // v4.4: short-key aliases for LU_ReportColumns entries that abbreviate long column names
+        'May Use Info': function (r) { return r.permission || ''; },
+        'May We Use Info': function (r) { return r.permission || ''; },
+        'Permission': function (r) { return r.permission || ''; },
+        'How Will Help': function (r) { return r.help1 || ''; },
+        'How Did Help': function (r) { return r.help2 || ''; },
+        'Current Situation': function (r) { return r.situation || ''; },
+        'Emergency Situation': function (r) { return r.emergency || ''; },
 
         // ── Computed: applicant type ──────────────────────────────────────────
         '[Calc] Applicant Type': function (r) { return r.applicantType || ''; },
@@ -767,7 +894,7 @@ function _getFallbackCols_(reportName) {
             { key: 'Briefly explain your current situation.', width: 250, wrapText: true },
             { key: 'How will receiving personal and home cleaning products help you?', width: 300, wrapText: true },
             { key: 'If you have received cleaning products from us in the past, how has receiving these products helped you?', width: 300, wrapText: true },
-            { key: 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real', width: 120 }
+            { key: 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.', width: 120 }
         ])
 
     };
@@ -1026,9 +1153,97 @@ function _writeGrantReport_(reportKey, reportTitle, filePrefix, records, cols,
 }
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REPORT: APPLICANTS OPEN REQUESTS
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Writes a grant report spreadsheet using pre-built headers and rows.
+ * Used by reports with dynamic columns (Households, Distribution Stats v4.2+)
+ * where _buildGrantRowsWithDynamic_() has already assembled the full 2D array.
+ *
+ * Static column widths/wrap come from staticCols; dynamic columns use default
+ * width 90 with no wrap.
+ *
+ * v4.2 - New function.
+ */
+function _writeGrantReportRaw_(reportKey, reportTitle, filePrefix,
+    allHeaders, allRows, staticCols, dynCols,
+    combined, fromDate, toDate, auditAction) {
+
+    var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var spreadsheet = SpreadsheetApp.create(filePrefix + '_' + fromFormatted + '_to_' + toFormatted);
+    var sheet = spreadsheet.getActiveSheet();
+    sheet.setName(reportTitle);
+    moveToFolder(spreadsheet.getId(), CONFIG.GRANTS_FOLDER_ID);
+
+    var colCount = allHeaders.length;
+
+    // Title section
+    var currentRow = writeReportTitleSection(sheet, reportTitle, fromDate, toDate,
+        combined.totalCount, combined.masterCount, combined.archiveCount);
+
+    // Header row
+    var headerRowNum = currentRow;
+    sheet.getRange(headerRowNum, 1, 1, colCount).setNumberFormat('@').setValues([allHeaders]);
+    styleReportHeader(sheet, headerRowNum, colCount);
+
+    // v4.4: Color dynamic columns differently — income sources teal, funding codes orange
+    var staticCount = staticCols.length;
+    var isCount = dynCols.incomeSources ? dynCols.incomeSources.length : 0;
+    var fcCount = dynCols.fundingCodes ? dynCols.fundingCodes.length : 0;
+    if (isCount > 0) {
+        sheet.getRange(headerRowNum, staticCount + 1, 1, isCount)
+            .setBackground('#0F9D58').setFontColor('white').setFontWeight('bold');
+    }
+    if (fcCount > 0) {
+        sheet.getRange(headerRowNum, staticCount + isCount + 1, 1, fcCount)
+            .setBackground('#F4B400').setFontColor('white').setFontWeight('bold');
+    }
+    currentRow++;
+
+    // Data rows
+    if (allRows.length > 0) {
+        sheet.getRange(currentRow, 1, allRows.length, colCount).setValues(allRows);
+        for (var i = 1; i < allRows.length; i += 2) {
+            sheet.getRange(currentRow + i, 1, 1, colCount).setBackground('#f8f9fa');
+        }
+        currentRow += allRows.length;
+    }
+
+    // Footer
+    currentRow++;
+    sheet.getRange(currentRow, 1).setValue('End of Report - ' + allRows.length + ' records');
+    sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
+
+    // Apply column widths: static cols first, then dynamic (90px each)
+    applyReportColumnFormatting(sheet, staticCols, headerRowNum + 1, headerRowNum + allRows.length);
+    var dynStart = staticCols.length + 1;
+    var dynTotal = (dynCols.incomeSources ? dynCols.incomeSources.length : 0) +
+        (dynCols.fundingCodes ? dynCols.fundingCodes.length : 0);
+    for (var d = 0; d < dynTotal; d++) {
+        sheet.setColumnWidth(dynStart + d, 90);
+    }
+
+    sheet.setFrozenRows(headerRowNum);
+
+    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    logAudit(auditAction, null,
+        'Generated ' + reportTitle + ': ' + fromDisplay + ' to ' + toDisplay +
+        ' (' + allRows.length + ' records)');
+
+    return {
+        success: true,
+        message: 'Report generated with ' + allRows.length + ' records',
+        recordCount: allRows.length,
+        masterCount: combined.masterCount,
+        archiveCount: combined.archiveCount,
+        reportUrl: spreadsheet.getUrl(),
+        downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+        reportId: spreadsheet.getId()
+    };
+}
+
+
+
 
 /**
  * Generate Applicants Open Requests report.
@@ -1208,40 +1423,41 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
             // This is NOT the same as Under 5 age bracket (ages.under5 covers 0-4 yrs)
             var children2Under = (getStr(row, colIdx.babyBox).toUpperCase() === 'X') ? 1 : 0;
 
-            // Expand Assistance into one record per item (comma-separated)
+            // v4.2: Build one record per original row; store raw assistance array
+            // and funding code for dynamic indicator columns (replaces row expansion).
             var rawAssist = getStr(row, colIdx.assistance);
-            var sources = rawAssist.indexOf(', ') !== -1 ? rawAssist.split(', ') : [rawAssist];
+            var assistArr = rawAssist
+                ? rawAssist.split(', ').map(function (s) { return s.trim(); }).filter(Boolean)
+                : [];
             var applicantType = getApplicantType(getStr(row, colIdx.usedBefore));
 
-            for (var s = 0; s < sources.length; s++) {
-                records.push({
-                    quarter: getQuarter(reqDate.getMonth()),
-                    year: reqDate.getFullYear(),
-                    month: getMonthName(reqDate.getMonth()),
-                    day: reqDate.getDate(),
-                    city: getStr(row, colIdx.city),
-                    state: getStr(row, colIdx.state),
-                    zip: getStr(row, colIdx.zipCode),
-                    county: getStr(row, colIdx.county),
-                    applicantType: applicantType,
-                    requestType: getStr(row, colIdx.requestType),
-                    serviceStatus: getStr(row, colIdx.serviceStatus),
-                    fundingCode: getStr(row, colIdx.fundingCode),
-                    militaryStatus: getStr(row, colIdx.militaryStatus),
-                    race: getStr(row, colIdx.race),
-                    ethnicity: getStr(row, colIdx.ethnicity),
-                    homeless: getStr(row, colIdx.homeless),
-                    employed: getStr(row, colIdx.employed),
-                    incomeLevel: getStr(row, colIdx.incomeLevel),
-                    incomeSourceType: sources[s].trim(),
-                    productsRequested: products.productsRequested,
-                    productsDistributed: products.productsDistributed,
-                    babyRequested: products.babyRequested,
-                    babyDistributed: products.babyDistributed,
-                    children2Under: children2Under,
-                    ages: ages
-                });
-            }
+            records.push({
+                quarter: getQuarter(reqDate.getMonth()),
+                year: reqDate.getFullYear(),
+                month: getMonthName(reqDate.getMonth()),
+                day: reqDate.getDate(),
+                city: getStr(row, colIdx.city),
+                state: getStr(row, colIdx.state),
+                zip: getStr(row, colIdx.zipCode),
+                county: getStr(row, colIdx.county),
+                applicantType: applicantType,
+                requestType: getStr(row, colIdx.requestType),
+                serviceStatus: getStr(row, colIdx.serviceStatus),
+                fundingCode: getStr(row, colIdx.fundingCode),
+                militaryStatus: getStr(row, colIdx.militaryStatus),
+                race: getStr(row, colIdx.race),
+                ethnicity: getStr(row, colIdx.ethnicity),
+                homeless: getStr(row, colIdx.homeless),
+                employed: getStr(row, colIdx.employed),
+                incomeLevel: getStr(row, colIdx.incomeLevel),
+                rawAssistance: assistArr,      // v4.2: array for dynamic indicator cols
+                productsRequested: products.productsRequested,
+                productsDistributed: products.productsDistributed,
+                babyRequested: products.babyRequested,
+                babyDistributed: products.babyDistributed,
+                children2Under: children2Under,
+                ages: ages
+            });
         }
 
         records.sort(function (a, b) {
@@ -1255,9 +1471,16 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
             return a.county.localeCompare(b.county);
         });
 
-        var cols = _getColsWithFallback_('Households');
-        return _writeGrantReport_('Households', 'Households', 'Households',
-            records, cols, combined, fromDate, toDate, 'GRANTS_REPORT');
+        var staticCols = _getColsWithFallback_('Households');
+        // v4.2: Remove static Assistance and Funding Code cols (replaced by dynamic indicator cols)
+        staticCols = staticCols.filter(function (c) {
+            return c.key !== COL_ASSISTANCE && c.key !== 'Funding Code';
+        });
+        var dynCols = _getDynamicGrantCols_();
+        var built = _buildGrantRowsWithDynamic_(records, staticCols, dynCols.incomeSources, dynCols.fundingCodes);
+        return _writeGrantReportRaw_('Households', 'Households', 'Households',
+            built.headers, built.rows, staticCols, dynCols,
+            combined, fromDate, toDate, 'GRANTS_REPORT');
 
     } catch (e) {
         Logger.log('Households error: ' + e.message);
@@ -1273,7 +1496,7 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
 /**
  * Generate Distribution Stats report — all records, full demographics.
  *
- * No filter on Service Status (all records included).
+ * Filter: Service Status = 'Picked Up' or 'Delivered' (v4.1).
  * Products counted only when Service Status = 'Picked Up' or 'Delivered'.
  * Assistance field expanded: one row per comma-separated assistance type.
  * Columns: driven by LU_ReportColumns 'Distribution Stats'.
@@ -1296,9 +1519,10 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
         if (fromDate > toDate)
             return { success: false, error: 'From Date must be before To Date' };
 
-        var combined = getCombinedData(fromDate, toDate); // no status filter
+        var combined = getCombinedData(fromDate, toDate,
+            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No records found for the specified date range' };
+            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1359,51 +1583,52 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
             // Children 2 and Under: Take Baby Box? X=1, blank=0
             var children2Under = (getStr(row, colIdx.babyBox).toUpperCase() === 'X') ? 1 : 0;
 
-            // Expand Assistance into one record per item
+            // v4.2: Build one record per original row; store raw assistance array
+            // and funding code for dynamic indicator columns (replaces row expansion).
             var rawAssist = getStr(row, colIdx.assistance);
-            var sources = rawAssist.indexOf(', ') !== -1 ? rawAssist.split(', ') : [rawAssist];
+            var assistArr = rawAssist
+                ? rawAssist.split(', ').map(function (s) { return s.trim(); }).filter(Boolean)
+                : [];
             var ages = calculateDetailedAgeBrackets(headers, row);
 
-            for (var s = 0; s < sources.length; s++) {
-                records.push({
-                    quarter: getQuarter(reqDate.getMonth()),
-                    year: reqDate.getFullYear(),
-                    month: getMonthName(reqDate.getMonth()),
-                    day: reqDate.getDate(),
-                    id: getStr(row, colIdx.id),
-                    firstName: getStr(row, colIdx.firstName),
-                    lastName: getStr(row, colIdx.lastName),
-                    city: getStr(row, colIdx.city),
-                    state: getStr(row, colIdx.state),
-                    zip: getStr(row, colIdx.zipCode),
-                    county: getStr(row, colIdx.county),
-                    fundingCode: getStr(row, colIdx.fundingCode),
-                    requestType: getStr(row, colIdx.requestType),
-                    serviceStatus: svcStatus,
-                    finalServiceDate: finalDate,
-                    code1: getStr(row, colIdx.productCode1),
-                    code2: getStr(row, colIdx.productCode2),
-                    code3: getStr(row, colIdx.productCode3),
-                    productsRequested: products.productsRequested,
-                    productsDistributed: products.productsDistributed,
-                    babyRequested: products.babyRequested,
-                    babyDistributed: products.babyDistributed,
-                    howLearned: getStr(row, colIdx.howLearned),
-                    personOrg: getStr(row, colIdx.personOrg),
-                    titlePos: getStr(row, colIdx.titlePos),
-                    whoReferred: getStr(row, colIdx.whoReferred),
-                    moreInfo: getStr(row, colIdx.moreInfo),
-                    militaryStatus: getStr(row, colIdx.militaryStatus),
-                    race: getStr(row, colIdx.race),
-                    ethnicity: getStr(row, colIdx.ethnicity),
-                    homeless: getStr(row, colIdx.homeless),
-                    employed: getStr(row, colIdx.employed),
-                    incomeLevel: getStr(row, colIdx.incomeLevel),
-                    incomeSourceType: sources[s].trim(),
-                    children2Under: children2Under,
-                    ages: ages
-                });
-            }
+            records.push({
+                quarter: getQuarter(reqDate.getMonth()),
+                year: reqDate.getFullYear(),
+                month: getMonthName(reqDate.getMonth()),
+                day: reqDate.getDate(),
+                id: getStr(row, colIdx.id),
+                firstName: getStr(row, colIdx.firstName),
+                lastName: getStr(row, colIdx.lastName),
+                city: getStr(row, colIdx.city),
+                state: getStr(row, colIdx.state),
+                zip: getStr(row, colIdx.zipCode),
+                county: getStr(row, colIdx.county),
+                fundingCode: getStr(row, colIdx.fundingCode),
+                requestType: getStr(row, colIdx.requestType),
+                serviceStatus: svcStatus,
+                finalServiceDate: finalDate,
+                code1: getStr(row, colIdx.productCode1),
+                code2: getStr(row, colIdx.productCode2),
+                code3: getStr(row, colIdx.productCode3),
+                productsRequested: products.productsRequested,
+                productsDistributed: products.productsDistributed,
+                babyRequested: products.babyRequested,
+                babyDistributed: products.babyDistributed,
+                howLearned: getStr(row, colIdx.howLearned),
+                personOrg: getStr(row, colIdx.personOrg),
+                titlePos: getStr(row, colIdx.titlePos),
+                whoReferred: getStr(row, colIdx.whoReferred),
+                moreInfo: getStr(row, colIdx.moreInfo),
+                militaryStatus: getStr(row, colIdx.militaryStatus),
+                race: getStr(row, colIdx.race),
+                ethnicity: getStr(row, colIdx.ethnicity),
+                homeless: getStr(row, colIdx.homeless),
+                employed: getStr(row, colIdx.employed),
+                incomeLevel: getStr(row, colIdx.incomeLevel),
+                rawAssistance: assistArr,      // v4.2: array for dynamic indicator cols
+                children2Under: children2Under,
+                ages: ages
+            });
         }
 
         records.sort(function (a, b) {
@@ -1419,9 +1644,16 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
             return a.county.localeCompare(b.county);
         });
 
-        var cols = _getColsWithFallback_('Distribution Stats');
-        return _writeGrantReport_('Distribution Stats', 'Distribution Stats', 'Distribution_Stats',
-            records, cols, combined, fromDate, toDate, 'GRANTS_REPORT');
+        var staticCols = _getColsWithFallback_('Distribution Stats');
+        // v4.2: Remove static Assistance and Funding Code cols (replaced by dynamic indicator cols)
+        staticCols = staticCols.filter(function (c) {
+            return c.key !== COL_ASSISTANCE && c.key !== 'Funding Code';
+        });
+        var dynCols = _getDynamicGrantCols_();
+        var built = _buildGrantRowsWithDynamic_(records, staticCols, dynCols.incomeSources, dynCols.fundingCodes);
+        return _writeGrantReportRaw_('Distribution Stats', 'Distribution Stats', 'Distribution_Stats',
+            built.headers, built.rows, staticCols, dynCols,
+            combined, fromDate, toDate, 'GRANTS_REPORT');
 
     } catch (e) {
         Logger.log('Distribution Stats error: ' + e.message);
@@ -1456,9 +1688,10 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
         if (fromDate > toDate)
             return { success: false, error: 'From Date must be before To Date' };
 
-        var combined = getCombinedData(fromDate, toDate);
+        var combined = getCombinedData(fromDate, toDate,
+            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No records found for the specified date range' };
+            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1521,8 +1754,7 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
         });
 
         var cols = _getColsWithFallback_('Testimonials');
-        return _writeGrantReport_('Testimonials', 'Testimonials', 'Testimonials',
-            records, cols, combined, fromDate, toDate, 'GRANTS_REPORT');
+        return _writeTestimonialsReport_(records, cols, combined, fromDate, toDate);
 
     } catch (e) {
         Logger.log('Testimonials error: ' + e.message);
@@ -1531,9 +1763,111 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
 }
 
 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // REPORT: REQUEST FREQUENCY
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Writes the Testimonials report spreadsheet.
+ * Extends _writeGrantReport_() with per-row pink highlight when
+ * permission (May Use Info) response is 'No' (case-insensitive).
+ * Also resolves the COL_PERMISSION column by position index so the
+ * full ~200-char column key doesn't have to match LU_ReportColumns exactly.
+ * v4.4 - New function (replaces _writeGrantReport_ call for Testimonials).
+ * @private
+ */
+function _writeTestimonialsReport_(records, cols, combined, fromDate, toDate) {
+    var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var spreadsheet = SpreadsheetApp.create('Testimonials_' + fromFormatted + '_to_' + toFormatted);
+    var sheet = spreadsheet.getActiveSheet();
+    sheet.setName('Testimonials');
+    moveToFolder(spreadsheet.getId(), CONFIG.GRANTS_FOLDER_ID);
+
+    var dataHeaders = cols.map(function (c) { return c.label || c.key; });
+    var reportColCount = dataHeaders.length;
+
+    // Find the permission column index in cols so we can check each row
+    // Match against both the full COL_PERMISSION string and shorter aliases
+    var permColIdx = -1;
+    for (var ci = 0; ci < cols.length; ci++) {
+        var k = cols[ci].key || '';
+        if (k === COL_PERMISSION ||
+            k.toLowerCase().indexOf('may we use') !== -1 ||
+            k.toLowerCase().indexOf('may use') !== -1 ||
+            (cols[ci].label || '').toLowerCase().indexOf('may use') !== -1) {
+            permColIdx = ci;
+            break;
+        }
+    }
+
+    var currentRow = writeReportTitleSection(sheet, 'Testimonials', fromDate, toDate,
+        combined.totalCount, combined.masterCount, combined.archiveCount);
+    var headerRowNum = currentRow;
+    sheet.getRange(headerRowNum, 1, 1, reportColCount).setNumberFormat('@').setValues([dataHeaders]);
+    styleReportHeader(sheet, headerRowNum, reportColCount);
+    currentRow++;
+
+    var allRows = _buildGrantRows_(records, cols);
+
+    // v4.6: For the pink highlight we need the permission value per record.
+    // Use records[ri].permission directly — reliable regardless of col.key mismatch.
+    // Also patch any permission column that _buildGrantRows_ returned '' for because
+    // the LU_ReportColumns key didn't match any resolver entry.
+    if (allRows.length > 0) {
+        // Fix permission column value if resolver returned '' due to key mismatch
+        if (permColIdx !== -1) {
+            for (var pi = 0; pi < allRows.length; pi++) {
+                if ((allRows[pi][permColIdx] || '') === '' && records[pi] && records[pi].permission) {
+                    allRows[pi][permColIdx] = records[pi].permission;
+                }
+            }
+        }
+
+        sheet.getRange(currentRow, 1, allRows.length, reportColCount).setValues(allRows);
+
+        // Alternating row background + pink highlight for No-permission rows
+        // Read permission directly from records to guarantee correct value
+        for (var ri = 0; ri < allRows.length; ri++) {
+            var sheetRow = currentRow + ri;
+            var permVal = records[ri] ? (records[ri].permission || '').toString().trim().toLowerCase() : '';
+            if (permVal === 'no') {
+                sheet.getRange(sheetRow, 1, 1, reportColCount).setBackground('#FFD0D0');
+            } else if (ri % 2 === 1) {
+                sheet.getRange(sheetRow, 1, 1, reportColCount).setBackground('#f8f9fa');
+            }
+        }
+        currentRow += allRows.length;
+    }
+
+    currentRow++;
+    sheet.getRange(currentRow, 1).setValue('End of Report - ' + records.length + ' records');
+    sheet.getRange(currentRow, 1).setFontStyle('italic').setFontSize(10).setFontColor('#666666');
+
+    applyReportColumnFormatting(sheet, cols, headerRowNum + 1, headerRowNum + allRows.length);
+    sheet.setFrozenRows(headerRowNum);
+
+    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'M/d/yyyy');
+    logAudit('GRANTS_REPORT', null,
+        'Generated Testimonials: ' + fromDisplay + ' to ' + toDisplay +
+        ' (' + records.length + ' records)');
+
+    return {
+        success: true,
+        message: 'Report generated with ' + records.length + ' records',
+        recordCount: records.length,
+        masterCount: combined.masterCount,
+        archiveCount: combined.archiveCount,
+        reportUrl: spreadsheet.getUrl(),
+        downloadUrl: 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/export?format=xlsx',
+        reportId: spreadsheet.getId()
+    };
+}
+
+
+
 
 /**
  * Generate Request Frequency report.
@@ -1604,7 +1938,6 @@ function generateRequestFrequencyReport(fromDateStr, toDateStr) {
         var rows = combined.rows;
         var colIdx = {
             requestDate: headers.indexOf(resolveAMField_('Request Date')),
-            lastDateServed: headers.indexOf(resolveAMField_('Last Date Served')),
             city: headers.indexOf(resolveAMField_('City')),
             state: headers.indexOf(resolveAMField_('State')),
             zipCode: headers.indexOf(resolveAMField_('Zip Code')),
@@ -1616,13 +1949,12 @@ function generateRequestFrequencyReport(fromDateStr, toDateStr) {
             lastName: headers.indexOf(resolveAMField_('Last Name'))
         };
 
-        // Group by applicant name, compute frequency
+        // Group by applicant name; collect all request dates for gap calculation
         var applicantMap = {};
         for (var i = 0; i < rows.length; i++) {
             var row = rows[i];
             var reqDate = new Date(row[colIdx.requestDate]);
-            var ldsDate = colIdx.lastDateServed !== -1 && row[colIdx.lastDateServed]
-                ? new Date(row[colIdx.lastDateServed]) : null;
+            if (isNaN(reqDate.getTime())) continue;
             var fn = getStr(row, colIdx.firstName);
             var ln = getStr(row, colIdx.lastName);
             var key = (fn + '|' + ln).toLowerCase();
@@ -1634,22 +1966,27 @@ function generateRequestFrequencyReport(fromDateStr, toDateStr) {
                 incomeLevel: getStr(row, colIdx.incomeLevel),
                 requestType: getStr(row, colIdx.requestType),
                 serviceStatus: getStr(row, colIdx.serviceStatus),
-                requestCount: 0, totalFreqDays: 0, freqCount: 0
+                requestDates: []
             };
-            applicantMap[key].requestCount++;
-            if (ldsDate && !isNaN(ldsDate.getTime())) {
-                var diff = Math.round((reqDate - ldsDate) / (1000 * 60 * 60 * 24));
-                if (diff > 0) {
-                    applicantMap[key].totalFreqDays += diff;
-                    applicantMap[key].freqCount++;
-                }
-            }
+            applicantMap[key].requestDates.push(reqDate.getTime());
         }
 
         var records = [];
         for (var k in applicantMap) {
             var ap = applicantMap[k];
-            ap.avgFreqDays = ap.freqCount > 0 ? Math.round(ap.totalFreqDays / ap.freqCount) : '';
+            ap.requestCount = ap.requestDates.length;
+            // v4.4: Avg frequency = average gap between consecutive request dates (sorted asc)
+            if (ap.requestDates.length > 1) {
+                ap.requestDates.sort(function (a, b) { return a - b; });
+                var totalGap = 0;
+                for (var d = 1; d < ap.requestDates.length; d++) {
+                    totalGap += Math.round((ap.requestDates[d] - ap.requestDates[d - 1]) / (1000 * 60 * 60 * 24));
+                }
+                ap.avgFreqDays = Math.round(totalGap / (ap.requestDates.length - 1));
+            } else {
+                ap.avgFreqDays = '';
+            }
+            delete ap.requestDates;
             records.push(ap);
         }
         var totalReqs = records.reduce(function (s, r) { return s + r.requestCount; }, 0);
@@ -1745,149 +2082,154 @@ function _writeRequestFrequencySpreadsheet_(records, totalRequestCount,
  * @returns {Object} Result with narrative text and report URL
  */
 function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filterCity, filterZip, incomeLevel) {
-  try {
-    if (!fromDateStr || !toDateStr) {
-      return { success: false, error: 'Both From Date and To Date are required' };
-    }
-    
-    var fromDate = parseDateInput(fromDateStr, false);
-    var toDate = parseDateInput(toDateStr, true);
-    
-    if (fromDate > toDate) {
-      return { success: false, error: 'From Date must be before To Date' };
-    }
-
-    // ── MySQL path: sp_get_grant_summary_stats returns pre-aggregated results ──
-    if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
-      try {
-        var fromStr   = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-        var toStr     = Utilities.formatDate(toDate,   CONFIG.TIMEZONE, 'yyyy-MM-dd');
-        var countyCsv = (filterCounty || '').trim() || null;
-        var cityCsv   = (filterCity   || '').trim() || null;
-        var zipCsv    = (filterZip    || '').trim() || null;
-
-        var stats = DbService.getGrantSummaryStats(fromStr, toStr, countyCsv, cityCsv, zipCsv);
-        if (!stats) throw new Error('getGrantSummaryStats returned null');
-
-        if (stats.householdCount === 0) {
-          return { success: false, error: 'No records found for the specified filters and date range' };
+    try {
+        if (!fromDateStr || !toDateStr) {
+            return { success: false, error: 'Both From Date and To Date are required' };
         }
 
-        // Build incomeCounts map from incomeBreakdown array
+        var fromDate = parseDateInput(fromDateStr, false);
+        var toDate = parseDateInput(toDateStr, true);
+
+        if (fromDate > toDate) {
+            return { success: false, error: 'From Date must be before To Date' };
+        }
+
+        // ── MySQL path: sp_get_grant_summary_stats returns pre-aggregated results ──
+        if (CONFIG.DB && CONFIG.DB.USE_MYSQL) {
+            try {
+                var fromStr = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+                var toStr = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+                var countyCsv = (filterCounty || '').trim() || null;
+                var cityCsv = (filterCity || '').trim() || null;
+                var zipCsv = (filterZip || '').trim() || null;
+
+                var stats = DbService.getGrantSummaryStats(fromStr, toStr, countyCsv, cityCsv, zipCsv);
+                if (!stats) throw new Error('getGrantSummaryStats returned null');
+
+                if (stats.householdCount === 0) {
+                    return { success: false, error: 'No records found for the specified filters and date range' };
+                }
+
+                // Build incomeCounts map from incomeBreakdown array
+                var incomeCounts = {};
+                var totalIncomeRecords = 0;
+                (stats.incomeBreakdown || []).forEach(function (b) {
+                    if (b.incomeLevel !== '') {
+                        incomeCounts[b.incomeLevel] = b.incomeCount;
+                        totalIncomeRecords += b.incomeCount;
+                    }
+                });
+
+                return _buildGrantSummaryDoc_(
+                    fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
+                    stats.householdCount, stats.totalRequests,
+                    stats.totalChildren, stats.totalAdults, stats.totalSeniors,
+                    stats.totalProductsDistributed,
+                    incomeCounts, totalIncomeRecords);
+            } catch (e) {
+                Logger.log('generateGrantSummaryReport MySQL error (falling back to Sheets): ' + e.message);
+                // Fall through to Sheets path
+            }
+        }
+
+        // ── Sheets path ─────────────────────────────────────────────────────────
+        var filters = [
+            { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
+        ];
+
+        // Add geographic filters if provided (support comma-separated multi-values)
+        if (filterCounty && filterCounty.trim() !== '') {
+            var counties = filterCounty.split(',').map(function (v) { return v.trim(); }).filter(function (v) { return v !== ''; });
+            if (counties.length > 0) filters.push({ column: 'County', values: counties });
+        }
+        if (filterCity && filterCity.trim() !== '') {
+            var cities = filterCity.split(',').map(function (v) { return v.trim(); }).filter(function (v) { return v !== ''; });
+            if (cities.length > 0) filters.push({ column: 'City', values: cities });
+        }
+        if (filterZip && filterZip.trim() !== '') {
+            var zips = filterZip.split(',').map(function (v) { return v.trim(); }).filter(function (v) { return v !== ''; });
+            if (zips.length > 0) filters.push({ column: 'Zip Code', values: zips });
+        }
+
+        var combined = getCombinedData(fromDate, toDate, filters);
+
+        if (combined.totalCount === 0) {
+            return { success: false, error: 'No records found for the specified filters and date range' };
+        }
+
+        var headers = combined.headers;
+        var rows = combined.rows;
+
+        var productData = loadProductLookupData(fromDate, toDate);
+
+        var colIdx = {
+            id: headers.indexOf(resolveAMField_('ID')),
+            requestDate: headers.indexOf(resolveAMField_('Request Date')),
+            firstName: headers.indexOf(resolveAMField_('First Name')),
+            lastName: headers.indexOf(resolveAMField_('Last Name')),
+            incomeLevel: headers.indexOf(resolveAMField_(COL_INCOME)),
+            serviceStatus: headers.indexOf(resolveAMField_('Service Status')),
+            babyBox: headers.indexOf(resolveAMField_(COL_BABY_BOX)),   // v4.4: Children Under 2
+            productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
+            productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
+            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
+        };
+
+        // Compute metrics
+        var uniqueHouseholds = new Set();
         var incomeCounts = {};
+        var totalChildren = 0, totalAdults = 0, totalSeniors = 0;
+        var totalChildren2Under = 0;   // v4.4: Children Under 2
+        var totalProductsDistributed = 0;
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var firstName = getStr(row, colIdx.firstName);
+            var lastName = getStr(row, colIdx.lastName);
+            var clientKey = (firstName + '|' + lastName).toLowerCase();
+            uniqueHouseholds.add(clientKey);
+
+            // Income levels
+            var income = getStr(row, colIdx.incomeLevel);
+            if (income !== '') {
+                if (!incomeCounts[income]) incomeCounts[income] = 0;
+                incomeCounts[income]++;
+            }
+
+            // Age brackets
+            var ages = calculateAgeBrackets(headers, row, 64);
+            totalChildren += ages.children;
+            totalAdults += ages.adults;
+            totalSeniors += ages.seniors;
+
+            // v4.4: Children Under 2 = Take Baby Box? X → 1
+            if (getStr(row, colIdx.babyBox).toUpperCase() === 'X') totalChildren2Under++;
+
+            // Products
+            var recId = getStr(row, colIdx.id);
+            var reqDate = new Date(row[colIdx.requestDate]);
+            var code1 = getStr(row, colIdx.productCode1);
+            var code2 = getStr(row, colIdx.productCode2);
+            var code3 = getStr(row, colIdx.productCode3);
+            var products = calculateProductCounts(recId, code1, code2, code3, reqDate, productData, headers, row);
+            totalProductsDistributed += products.productsDistributed;
+        }
+
+        var householdCount = uniqueHouseholds.size;
         var totalIncomeRecords = 0;
-        (stats.incomeBreakdown || []).forEach(function(b) {
-          if (b.incomeLevel !== '') {
-            incomeCounts[b.incomeLevel] = b.incomeCount;
-            totalIncomeRecords += b.incomeCount;
-          }
-        });
+        for (var k in incomeCounts) totalIncomeRecords += incomeCounts[k];
 
         return _buildGrantSummaryDoc_(
-          fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
-          stats.householdCount, stats.totalRequests,
-          stats.totalChildren, stats.totalAdults, stats.totalSeniors,
-          stats.totalProductsDistributed,
-          incomeCounts, totalIncomeRecords);
-      } catch (e) {
-        Logger.log('generateGrantSummaryReport MySQL error (falling back to Sheets): ' + e.message);
-        // Fall through to Sheets path
-      }
-    }
+            fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
+            householdCount, combined.totalCount,
+            totalChildren, totalAdults, totalSeniors,
+            totalProductsDistributed,
+            incomeCounts, totalIncomeRecords, totalChildren2Under);
 
-    // ── Sheets path ─────────────────────────────────────────────────────────
-    var filters = [
-      { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
-    ];
-    
-    // Add geographic filters if provided (support comma-separated multi-values)
-    if (filterCounty && filterCounty.trim() !== '') {
-      var counties = filterCounty.split(',').map(function(v) { return v.trim(); }).filter(function(v) { return v !== ''; });
-      if (counties.length > 0) filters.push({ column: 'County', values: counties });
+    } catch (error) {
+        Logger.log('Grant Summary report error: ' + error.message);
+        return { success: false, error: 'Report generation failed: ' + error.message };
     }
-    if (filterCity && filterCity.trim() !== '') {
-      var cities = filterCity.split(',').map(function(v) { return v.trim(); }).filter(function(v) { return v !== ''; });
-      if (cities.length > 0) filters.push({ column: 'City', values: cities });
-    }
-    if (filterZip && filterZip.trim() !== '') {
-      var zips = filterZip.split(',').map(function(v) { return v.trim(); }).filter(function(v) { return v !== ''; });
-      if (zips.length > 0) filters.push({ column: 'Zip Code', values: zips });
-    }
-    
-    var combined = getCombinedData(fromDate, toDate, filters);
-    
-    if (combined.totalCount === 0) {
-      return { success: false, error: 'No records found for the specified filters and date range' };
-    }
-    
-    var headers = combined.headers;
-    var rows = combined.rows;
-    
-    var productData = loadProductLookupData(fromDate, toDate);
-    
-    var colIdx = {
-      id:           headers.indexOf(resolveAMField_('ID')),
-      requestDate:  headers.indexOf(resolveAMField_('Request Date')),
-      firstName:    headers.indexOf(resolveAMField_('First Name')),
-      lastName:     headers.indexOf(resolveAMField_('Last Name')),
-      incomeLevel:  headers.indexOf(resolveAMField_(COL_INCOME)),
-      serviceStatus:headers.indexOf(resolveAMField_('Service Status')),
-      productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
-      productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
-      productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
-    };
-    
-    // Compute metrics
-    var uniqueHouseholds = new Set();
-    var incomeCounts = {};
-    var totalChildren = 0, totalAdults = 0, totalSeniors = 0;
-    var totalProductsDistributed = 0;
-    
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var firstName = getStr(row, colIdx.firstName);
-      var lastName = getStr(row, colIdx.lastName);
-      var clientKey = (firstName + '|' + lastName).toLowerCase();
-      uniqueHouseholds.add(clientKey);
-      
-      // Income levels
-      var income = getStr(row, colIdx.incomeLevel);
-      if (income !== '') {
-        if (!incomeCounts[income]) incomeCounts[income] = 0;
-        incomeCounts[income]++;
-      }
-      
-      // Age brackets
-      var ages = calculateAgeBrackets(headers, row, 64);
-      totalChildren += ages.children;
-      totalAdults += ages.adults;
-      totalSeniors += ages.seniors;
-      
-      // Products
-      var recId = getStr(row, colIdx.id);
-      var reqDate = new Date(row[colIdx.requestDate]);
-      var code1 = getStr(row, colIdx.productCode1);
-      var code2 = getStr(row, colIdx.productCode2);
-      var code3 = getStr(row, colIdx.productCode3);
-      var products = calculateProductCounts(recId, code1, code2, code3, reqDate, productData, headers, row);
-      totalProductsDistributed += products.productsDistributed;
-    }
-    
-    var householdCount = uniqueHouseholds.size;
-    var totalIncomeRecords = 0;
-    for (var k in incomeCounts) totalIncomeRecords += incomeCounts[k];
-
-    return _buildGrantSummaryDoc_(
-      fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
-      householdCount, combined.totalCount,
-      totalChildren, totalAdults, totalSeniors,
-      totalProductsDistributed,
-      incomeCounts, totalIncomeRecords);
-
-  } catch (error) {
-    Logger.log('Grant Summary report error: ' + error.message);
-    return { success: false, error: 'Report generation failed: ' + error.message };
-  }
 }
 
 /**
@@ -1897,7 +2239,7 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
  */
 function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
     householdCount, totalCount, totalChildren, totalAdults, totalSeniors,
-    totalProductsDistributed, incomeCounts, totalIncomeRecords) {
+    totalProductsDistributed, incomeCounts, totalIncomeRecords, totalChildren2Under) {
 
     // Determine income threshold from selected income level (upper limit per requirements)
     var selectedIncomeLevel = incomeLevel || '$30,000 - $39,999';
@@ -1905,8 +2247,8 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
     if (threshold < 0) threshold = parseIncomeLowEnd(selectedIncomeLevel); // fallback to low end
     if (threshold < 0) threshold = 39999;
     var thresholdFormatted = '$' + threshold.toLocaleString();
-    //
-    // Determine which income levels fall at or below the threshold (upper end <= threshold)
+
+    // Build incomeArr and belowThreshold totals — all outside the loop
     var belowThresholdLevels = [];
     var belowThresholdCount = 0;
     var incomeArr = [];
@@ -1916,119 +2258,436 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
         // isBelow: the entire income range is at or below the threshold
         var isBelow = (highEnd >= 0 && highEnd <= threshold);
         incomeArr.push({ level: k, count: incomeCounts[k], lowEnd: lowEnd, isBelow: isBelow });
+        if (isBelow) {
+            belowThresholdLevels.push({ level: k, count: incomeCounts[k] });
+            belowThresholdCount += incomeCounts[k];
+        }
+    }
 
-        // Sort all income levels by low end ascending for display
-        incomeArr.sort(function (a, b) { return a.lowEnd - b.lowEnd; });
-        belowThresholdLevels.sort(function (a, b) {
-            return parseIncomeLowEnd(a.level) - parseIncomeLowEnd(b.level);
-        });
+    // Sort all income levels by low end ascending for display
+    incomeArr.sort(function (a, b) { return a.lowEnd - b.lowEnd; });
+    belowThresholdLevels.sort(function (a, b) {
+        return parseIncomeLowEnd(a.level) - parseIncomeLowEnd(b.level);
+    });
 
-        // Overall % of households below threshold
-        var belowThresholdPct = householdCount > 0 ? Math.round((belowThresholdCount / householdCount) * 100) : 0;
+    // Overall % of households below threshold
+    var belowThresholdPct = householdCount > 0 ? Math.round((belowThresholdCount / householdCount) * 100) : 0;
 
-        // Build below-threshold breakdown lines
-        var incomeLines = [];
-        for (var j = 0; j < belowThresholdLevels.length; j++) {
-            var pct = belowThresholdCount > 0 ? Math.round((belowThresholdLevels[j].count / belowThresholdCount) * 100) : 0;
-            incomeLines.push(pct + '% ' + belowThresholdLevels[j].level);
+    // Build below-threshold breakdown lines
+    var incomeLines = [];
+    for (var j = 0; j < belowThresholdLevels.length; j++) {
+        var pct = belowThresholdCount > 0 ? Math.round((belowThresholdLevels[j].count / belowThresholdCount) * 100) : 0;
+        incomeLines.push(pct + '% ' + belowThresholdLevels[j].level);
+    }
+
+    // Date range description
+    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM yyyy');
+    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM yyyy');
+
+    // Geographic filter description
+    var geoFilter = '';
+    if (filterCounty && filterCounty.trim() !== '') geoFilter += filterCounty.trim();
+    if (filterCity && filterCity.trim() !== '') geoFilter += (geoFilter ? ', ' : '') + filterCity.trim();
+    if (filterZip && filterZip.trim() !== '') geoFilter += (geoFilter ? ', Zip ' : 'Zip ') + filterZip.trim();
+    var geoDesc = geoFilter ? ' in ' + geoFilter : '';
+
+    // Build narrative
+    var narrative = 'Assessing the ' + householdCount.toLocaleString() + ' households our Healthy Essentials Pantry has served' +
+        geoDesc + ' from ' + fromDisplay + ' to ' + toDisplay + ', ' +
+        belowThresholdPct + '% of the households served had an annual income of ' + thresholdFormatted + ' or less. ' +
+        (incomeLines.length > 0 ? 'Within these households, ' + incomeLines.join(', ') + '. ' : '') +
+        'We positively impacted the lives of ' + totalChildren.toLocaleString() + ' children, ' +
+        totalAdults.toLocaleString() + ' adults, and ' + totalSeniors.toLocaleString() + ' seniors with ' +
+        totalProductsDistributed.toLocaleString() + ' hygiene products. ' +
+        'We believe each item represents not just cleanliness, but a step toward restoring dignity and promoting health.';
+
+    // Create a Google Doc with the narrative
+    var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    var reportName = 'Grant_Summary_' + fromFormatted + '_to_' + toFormatted;
+    var doc = DocumentApp.create(reportName);
+    var body = doc.getBody();
+
+    body.appendParagraph('Giving to the Nations').setHeading(DocumentApp.ParagraphHeading.HEADING1);
+    body.appendParagraph('Grant Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    body.appendParagraph('Report Period: ' + fromDisplay + ' to ' + toDisplay);
+    if (geoFilter) body.appendParagraph('Filter: ' + geoFilter);
+    body.appendParagraph('Income Threshold: ' + thresholdFormatted + ' or less (from ' + selectedIncomeLevel + ')');
+    body.appendParagraph('');
+    body.appendParagraph(narrative);
+    body.appendParagraph('');
+
+    body.appendParagraph('Summary Data').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    var table = body.appendTable();
+    var headerRow = table.appendTableRow();
+    headerRow.appendTableCell('Metric').setBackgroundColor('#4a86e8');
+    headerRow.appendTableCell('Value').setBackgroundColor('#4a86e8');
+
+    var metrics = [
+        ['Households Served', householdCount.toLocaleString()],
+        ['Total Requests', totalCount.toLocaleString()],
+        ['Households at or Below ' + thresholdFormatted, belowThresholdCount.toLocaleString() + ' (' + belowThresholdPct + '%)'],
+        ['Children', totalChildren.toLocaleString()],
+        ['Children Under 2', (totalChildren2Under || 0).toLocaleString()],
+        ['Adults', totalAdults.toLocaleString()],
+        ['Seniors', totalSeniors.toLocaleString()],
+        ['Products Distributed', totalProductsDistributed.toLocaleString()]
+    ];
+
+    for (var m = 0; m < metrics.length; m++) {
+        var dataRow = table.appendTableRow();
+        dataRow.appendTableCell(metrics[m][0]);
+        dataRow.appendTableCell(metrics[m][1]);
+    }
+
+    body.appendParagraph('');
+    body.appendParagraph('Income Level Breakdown (threshold: ' + thresholdFormatted + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    var incTable = body.appendTable();
+    var incHeader = incTable.appendTableRow();
+    incHeader.appendTableCell('Income Level').setBackgroundColor('#4a86e8');
+    incHeader.appendTableCell('Count').setBackgroundColor('#4a86e8');
+    incHeader.appendTableCell('% of All').setBackgroundColor('#4a86e8');
+    incHeader.appendTableCell('% of Below Threshold').setBackgroundColor('#4a86e8');
+
+    for (var j2 = 0; j2 < incomeArr.length; j2++) {
+        var pctAll = totalIncomeRecords > 0 ? Math.round((incomeArr[j2].count / totalIncomeRecords) * 100) : 0;
+        var pctBelow = (incomeArr[j2].isBelow && belowThresholdCount > 0)
+            ? Math.round((incomeArr[j2].count / belowThresholdCount) * 100) + '%' : '';
+        var iRow = incTable.appendTableRow();
+        iRow.appendTableCell(incomeArr[j2].level);
+        iRow.appendTableCell(incomeArr[j2].count.toString());
+        iRow.appendTableCell(pctAll + '%');
+        iRow.appendTableCell(pctBelow);
+    }
+
+    doc.saveAndClose();
+    moveToFolder(doc.getId(), CONFIG.GRANTS_FOLDER_ID);
+
+    logAudit('GRANTS_REPORT', null, 'Generated Grant Summary report: ' +
+        fromDisplay + ' to ' + toDisplay + geoDesc + ' (' + householdCount + ' households)');
+
+    var reportUrl = doc.getUrl();
+    var downloadUrl = 'https://docs.google.com/document/d/' + doc.getId() + '/export?format=docx';
+
+    return {
+        success: true,
+        message: 'Grant Summary generated for ' + householdCount + ' households',
+        narrative: narrative,
+        recordCount: totalCount,
+        reportUrl: reportUrl,
+        downloadUrl: downloadUrl,
+        reportId: doc.getId()
+    };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REPORT BUILDER DATA SOURCE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns fully-computed {headers, rows} for a named grant report without
+ * writing any spreadsheet. Exposes the same data pipeline (age brackets,
+ * products, applicant type, dynamic income/funding columns) that the real
+ * reports use, so Report Builder can work from identical source data.
+ *
+ * Supported reportName (case-insensitive):
+ *   'Households', 'Distribution Stats', 'Open Requests',
+ *   'Request Frequency', 'Testimonials'
+ *
+ * v4.7 - New function.
+ * @param {string} reportName
+ * @param {string} fromDateStr  YYYY-MM-DD
+ * @param {string} toDateStr    YYYY-MM-DD
+ * @returns {Object} { success, headers, rows, recordCount, reportName, error }
+ */
+function getGrantReportData(reportName, fromDateStr, toDateStr) {
+    try {
+        if (!fromDateStr || !toDateStr)
+            return { success: false, error: 'From Date and To Date are required.' };
+        var fromDate = parseDateInput(fromDateStr, false);
+        var toDate = parseDateInput(toDateStr, true);
+        var name = (reportName || '').toString().trim().toLowerCase();
+
+        // ── Helper: column index map shared by Households + Distribution Stats ──
+        function buildColIdx(headers) {
+            return {
+                id: headers.indexOf(resolveAMField_('ID')),
+                requestDate: headers.indexOf(resolveAMField_('Request Date')),
+                firstName: headers.indexOf(resolveAMField_('First Name')),
+                lastName: headers.indexOf(resolveAMField_('Last Name')),
+                city: headers.indexOf(resolveAMField_('City')),
+                state: headers.indexOf(resolveAMField_('State')),
+                zipCode: headers.indexOf(resolveAMField_('Zip Code')),
+                county: headers.indexOf(resolveAMField_('County')),
+                requestType: headers.indexOf(resolveAMField_('Request Type')),
+                serviceStatus: headers.indexOf(resolveAMField_('Service Status')),
+                fundingCode: headers.indexOf(resolveAMField_('Funding Code')),
+                militaryStatus: headers.indexOf(resolveAMField_('Military Status')),
+                race: headers.indexOf(resolveAMField_('Please Select Your Racial Category')),
+                ethnicity: headers.indexOf(resolveAMField_('Please Select Your Ethnic Category')),
+                homeless: headers.indexOf(resolveAMField_('Are you currently homeless?')),
+                employed: headers.indexOf(resolveAMField_('Are you currently employed?')),
+                incomeLevel: headers.indexOf(resolveAMField_(COL_INCOME)),
+                assistance: headers.indexOf(resolveAMField_(COL_ASSISTANCE)),
+                usedBefore: headers.indexOf(resolveAMField_(COL_USED_BEFORE)),
+                babyBox: headers.indexOf(resolveAMField_(COL_BABY_BOX)),
+                productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
+                productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
+                productCode3: headers.indexOf(resolveAMField_('Received Product Code 3')),
+                finalServiceDate: headers.indexOf(resolveAMField_('Final Service Contact Date'))
+            };
         }
 
-        // Date range description
-        var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM yyyy');
-        var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM yyyy');
-
-        // Geographic filter description
-        var geoFilter = '';
-        if (filterCounty && filterCounty.trim() !== '') geoFilter += filterCounty.trim();
-        if (filterCity && filterCity.trim() !== '') geoFilter += (geoFilter ? ', ' : '') + filterCity.trim();
-        if (filterZip && filterZip.trim() !== '') geoFilter += (geoFilter ? ', Zip ' : 'Zip ') + filterZip.trim();
-        var geoDesc = geoFilter ? ' in ' + geoFilter : '';
-
-        // Build narrative
-        var narrative = 'Assessing the ' + householdCount.toLocaleString() + ' households our Healthy Essentials Pantry has served' +
-            geoDesc + ' from ' + fromDisplay + ' to ' + toDisplay + ', ' +
-            belowThresholdPct + '% of the households served had an annual income of ' + thresholdFormatted + ' or less. ' +
-            (incomeLines.length > 0 ? 'Within these households, ' + incomeLines.join(', ') + '. ' : '') +
-            'We positively impacted the lives of ' + totalChildren.toLocaleString() + ' children, ' +
-            totalAdults.toLocaleString() + ' adults, and ' + totalSeniors.toLocaleString() + ' seniors with ' +
-            totalProductsDistributed.toLocaleString() + ' hygiene products. ' +
-            'We believe each item represents not just cleanliness, but a step toward restoring dignity and promoting health.';
-
-        // Create a Google Doc with the narrative
-        var fromFormatted = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-        var toFormatted = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-        var reportName = 'Grant_Summary_' + fromFormatted + '_to_' + toFormatted;
-        var doc = DocumentApp.create(reportName);
-        var body = doc.getBody();
-
-        body.appendParagraph('Giving to the Nations').setHeading(DocumentApp.ParagraphHeading.HEADING1);
-        body.appendParagraph('Grant Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
-        body.appendParagraph('Report Period: ' + fromDisplay + ' to ' + toDisplay);
-        if (geoFilter) body.appendParagraph('Filter: ' + geoFilter);
-        body.appendParagraph('Income Threshold: ' + thresholdFormatted + ' or less (from ' + selectedIncomeLevel + ')');
-        body.appendParagraph('');
-        body.appendParagraph(narrative);
-        body.appendParagraph('');
-
-        body.appendParagraph('Summary Data').setHeading(DocumentApp.ParagraphHeading.HEADING3);
-        var table = body.appendTable();
-        var headerRow = table.appendTableRow();
-        headerRow.appendTableCell('Metric').setBackgroundColor('#4a86e8');
-        headerRow.appendTableCell('Value').setBackgroundColor('#4a86e8');
-
-        var metrics = [
-            ['Households Served', householdCount.toLocaleString()],
-            ['Total Requests', totalCount.toLocaleString()],
-            ['Households at or Below ' + thresholdFormatted, belowThresholdCount.toLocaleString() + ' (' + belowThresholdPct + '%)'],
-            ['Children', totalChildren.toLocaleString()],
-            ['Adults', totalAdults.toLocaleString()],
-            ['Seniors', totalSeniors.toLocaleString()],
-            ['Products Distributed', totalProductsDistributed.toLocaleString()]
-        ];
-
-        for (var m = 0; m < metrics.length; m++) {
-            var dataRow = table.appendTableRow();
-            dataRow.appendTableCell(metrics[m][0]);
-            dataRow.appendTableCell(metrics[m][1]);
+        // ── Helper: build records array shared by Households + Dist Stats ──
+        function buildRecords(headers, rows, colIdx, productData) {
+            var records = [];
+            for (var i = 0; i < rows.length; i++) {
+                var row = rows[i];
+                var reqDate = new Date(row[colIdx.requestDate]);
+                if (isNaN(reqDate.getTime())) continue;
+                var ages = calculateDetailedAgeBrackets(headers, row);
+                var recId = getStr(row, colIdx.id);
+                var products = calculateProductCounts(recId,
+                    getStr(row, colIdx.productCode1), getStr(row, colIdx.productCode2),
+                    getStr(row, colIdx.productCode3), reqDate, productData, headers, row);
+                var rawAssist = getStr(row, colIdx.assistance);
+                var assistArr = rawAssist
+                    ? rawAssist.split(', ').map(function (s) { return s.trim(); }).filter(Boolean)
+                    : [];
+                var finalDate = '';
+                if (colIdx.finalServiceDate !== -1 && row[colIdx.finalServiceDate]) {
+                    var fd = new Date(row[colIdx.finalServiceDate]);
+                    if (!isNaN(fd.getTime()))
+                        finalDate = Utilities.formatDate(fd, CONFIG.TIMEZONE, 'M/d/yyyy');
+                }
+                records.push({
+                    quarter: getQuarter(reqDate.getMonth()), year: reqDate.getFullYear(),
+                    month: getMonthName(reqDate.getMonth()), monthNum: reqDate.getMonth(),
+                    day: reqDate.getDate(),
+                    id: recId,
+                    firstName: getStr(row, colIdx.firstName),
+                    lastName: getStr(row, colIdx.lastName),
+                    city: getStr(row, colIdx.city), state: getStr(row, colIdx.state),
+                    zip: getStr(row, colIdx.zipCode), county: getStr(row, colIdx.county),
+                    applicantType: getApplicantType(getStr(row, colIdx.usedBefore)),
+                    requestType: getStr(row, colIdx.requestType),
+                    serviceStatus: getStr(row, colIdx.serviceStatus),
+                    fundingCode: getStr(row, colIdx.fundingCode),
+                    militaryStatus: getStr(row, colIdx.militaryStatus),
+                    race: getStr(row, colIdx.race),
+                    ethnicity: getStr(row, colIdx.ethnicity),
+                    homeless: getStr(row, colIdx.homeless),
+                    employed: getStr(row, colIdx.employed),
+                    incomeLevel: getStr(row, colIdx.incomeLevel),
+                    rawAssistance: assistArr,
+                    finalServiceDate: finalDate,
+                    productsRequested: products.productsRequested,
+                    productsDistributed: products.productsDistributed,
+                    babyRequested: products.babyRequested,
+                    babyDistributed: products.babyDistributed,
+                    children2Under: (getStr(row, colIdx.babyBox).toUpperCase() === 'X') ? 1 : 0,
+                    ages: ages
+                });
+            }
+            return records;
         }
 
-        body.appendParagraph('');
-        body.appendParagraph('Income Level Breakdown (threshold: ' + thresholdFormatted + ')').setHeading(DocumentApp.ParagraphHeading.HEADING3);
-        var incTable = body.appendTable();
-        var incHeader = incTable.appendTableRow();
-        incHeader.appendTableCell('Income Level').setBackgroundColor('#4a86e8');
-        incHeader.appendTableCell('Count').setBackgroundColor('#4a86e8');
-        incHeader.appendTableCell('% of All').setBackgroundColor('#4a86e8');
-        incHeader.appendTableCell('% of Below Threshold').setBackgroundColor('#4a86e8');
-
-        for (var j = 0; j < incomeArr.length; j++) {
-            var pctAll = totalIncomeRecords > 0 ? Math.round((incomeArr[j].count / totalIncomeRecords) * 100) : 0;
-            var pctBelow = (incomeArr[j].isBelow && belowThresholdCount > 0)
-                ? Math.round((incomeArr[j].count / belowThresholdCount) * 100) + '%' : '';
-            var iRow = incTable.appendTableRow();
-            iRow.appendTableCell(incomeArr[j].level);
-            iRow.appendTableCell(incomeArr[j].count.toString());
-            iRow.appendTableCell(pctAll + '%');
-            iRow.appendTableCell(pctBelow);
+        // ── Households ────────────────────────────────────────────────────────
+        if (name === 'households' || name === 'household') {
+            var c1 = getCombinedData(fromDate, toDate,
+                [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+            if (c1.totalCount === 0) return { success: false, error: 'No Picked Up/Delivered records found.' };
+            var ci1 = buildColIdx(c1.headers);
+            var pd1 = loadProductLookupData(fromDate, toDate);
+            var recs1 = buildRecords(c1.headers, c1.rows, ci1, pd1);
+            var sc1 = _getColsWithFallback_('Households').filter(function (c) {
+                return c.key !== COL_ASSISTANCE && c.key !== 'Funding Code';
+            });
+            var dyn1 = _getDynamicGrantCols_();
+            var built1 = _buildGrantRowsWithDynamic_(recs1, sc1, dyn1.incomeSources, dyn1.fundingCodes);
+            return {
+                success: true, headers: built1.headers, rows: built1.rows,
+                recordCount: recs1.length, reportName: 'Households'
+            };
         }
 
-        doc.saveAndClose();
-        moveToFolder(doc.getId(), CONFIG.GRANTS_FOLDER_ID);
+        // ── Distribution Stats ────────────────────────────────────────────────
+        if (name === 'distribution stats' || name === 'distributionstats' ||
+            name === 'distribution statistics' || name === 'dist stats') {
+            var c2 = getCombinedData(fromDate, toDate,
+                [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+            if (c2.totalCount === 0) return { success: false, error: 'No Picked Up/Delivered records found.' };
+            var ci2 = buildColIdx(c2.headers);
+            var pd2 = loadProductLookupData(fromDate, toDate);
+            var recs2 = buildRecords(c2.headers, c2.rows, ci2, pd2);
+            var sc2 = _getColsWithFallback_('Distribution Stats').filter(function (c) {
+                return c.key !== COL_ASSISTANCE && c.key !== 'Funding Code';
+            });
+            var dyn2 = _getDynamicGrantCols_();
+            var built2 = _buildGrantRowsWithDynamic_(recs2, sc2, dyn2.incomeSources, dyn2.fundingCodes);
+            return {
+                success: true, headers: built2.headers, rows: built2.rows,
+                recordCount: recs2.length, reportName: 'Distribution Stats'
+            };
+        }
 
-        logAudit('GRANTS_REPORT', null, 'Generated Grant Summary report: ' +
-            fromDisplay + ' to ' + toDisplay + geoDesc + ' (' + householdCount + ' households)');
+        // ── Open Requests ─────────────────────────────────────────────────────
+        if (name === 'open requests' || name === 'openrequests' || name === 'open') {
+            var c3 = getCombinedData(fromDate, toDate, []);
+            if (c3.totalCount === 0) return { success: false, error: 'No records found.' };
+            var colStatus3 = c3.headers.indexOf(resolveAMField_('Service Status'));
+            var rows3 = colStatus3 !== -1
+                ? c3.rows.filter(function (r) {
+                    var s = (r[colStatus3] || '').toString().trim().toLowerCase();
+                    return s === '' || s === 'open';
+                })
+                : c3.rows;
+            var cols3 = _getColsWithFallback_('Open Requests');
+            var built3 = _buildGrantRows_(
+                rows3.map(function (row) {
+                    var reqDate = new Date(row[c3.headers.indexOf(resolveAMField_('Request Date'))]);
+                    return {
+                        quarter: getQuarter(reqDate.getMonth()), year: reqDate.getFullYear(),
+                        month: getMonthName(reqDate.getMonth()), monthNum: reqDate.getMonth(),
+                        day: reqDate.getDate(),
+                        city: getStr(row, c3.headers.indexOf(resolveAMField_('City'))),
+                        state: getStr(row, c3.headers.indexOf(resolveAMField_('State'))),
+                        zip: getStr(row, c3.headers.indexOf(resolveAMField_('Zip Code'))),
+                        county: getStr(row, c3.headers.indexOf(resolveAMField_('County'))),
+                        incomeLevel: getStr(row, c3.headers.indexOf(resolveAMField_(COL_INCOME))),
+                        applicantType: getApplicantType(getStr(row, c3.headers.indexOf(resolveAMField_(COL_USED_BEFORE)))),
+                        requestType: getStr(row, c3.headers.indexOf(resolveAMField_('Request Type'))),
+                        serviceStatus: getStr(row, c3.headers.indexOf(resolveAMField_('Service Status'))),
+                        firstName: getStr(row, c3.headers.indexOf(resolveAMField_('First Name'))),
+                        lastName: getStr(row, c3.headers.indexOf(resolveAMField_('Last Name'))),
+                        children2Under: '',
+                        id: getStr(row, c3.headers.indexOf(resolveAMField_('ID')))
+                    };
+                }),
+                cols3
+            );
+            var builtHeaders3 = cols3.map(function (c) { return c.label || c.key; });
+            return {
+                success: true, headers: builtHeaders3, rows: built3,
+                recordCount: rows3.length, reportName: 'Open Requests'
+            };
+        }
 
-        var reportUrl = doc.getUrl();
-        var downloadUrl = 'https://docs.google.com/document/d/' + doc.getId() + '/export?format=docx';
+        // ── Request Frequency ─────────────────────────────────────────────────
+        if (name === 'request frequency' || name === 'requestfrequency' || name === 'frequency') {
+            var c4 = getCombinedData(fromDate, toDate,
+                [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+            if (c4.totalCount === 0) return { success: false, error: 'No records found.' };
+            var h4 = c4.headers;
+            var colRD4 = h4.indexOf(resolveAMField_('Request Date'));
+            var colFN4 = h4.indexOf(resolveAMField_('First Name'));
+            var colLN4 = h4.indexOf(resolveAMField_('Last Name'));
+            var colCy4 = h4.indexOf(resolveAMField_('City'));
+            var colCo4 = h4.indexOf(resolveAMField_('County'));
+            var colSt4 = h4.indexOf(resolveAMField_('State'));
+            var colZp4 = h4.indexOf(resolveAMField_('Zip Code'));
+            var colIn4 = h4.indexOf(resolveAMField_(COL_INCOME));
+            var colRt4 = h4.indexOf(resolveAMField_('Request Type'));
+            var colSs4 = h4.indexOf(resolveAMField_('Service Status'));
+            var appMap4 = {};
+            c4.rows.forEach(function (row) {
+                var rd = new Date(row[colRD4]);
+                if (isNaN(rd.getTime())) return;
+                var key = (getStr(row, colFN4) + '|' + getStr(row, colLN4)).toLowerCase();
+                if (!appMap4[key]) appMap4[key] = {
+                    firstName: getStr(row, colFN4), lastName: getStr(row, colLN4),
+                    city: getStr(row, colCy4), county: getStr(row, colCo4),
+                    state: getStr(row, colSt4), zip: getStr(row, colZp4),
+                    incomeLevel: getStr(row, colIn4),
+                    requestType: getStr(row, colRt4), serviceStatus: getStr(row, colSs4),
+                    dates: []
+                };
+                appMap4[key].dates.push(rd.getTime());
+            });
+            var freqHdrs = ['First Name', 'Last Name', 'City', 'County', 'State', 'Zip Code',
+                'Income Level', 'Request Type', 'Service Status',
+                'Number of Requests', 'Avg Frequency Days'];
+            var freqRows = [];
+            for (var k4 in appMap4) {
+                var ap = appMap4[k4];
+                ap.dates.sort(function (a, b) { return a - b; });
+                var avgDays = '';
+                if (ap.dates.length > 1) {
+                    var tot = 0;
+                    for (var d = 1; d < ap.dates.length; d++)
+                        tot += Math.round((ap.dates[d] - ap.dates[d - 1]) / 86400000);
+                    avgDays = Math.round(tot / (ap.dates.length - 1));
+                }
+                freqRows.push([ap.firstName, ap.lastName, ap.city, ap.county, ap.state, ap.zip,
+                ap.incomeLevel, ap.requestType, ap.serviceStatus,
+                ap.dates.length, avgDays]);
+            }
+            return {
+                success: true, headers: freqHdrs, rows: freqRows,
+                recordCount: freqRows.length, reportName: 'Request Frequency'
+            };
+        }
+
+        // ── Testimonials ──────────────────────────────────────────────────────
+        if (name === 'testimonials' || name === 'testimonial') {
+            var c5 = getCombinedData(fromDate, toDate,
+                [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+            if (c5.totalCount === 0) return { success: false, error: 'No records found.' };
+            var colH1 = c5.headers.indexOf(resolveAMField_(COL_HELP_1));
+            var rows5 = colH1 !== -1
+                ? c5.rows.filter(function (r) { return (r[colH1] || '').toString().trim() !== ''; })
+                : c5.rows;
+            var cols5 = _getColsWithFallback_('Testimonials');
+            var colIdx5 = {
+                requestDate: c5.headers.indexOf(resolveAMField_('Request Date')),
+                city: c5.headers.indexOf(resolveAMField_('City')),
+                state: c5.headers.indexOf(resolveAMField_('State')),
+                zipCode: c5.headers.indexOf(resolveAMField_('Zip Code')),
+                county: c5.headers.indexOf(resolveAMField_('County')),
+                incomeLevel: c5.headers.indexOf(resolveAMField_(COL_INCOME)),
+                usedBefore: c5.headers.indexOf(resolveAMField_(COL_USED_BEFORE)),
+                requestType: c5.headers.indexOf(resolveAMField_('Request Type')),
+                serviceStatus: c5.headers.indexOf(resolveAMField_('Service Status')),
+                emergency: c5.headers.indexOf(resolveAMField_(COL_EMERGENCY)),
+                situation: c5.headers.indexOf(resolveAMField_(COL_SITUATION)),
+                help1: c5.headers.indexOf(resolveAMField_(COL_HELP_1)),
+                help2: c5.headers.indexOf(resolveAMField_(COL_HELP_2)),
+                permission: c5.headers.indexOf(resolveAMField_(COL_PERMISSION))
+            };
+            var recs5 = rows5.map(function (row) {
+                var rd = new Date(row[colIdx5.requestDate]);
+                return {
+                    quarter: getQuarter(rd.getMonth()), year: rd.getFullYear(),
+                    month: getMonthName(rd.getMonth()), monthNum: rd.getMonth(), day: rd.getDate(),
+                    city: getStr(row, colIdx5.city), state: getStr(row, colIdx5.state),
+                    zip: getStr(row, colIdx5.zipCode), county: getStr(row, colIdx5.county),
+                    incomeLevel: getStr(row, colIdx5.incomeLevel),
+                    applicantType: getApplicantType(getStr(row, colIdx5.usedBefore)),
+                    requestType: getStr(row, colIdx5.requestType),
+                    serviceStatus: getStr(row, colIdx5.serviceStatus),
+                    emergency: getStr(row, colIdx5.emergency),
+                    situation: getStr(row, colIdx5.situation),
+                    help1: getStr(row, colIdx5.help1),
+                    help2: getStr(row, colIdx5.help2),
+                    permission: getStr(row, colIdx5.permission)
+                };
+            });
+            var builtRows5 = _buildGrantRows_(recs5, cols5);
+            var builtHdrs5 = cols5.map(function (c) { return c.label || c.key; });
+            return {
+                success: true, headers: builtHdrs5, rows: builtRows5,
+                recordCount: recs5.length, reportName: 'Testimonials'
+            };
+        }
 
         return {
-            success: true,
-            message: 'Grant Summary generated for ' + householdCount + ' households',
-            narrative: narrative,
-            recordCount: totalCount,
-            reportUrl: reportUrl,
-            downloadUrl: downloadUrl,
-            reportId: doc.getId()
+            success: false, error: 'Unknown report: "' + reportName +
+                '". Valid: Households, Distribution Stats, Open Requests, Request Frequency, Testimonials.'
         };
+
+    } catch (e) {
+        Logger.log('getGrantReportData error: ' + e.message);
+        return { success: false, error: 'Failed: ' + e.message };
     }
 }
