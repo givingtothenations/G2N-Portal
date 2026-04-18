@@ -25,19 +25,6 @@
         2 - Saved to AM as unformatted 10-digit string
   v3.7 - Updated public confirmation message to reflect 2-3 week processing time
          and reference 'Best Contact' field from Intake Form
-  v3.8 - Signature Date: public users see read-only field locked to today's date.
-         Staff/event mode users may freely edit the date (existing behaviour).
-  v3.9 - Staff mode post-submit: sends postMessage {type:'newRecord', recordId,
-         requestDate} to window.opener (SV) then calls window.close() so SV can
-         receive the new ID and show the product prompt without navigating away.
-         cancelForm(): calls window.close() instead of navigating back to portal.
-  v3.10- cancelForm() and post-submit staff fallback: removed GAS URL navigation
-         which caused "You need access" auth error. window.close() always tried
-         first; if blocked, shows "Please close this window" message inline.
-  v3.12- Staff mode autofill fix: added autocomplete="off" to email and phone
-         fields. Added 300ms delayed clear of email and phone on staff mode load
-         to override browser autofill which fires after DOMContentLoaded and
-         populates those fields with the staff member's own contact info.
 -->
 
 <!DOCTYPE html>
@@ -809,7 +796,6 @@
         let webAppUrl = '';
         let staffCode = '';  // v3.11: staff member's code, passed from SV via URL param
 
-        // v3.4: Address verification state
         let addressVerified = false;   // true after successful verification
         let addrFailCount = 0;         // count of failed verification attempts
         let addrBypassed = false;      // true when bypassed after 2 failures
@@ -824,7 +810,6 @@
 
             isStaffMode = (serverMode === 'staff');
 
-            // v3.11: Read staffCode from URL param (set by SV's openIntakeForm())
             try {
                 var urlParams = new URLSearchParams(window.location.search);
                 staffCode = urlParams.get('staffCode') || '';
@@ -840,10 +825,8 @@
                 currentEventInfo = { isActive: false };
                 loadLookups();
 
-                // v3.5: Log staff intake session
                 logIntakeSessionToAudit('staff');
 
-                // v3.12: Clear email and phone after a short delay to override browser
                 // autofill which fires after DOMContentLoaded and populates these fields
                 // with the staff member's own contact info instead of the applicant's.
                 setTimeout(function () {
@@ -858,9 +841,7 @@
             }
             setDefaultDate();
 
-            // v3.4: Listen for changes on address fields to reset verification
             initAddrFieldListeners();
-            // v3.4: Auto-trigger verification when clicking fields after County
             initAutoVerifyListeners();
         });
 
@@ -942,11 +923,9 @@
                     } else {
                         document.getElementById('outdoorEvent').value = 'No';
                     }
-                    // v3.8: Re-apply after isEventMode is known
                     setDefaultDate();
                     loadLookups();
 
-                    // v3.5: Log public/event intake session
                     logIntakeSessionToAudit(isEventMode ? 'event' : 'public');
                 })
                 .withFailureHandler(function (error) {
@@ -955,7 +934,6 @@
                     setDefaultDate();
                     loadLookups();
 
-                    // v3.5: Log public intake session (event check failed)
                     logIntakeSessionToAudit('public');
                 })
                 .getEventInfo();
@@ -1084,7 +1062,6 @@
             submitForm();
         });
 
-        // v3.6: Real-time phone formatting - displays as (xxx) xxx-xxxx, validates 10 digits
         document.getElementById('phoneNumber').addEventListener('input', function (e) {
             const digits = e.target.value.replace(/\D/g, '').substring(0, 10);
             let formatted = digits;
@@ -1135,7 +1112,6 @@
         });
 
         // ============================================================
-        // v3.4: ADDRESS VERIFICATION FUNCTIONS
         // ============================================================
 
         /**
@@ -1487,7 +1463,6 @@
                 }
             }
 
-            // v3.4: Check address verification gate
             if (!isAddressVerificationSatisfied()) {
                 submitMessage.textContent = 'Please verify your address before submitting. Click the "Verify Address" button in Section 2.';
                 submitMessage.className = 'alert alert-error';
@@ -1518,12 +1493,10 @@
                 }
             });
 
-            // v3.6: Strip phone formatting - save only 10 digits to AM
             if (formData['phoneNumber']) {
                 formData['phoneNumber'] = formData['phoneNumber'].replace(/\D/g, '');
             }
 
-            // v3.11: In staff mode, set Entered By to the staff member's code
             if (isStaffMode && staffCode) {
                 formData['enteredBy'] = staffCode;
             }
@@ -1536,7 +1509,6 @@
                 formData['formDate'] = sigDate;
             }
 
-            // v3.5: Save address verification result to AM
             if (addrConfidence) {
                 formData['addressValidity'] = addrConfidence;
             } else if (isStaffMode || (typeof currentEventInfo !== 'undefined' && currentEventInfo && currentEventInfo.isActive)) {
@@ -1547,10 +1519,8 @@
                 .withSuccessHandler(function (result) {
                     if (result.success) {
                         if (isStaffMode) {
-                            // v3.9: Notify SV (opener) of the new record ID via postMessage,
                             // then close this tab. SV listens for {type:'newRecord'} and shows
                             // the product prompt without navigating away.
-                            // v3.10: If close is blocked, show message — never navigate to GAS URL.
                             var sigDate = document.getElementById('signatureDate').value || '';
                             if (window.opener && !window.opener.closed) {
                                 window.opener.postMessage({

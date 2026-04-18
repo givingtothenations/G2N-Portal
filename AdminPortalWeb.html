@@ -25,135 +25,6 @@
   v4.2 - Pickup times auto-populated from LU_DistribCodes Times column (not per-code).
          Removed checkbox approach. Box 1/Box 2 header fallbacks.
   v4.3 - Fixed pickup times source: LU_DistribCodes (not LU_SchedDisbCodes)
-  v4.4 - Pickup times fetched per-code from LU_DistribCodes (extracted distrib
-         code from SchedDisbCode). Spinner on code selection until preview loads.
-         Date Picked Up uses calendar date picker in editable distribution grid.
-  v4.5 - Added Box 3 column to Add Scheduled Distributions tab
-  v5.0 - Phase 5: Staff Code forced uppercase (5.1), Role dropdown (5.2),
-         Show Inactive button (5.3), Login Report saves to Google Sheet
-         with Open/Download links (5.4/5.5), Archive file deletion 3 months
-         excluding Distribution (5.6), Archive Health Check (5.7),
-         Multi-archive rollover by year (5.8).
-  v5.1 - Phase 5 fix: Rollover redesigned — auto-splits by year from Request Date,
-         preview shows year breakdown with AM/Product counts before executing.
-         Removed manual yearLabel input. Existing year workbooks appended to.
-  v5.2 - Auto-rollover at 85% capacity after manual archive execution.
-         Email column added to Staff/Volunteer management table.
-         Archive completion message shows auto-rollover results if triggered.
-  v5.3 - Phase 6: AI Reports tab — Anthropic Claude API integration for
-         grant narrative generation, data trend analysis, testimonial
-         summarization, and executive summaries. API key stored in Script
-         Properties. Google Doc and Google Sheet output formats.
-         Custom instructions support for tailored AI prompts.
-  v5.4 - Phase 6: Custom Data Sheet — field picker with grouped AM columns,
-         free-text prompt mode, combined mode. Claude structures/computes/
-         groups raw data into formatted Google Sheets with summaries.
-  v5.5 - Phase 6: Income Bracket Range dropdown for Custom Data Sheets.
-         Computed Summaries group (Households, Requests, Age Bracket Totals).
-         Income Source (Expanded) and Income Bracket computed fields.
-         Pass incomeBracketRange to backend.
-  v5.6 - Grants Reports restructure: Removed Funding Sources, Income Levels,
-         Income Sources, Collaboration Source reports. Updated column sets and
-         sort orders for Applicants Open Requests, Households, Request Frequency,
-         Testimonials, Distribution Stats. Added Grant Summary narrative report
-         with County/City/Zip filters (outputs Google Doc). Updated product
-         calculation logic for 3 product codes with DR/PF routing.
-  v5.7 - Grants Reports fixes: Removed Report Totals from Applicants Open Requests,
-         Request Frequency, Households, Distribution Stats. Open Requests Number of
-         Households always 1. Grant Summary: Income Level dropdown from LU_IncomeLevels
-         (default $30,000 - $39,999), dynamic threshold with below-threshold %
-         breakdowns. County/City/Zip support comma-separated multi-values.
-  v5.9 - Distribution Reports preview: withFailureHandler now displays the error
-  v5.10 - Desktop-first layout: container widened to 1280px, body padding increased.
-          Added .field-row-3 and .field-row-4 grid classes. Nav tabs use nowrap
-          with overflow-x:auto. Removed mobile-only media query; replaced with
-          proper responsive breakpoints at 1024px / 768px / 480px.
-         message so users see what failed instead of a silent no-show.
-  v6.0 - Manage System tab: generic LU editor for 17 unmanaged lookup/data sheets.
-         Calls getLookupRecords() and saveLookupRecords() (LookupService v4.7).
-         Supports all CONFIG.LOOKUPS keys + DISTRIBUTED_PRODUCTS from G2N_Data.
-  v6.1 - Two-level nav: main tabs (Distribution, Reports, Maintain System) each with
-         sub-tab bars. Maintain System sub-tabs include Add Event, Staff, Archive plus
-         one direct sub-tab per LU sheet (no dropdown). showMainTab/showSubTab/showLuTab
-         replace flat showTab(). SV v4.1: Received Product Code 1/2/3 onchange opens PP.
-  v6.2 - Maintain System sub-nav restructured to 3 sub-tabs: Add Event Information,
-         Archive, Manage Dropdowns. Manage Dropdowns restores dropdown selector and
-         adds Staff/Volunteers as first option (routes to dedicated editStaffTab editor).
-         All other selections use generic LU editor. Removed showLuTab(); added
-         handleDropdownSelect(). showSubTab('manageSystem') resets dropdown on entry.
-  v6.3 - handleDropdownSelect('STAFF') now navigates directly to editStaffTab instead
-         of broken DOM clone. Removed Refresh/Show Inactive buttons from editStaffTab.
-  v6.4 - Saved AI Report Templates: after a Custom Data Sheet run, a "Save as Template"
-         panel appears. Saved templates appear in a "Saved Templates" optgroup in the
-         AI Report Type dropdown and run via runSavedDataSheetReport() (zero API tokens).
-         loadSavedReports() populates the optgroup on AI tab open. handleAIReportResult()
-         captures savedSpec/savedFields/savedPrompt/savedBracket from result.
-         generateAIReport() routes saved__ prefixed types to runSavedDataSheetReport.
-  v6.5 - saveAndProcessDistribution: spinner overlay shown throughout save+process
-         cycle with phase text updates. spinnerText id added to spinner <p> element.
-         Partial log rendered on failure. Spinner hidden on all exit paths.
-  v6.6 - saveDistributionEdits / saveAndProcessDistribution: distribCode
-         now passed as third arg to saveDistributionReportEdits so the
-         server can sync AM Scheduled Box Code 3 when Extra Box is edited.
-  v6.7 - Manage Dropdowns: added LU_FieldMap editor (FIELD_MAP key).
-         buildLookupRow extended with isBooleanColumn()/isBooleanChecked()
-         helpers — Searchable/Required/Editable/Nullable render as checkboxes
-         (Y/blank) in addition to Active (TRUE/FALSE). saveLookupEditor
-         serializes Y/N columns correctly. Context-aware description shown
-         when Field Map is selected.
-  v6.8 - Maintain System: added Edit Applicant sub-tab. Uses searchRecords()
-         for search (single auto-load, multiple via selection list). Renders
-         full AI-style vertical edit form (no required validation). Assistance
-         Receiving is a dropdown. Save returns to search panel with result message.
-         Updated By / Updated Date / Update Applied written via updateIntakeRecord().
-  v6.9 - Schedule Individuals: Open Staff/Volunteer Portal now opens in a new tab
-         (window.open) instead of navigating away — fixes "not authorized" error
-         and makes it accessible without running Process Scheduling Report first.
-         Scheduling Report tab: Beginning ID auto-populated on tab open from
-         LU_LastScheduled (last ApplicantId + 1) via getLastScheduledId().
-         After successful report generation, endId + date appended to
-         LU_LastScheduled via appendLastScheduledId() in ReportService.
-  v7.0 - launchStaffPortal(): popup-blocker fix — synchronous window.open() when
-         URL is known; blank-window-first pattern for async fetch fallback.
-         loadLastScheduledId(): shows "Retrieving Beginning ID..." placeholder
-         while fetching; clears placeholder on success or failure.
-  v7.1 - schedBeginId changed to type="text" so placeholder shows in all browsers.
-         loadLastScheduledId(): field disabled during fetch (not cleared) so
-         generateSchedulingReport() always has a valid value to read.
-         generateSchedulingReport(): trims and parseInt's text field value.
-  v7.2 - Edit Applicant: search now falls through to archive workbooks
-         (SearchService v2.5). Archive results shown with (Archived: source)
-         label in ae_displayResults. ae_loadRecord(): archive banner shown and
-         Save disabled for archived records (read-only display only).
-  v7.3 - loadActiveSchedDisbCodes: codes sorted alphabetically by code value
-         before populating Distribution Reports and Process Distribution dropdowns.
-         showSubTab('addEvent'): ensures a blank row exists on tab entry so
-         the table is never empty on first visit.
-         Manage Dropdowns selector: added SCHED_DISB_CODES and REPORT_COLUMNS entries.
-         handleDropdownSelect nameMap: added SCHED_DISB_CODES and REPORT_COLUMNS.
-  v7.4 - Edit Applicant email field: added autocomplete="off" to prevent browser
-         autofill from populating the applicant's email field with the admin's
-         own email address when creating or editing a record.
-  v7.5 - AI Reports: Report Builder conversational interface. New dropdown option
-         'Report Builder' shows a chat panel — user describes report in plain English,
-         Claude asks clarifying questions and produces a spec, then generates the
-         Google Sheet. Print Chat button prints the full conversation. Spec saved
-         via existing Save as Template flow. onAIReportTypeChange() updated to
-         show/hide builder panel. generateAIReport() guarded against builder type.
-  v7.6 - Report Builder fixes: (1) Cost display — per-request token count and ~$
-         estimate shown after each turn; running cumulative cost shown; View Balance
-         link opens console.anthropic.com/settings/billing. (2) Spec-ready panel
-         now scrolls into view automatically. (3) Sending a new chat message hides
-         the prior report links and spec panel. Print chat now includes cost line.
-  v7.7 - Report Builder: saveAITemplate() was checking aiLastSpec which is only
-         set by the Custom Data Sheet flow — fixed by populating aiLastSpec in
-         generateReportBuilderReport() success handler.
-  v7.8 - Report Builder: generateReportBuilderReport() calls generateFromReportBuilderSpec()
-         directly. Added Find recent reports button and rbFindRecentReports().
-  v7.9 - Report Builder: sendReportBuilderMessage() now shows a ⚠️ warning bubble
-         when spec parse fails (Claude included JSON but it couldn't be extracted).
-         generateReportBuilderReport() shows actionable error message when rbCurrentSpec
-         is null, directing user to type "create the spec".
 -->
 
 <!DOCTYPE html>
@@ -1946,7 +1817,6 @@
         }
 
         function logout() {
-            // v4.0: Show spinner immediately
             document.getElementById('spinnerOverlay').classList.remove('hidden');
 
             google.script.run
@@ -2031,7 +1901,6 @@
             if (tabName === 'scheduling') { loadLastScheduledId(); }
             if ((tabName === 'distribution' || tabName === 'process') && !activeSchedCodesLoaded) { loadActiveSchedDisbCodes(); }
             if (tabName === 'aiReports' && !aiConfigChecked) { aiConfigChecked = true; checkAISetup(); }
-            // v7.3: Ensure Add Event tab always has at least one blank row on entry
             if (tabName === 'addEvent') {
                 var evtBody = document.getElementById('eventTableBody');
                 if (evtBody && evtBody.querySelectorAll('tr').length === 0) { addEventRow(); }
@@ -2521,7 +2390,6 @@
                         showMessage('schedMessage', 'Report generated with ' + result.recordCount + ' records!', 'success');
                         document.getElementById('schedReportUrl').href = result.reportUrl;
                         document.getElementById('schedReportLink').classList.remove('hidden');
-                        // v6.9: Pre-fill Beginning ID for next run (endId + 1)
                         if (result.endId) {
                             document.getElementById('schedBeginId').value = result.endId + 1;
                         }
@@ -2710,7 +2578,6 @@
 
             var distribCode = document.getElementById('processDistribCode').value.trim().toUpperCase();
 
-            // v6.5: Show spinner throughout the full save+process cycle
             document.getElementById('spinnerText').textContent = 'Saving edits...';
             document.getElementById('spinnerOverlay').classList.remove('hidden');
             showMessage('processMessage', 'Saving changes and processing...', 'info');
@@ -2730,7 +2597,6 @@
                         return;
                     }
 
-                    // v6.5: Update spinner text for processing phase
                     document.getElementById('spinnerText').textContent = 'Processing distribution...';
                     document.getElementById('processLog').innerHTML += '<div class="log-entry log-success">Edits saved. Now processing...</div>';
 
@@ -2744,7 +2610,6 @@
                             if (result.success) {
                                 showMessage('processMessage', 'Processing complete! Updated ' + result.updatedCount + ' records.', 'success');
 
-                                // v6.5: Render all log entries including per-ID DR/PF product updates
                                 var logHtml = '';
                                 if (result.log && result.log.length > 0) {
                                     result.log.forEach(function (entry) {
@@ -2876,7 +2741,6 @@
                     activeSchedCodesLoaded = true;
                     activeSchedCodesData = codes || [];
 
-                    // v7.3: Sort alphabetically by code value before populating dropdowns
                     activeSchedCodesData.sort(function (a, b) {
                         return (a.code || '').localeCompare(b.code || '');
                     });
@@ -4310,7 +4174,6 @@
 
                 for (var f = 0; f < group.fields.length; f++) {
                     var field = group.fields[f];
-                    // v1.7: Support both {value,label} objects and plain strings
                     var fieldValue = (typeof field === 'object') ? field.value : field;
                     var fieldLabel = (typeof field === 'object') ? field.label : field;
                     var shortLabel = fieldLabel.length > 50 ? fieldLabel.substring(0, 47) + '...' : fieldLabel;
@@ -4410,7 +4273,6 @@
                 return;
             }
 
-            // v6.4: Saved template — no API call
             if (reportType.indexOf('saved__') === 0) {
                 var reportId = reportType.replace('saved__', '');
                 showMessage('aiMessage', 'Running saved report template... Applying to date range (no API tokens used).', 'info');
@@ -4505,7 +4367,6 @@
                     result.format === 'doc' ? 'Download as Word' : 'Download as Excel';
                 document.getElementById('aiReportLinks').classList.remove('hidden');
 
-                // v6.4: Show Save Template panel only after a live Custom Data Sheet run
                 var savePanel = document.getElementById('aiSaveTemplatePanel');
                 if (result.savedSpec) {
                     aiLastSpec = result.savedSpec;
@@ -4970,7 +4831,6 @@
                 }
             }
 
-            // v6.10: Archive flag — show banner, disable Save for archived records
             var isArchived = !!(rec['_archived']);
             document.getElementById('ae_archiveBanner').classList.toggle('hidden', !isArchived);
             document.getElementById('ae_archiveSourceLabel').textContent = rec['_archiveSource'] || '';

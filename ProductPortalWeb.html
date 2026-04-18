@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   ProductPortalWeb.html
   Product Entry Portal for G2N Request Management System
   Displays product list for a specific record ID + Request Date.
@@ -22,15 +22,6 @@
   v1.5 - returnToStaffPortal(): PP is now always opened via window.open() from SV,
          so window.close() is used after save/cancel to close PP and return to the
          SV tab. Falls back to returnUrl navigation if not opened as child tab.
-  v1.6 - returnToStaffPortal(): removed all GAS URL fallback navigation which
-         caused blank screen / "You need access" auth errors. window.close()
-         always tried first; if blocked shows "Please close this window" message.
-         Success state restyled to match AI staff exit: success-container with
-         checkmark icon, heading, and close-window instruction.
-  v1.7 - DOMContentLoaded: reads recordId/requestDate from URL params as fallback
-         when server template vars are empty. Handles GAS session caching where
-         a cached response body is served without going through doGet() template
-         injection — URL params are always present in the sandbox query string.
 -->
 
 <!DOCTYPE html>
@@ -335,10 +326,22 @@
 
         /* v1.3: Responsive breakpoints */
         @media (max-width: 600px) {
-            body { padding: 10px; }
-            .container { padding: 0; }
-            button { padding: 10px 16px; }
-            .info-bar { flex-direction: column; gap: 8px; }
+            body {
+                padding: 10px;
+            }
+
+            .container {
+                padding: 0;
+            }
+
+            button {
+                padding: 10px 16px;
+            }
+
+            .info-bar {
+                flex-direction: column;
+                gap: 8px;
+            }
         }
     </style>
 </head>
@@ -421,11 +424,10 @@
 
         document.addEventListener('DOMContentLoaded', function () {
             // Parameters injected server-side by Code.gs doGet()
-            recordId    = '<?= serverRecordId ?>'    || '';
+            recordId = '<?= serverRecordId ?>' || '';
             requestDate = '<?= serverRequestDate ?>' || '';
-            returnUrl   = '<?= serverReturnUrl ?>'   || '';
+            returnUrl = '<?= serverReturnUrl ?>' || '';
 
-            // v1.7: Fallback — read params from URL when template vars are empty.
             // This handles the case where GAS serves a cached response (e.g. SV HTML)
             // that didn't go through doGet(), so template vars were never injected.
             // window.location.href inside GAS iframe is the sandbox URL which contains
@@ -433,9 +435,9 @@
             if (!recordId || !requestDate) {
                 try {
                     var urlParams = new URLSearchParams(window.location.search);
-                    recordId    = urlParams.get('recordId')    || recordId;
+                    recordId = urlParams.get('recordId') || recordId;
                     requestDate = urlParams.get('requestDate') || requestDate;
-                    returnUrl   = urlParams.get('returnUrl')   || returnUrl;
+                    returnUrl = urlParams.get('returnUrl') || returnUrl;
                 } catch (e) { /* URLSearchParams not available */ }
             }
 
@@ -474,7 +476,6 @@
             document.getElementById('displayRequestDate').textContent = result.requestDate || requestDate;
 
             var badge = document.getElementById('modeBadge');
-            // v1.2: Handle archived records
             if (result.archived) {
                 badge.textContent = 'Archived (Read-Only)';
                 badge.className = 'mode-badge mode-edit';
@@ -515,7 +516,6 @@
                 tr.dataset.sheetRow = p.sheetRow || '';
                 tr.dataset.productId = p.productId || '';
                 tr.dataset.productName = p.productName || '';
-                // v1.4: store MySQL routing fields so updateProductRecords() can route correctly
                 tr.dataset.source = p.source || '';
                 tr.dataset.dbId = p.id != null ? p.id : '';
                 tr.dataset.applicantId = p.applicantId != null ? p.applicantId : '';
@@ -553,7 +553,6 @@
                     productName: row.dataset.productName || '',
                     qtyRequested: qtyReqInput ? qtyReqInput.value : '',
                     qtyReceived: qtyRecInput ? qtyRecInput.value : '',
-                    // v1.4: MySQL routing fields for updateProductRecords()
                     source: row.dataset.source || '',
                     id: row.dataset.dbId !== '' ? parseInt(row.dataset.dbId) || null : null,
                     applicantId: row.dataset.applicantId !== '' ? parseInt(row.dataset.applicantId) || null : null

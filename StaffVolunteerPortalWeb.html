@@ -13,164 +13,6 @@
          Auto-lookup of start date/interval/funding still triggers on blur.
   v3.6 - Added 'Admin Notes' editable textarea to Information section.
          Added textarea CSS. Added fld_AdminNotes to FIELD_MAP.
-  v3.7 - Migrated hardcoded FIELD_MAP and populateDropdowns() to LU_FieldMap
-         sheet-driven sources. loadLookups() replaced by loadPortalData() which
-         calls getPortalData() — populates FIELD_MAP, dropdownFields, and lookups
-         in one server round-trip. populateDropdowns() now data-driven with
-         serviceHow→requestTypes fallback preserved.
-  v3.8 - Save Changes: spinner shown during save, hidden on success/failure.
-         Spinner text is context-aware (Saving.../Logging out...).
-         After successful save (non-PP path), auto-returns to search after 2s.
-         After returning from PP tab (visibilitychange), resets to search with message.
-  v3.9 - Desktop-first layout: container widened to 960px. Responsive breakpoints
-         at 900px and 600px.
-  v4.0 - Reverted form layout to single column. Added Scheduled Box Code 3
-         (same options as 1 & 2) and Received Product Code 3 (same options
-         as 1 & 2). Updated DR/PF launch check to include all 3 Received
-         Product Code fields and all 3 Scheduled Box Code fields.
-         Fixed openIntakeForm() bug: error now shown in notFoundSection;
-         on-demand URL fetch when intakeFormUrl is empty.
-  v4.1 - Received Product Code 1/2/3: selecting a PF or DR value immediately
-         opens PP in a new tab (via checkReceivedProductCode onchange handler).
-  v4.2 - Save handler: DR/PF check for PP launch now checks only the 3 Received
-         Product Code fields; Scheduled Box Code fields no longer trigger PP.
-  v4.3 - ppOpenedMidEdit flag: when PP opened via ReceivedProductCode onchange,
-         visibilitychange stays in edit mode instead of resetting to search.
-  v4.4 - Removed PP launch from saveRecord() success handler. PP is now launched
-         only via checkReceivedProductCode onchange. Save always returns to search.
-  v4.5 - Phone number displayed as (XXX) XXX-XXXX via formatPhone() helper.
-         Standard for all portal phone displays.
-  v4.6 - Scheduled Box Code 3: added onchange handler checkScheduledBoxCode3().
-         Selecting a DR or PF value launches Product Portal in a new tab,
-         matching the behaviour of Received Product Code 1/2/3.
-  v4.7 - Fixed null crash in saveRecord(), onSchedDisbCodeChange(), and openRecord():
-         fld_FundingSourceScheduling element no longer exists in the form;
-         all three references replaced with fld_FundingSource (the single
-         Funding Source field). Removed stale syncFundingSource onchange.
-  v4.9 - saveRecord(): rowIndex validation and updateRequest() call now accept
-         G2N-NNNNN format (USE_MYSQL=true path). parseInt() was converting
-         "G2N-05216" to NaN, blocking saves entirely.
-         getFundingDescription(): fixed to use lookups.fundingSourcesData (was
-         lookups.fundingSourceDetails) and handles both Sheets (Code/Description)
-         and MySQL (funding_code/funding_source) key formats.
-         saveRecord(): funding source description now always saved — removed
-         the if(schedCode) gate that was silently skipping it.
-  v4.10- saveRecord(): box_code derivation corrected. received_prod_code1 overrides
-         sched_box_code1 for box_code on both MySQL and Sheets paths. Previously
-         only sched_box_code1 was used and only when non-empty.
-  v4.11- Approvals section: added fld_ApprovedBy (select) and fld_ApprovalDate
-         (date input) HTML elements. Previously missing so approved_by and
-         approval_date were never collected by the FIELD_MAP loop and never saved.
-  v4.12- Search results: added Final Service Date to each result card.
-         Admin Notes field: wrapped in adminNotesGroup div; shown only when isAdmin.
-  v4.13- openIntakeForm(): opens AI in a new tab via window.open() so SV stays
-         open. Listens for postMessage {type:'newRecord', recordId, requestDate}
-         from AI on submit; shows product prompt with the new ID without navigating.
-         goToProductPortal(): opens PP in a new tab via window.open() so SV stays
-         open; product prompt is dismissed after launch.
-         exitPortal() admin path: window.close() instead of redirect — closes the
-         SV tab and returns admin to the AP tab already open behind it.
-  v4.14- Popup-blocker fix for all window.open() calls: when URL already cached,
-         window.open() is called synchronously from the click handler (allowed by
-         browsers). When URL must be fetched async, a blank window is opened first
-         synchronously, then navigated in the callback. Applies to openIntakeForm(),
-         goToProductPortal(), and launchProductPortal().
-         exitPortal() admin path: window.close() when opened by AP (has opener);
-         falls back to AP URL navigation when SV was launched directly via URL.
-  v4.15- exitPortal() admin fallback: removed GAS URL navigation (?page=admin)
-         which caused "You need access" auth error. Now tries window.close(); if
-         blocked shows "Please close this window" message in thankYouOverlay.
-  v4.16- openIntakeForm(): passes staffCode in URL query param so AI can write
-         the staff member's code to the Entered By column instead of "Applicant".
-  v4.17- checkReceivedProductCode() / checkScheduledBoxCode3(): PF values now
-         trigger an immediate saveRecord() + return to search instead of launching
-         PP. DR values continue to open PP in a new tab as before.
-  v4.18- Search falls through to archive workbooks (SearchService v2.5).
-         Archive results shown with (Archived: source) label in result cards.
-         archiveBanner div added to editSection; svSaveBtn id added to Save button.
-  v4.19- Fixed: adminNotesGroup wrapper div was missing from HTML, causing
-         document.getElementById('adminNotesGroup') to return null in openRecord()
-         and silently abort field population for every record. Added the wrapper.
-         All archive/adminNotes element lookups in openRecord() now null-guarded.
-  v4.20- displayResults: added archive label + Final Service Date to result cards.
-         openRecord FIELD_MAP loop: select elements reset to selectedIndex=0 when
-         value is blank (prevents previous record's selection persisting).
-         val now uses strict undefined/null check instead of || '' to preserve
-         falsy non-empty values (e.g. "0").
-         SearchService v2.6: nameDate archive search now only runs when AM returns
-         zero matches — prevents duplicate results for persons in both AM and archive.
-  v4.21- checkReceivedProductCode() / checkScheduledBoxCode3(): v4.17 was only
-         applied to the version comment, not the function bodies. Correctly applied.
-         launchProductPortal(): removed returnUrl parameter.
-  v4.22- Pre-cache Product Portal URL at login. Reverted v4.17: DR and PF launch PP.
-  v4.25- webAppUrl from server-injected template. All portal launches use webAppUrl.
-  v4.26- webAppUrl pre-fetched via getWebAppUrlForPortal() — matches AP pattern.
-  v4.27- noopener,noreferrer attempted and reverted — GAS requires opener auth session.
-         PP v1.7 fix: reads recordId/requestDate from URL params as fallback.
-  v4.28- webAppUrl safety guard removed — template tag in comments caused GAS
-         template engine to throw SyntaxError at evaluate(). Simplified back to
-         direct serverWebAppUrl injection. getWebAppUrlForPortal() called as
-         async fallback at login if webAppUrl is still empty after injection.
-         Code.gs v5.9: createTemplateFromFile restored for 'staff' doGet case.
-  v4.29- Archive record: Save button always shown and enabled (archive records are
-         editable). Removed display:none toggle that hid the button for archive
-         records. resetSearch() now explicitly resets button to visible/enabled
-         so state is guaranteed correct before the next record load.
-  v4.30- saveRecord(): sessionStorage used to survive GAS page re-evaluation when
-         focus returns from PP tab. openRecord() writes rowIndex, recordId,
-         isArchivedRecord, and archiveSource to sessionStorage. saveRecord() restores
-         all four unconditionally at entry (not gated on rowIndex being empty) so
-         archive records — which have no rowIndex — correctly restore isArchivedRecord.
-         resetSearch() clears sessionStorage keys to prevent stale reuse.
-         Fixes "No record loaded. Row index is: " for both live and archive records.
-  v4.34- Demographics completeness check: after openRecord(), sv_checkDemographics()
-         calls getDemographicsStatus() server-side (RequestService v3.3). If >= 80%
-         of LU_FieldMap Demographics-group fields are blank, an amber warning banner
-         appears in the Information section showing the blank percentage and a
-         "Complete Intake Form" button. Button opens sv_ae_modal — an inline modal
-         reusing the same AP ae_ form structure and the same server functions
-         (getApplicantEditData, updateIntakeRecord). Saves via updateIntakeRecord().
-         Warning hidden on success save and on resetSearch().
-         Note: server-side code (getApplicantEditData, updateIntakeRecord) is already
-         shared in RequestService.js — no SharedUtils change needed for that.
-         SharedUtils is server-side utilities; portal UI code stays in HTML files.
-  v4.35- displayResults(): result card label changed to "Last Service Date"; value
-         reads Last Date Served with fallback to Final Service Contact Date.
-         Date-validity guard: if the stored value does not contain '/' (e.g. a
-         distribution code like "DG2" was mistakenly stored in Last Date Served),
-         falls through to Final Service Contact Date, then the raw value.
-         Added "New Applicant" button in the search results area so staff can
-         open the Intake Form even when search results are found.
-  v4.36- saveRecord() watchdog: on first timeout auto-retries the save once silently
-         (root cause was logAudit appendRow deadlock — fixed in Code.js v6.4, but
-         auto-retry remains as a safety net). Second timeout shows error message
-         with a manual Retry button. Watchdog stays at 45s for all record types.
-  v4.37- Removed temporary diagnostic console.log from saveRecord() archive path
-         (added in RequestService v3.4 session). No logic change.
-  v4.33- Add/Edit Products buttons beside each Received Product Code dropdown.
-         Received Product Code dropdown. Hidden when blank; shown when a value is
-         selected (onchange updatePPButton) or when openRecord finds an existing value.
-         Clicking calls openPPForRecord() which launches PP for the current record
-         (sets ppOpenedMidEdit=true). Cleared by resetSearch() between records.
-         New functions: updatePPButton(btnId,val), openPPForRecord().
-  v4.32- visibilitychange: added ppWasOpened flag (set only in launchProductPortal).
-         Previously the handler fired on ANY browser tab switch — switching to email
-         or another tab and back would reset the portal to search mid-edit.
-         Now only triggers reset/stay logic when PP was actually opened.
-         visibilitychange (ppOpenedMidEdit path): Save button briefly disabled for
-         1.5 seconds on return from PP so the GAS iframe has time to re-initialise.
-         Prevents the silent hang where neither withSuccessHandler nor withFailureHandler
-         fires when google.script.run is called immediately after returning from a
-         backgrounded tab (root cause: Chrome/Edge tab throttling suspends the GAS
-         iframe transport while SV is in background during PP use).
-         saveRecord(): Save button disabled while in-flight (prevents double-click).
-         45-second watchdog hides spinner and shows recoverable error if GAS never
-         responds, so user can retry without a full page reload.
-  v4.31- openRecord(): moved 'var isArchived' declaration to TOP of function, before
-         first use. JavaScript var-hoisting meant isArchived was undefined when
-         isArchivedRecord DOM field and sessionStorage were written (lines ~1532/1540),
-         so archive records always stored '' — making the v4.30 restore permanently
-         ineffective for archive records. Root cause of persistent save error.
 -->
 
 <!DOCTYPE html>
@@ -928,7 +770,6 @@
         var currentRowIndex = null;
         var intakeFormUrl = '';
         var productPortalUrl = '';
-        // v4.28: webAppUrl injected by Code.gs doGet via createTemplateFromFile.
         // Falls back to empty string if not injected; getWebAppUrlForPortal() then
         // fetches it asynchronously via google.script.run on login.
         var webAppUrl = '<?= serverWebAppUrl ?>';
@@ -1021,16 +862,12 @@
             checkReturnParams();
         }
 
-        // v3.8: Helper to set spinner message text
         function setSpinnerText(text) {
             var el = document.getElementById('spinnerText');
             if (el) el.textContent = text;
         }
 
         // Auto-refresh when tab regains focus (e.g. after PP tab closes)
-        // v3.8: After PP closes, reset to search with a brief message
-        // v4.3: If PP was opened mid-edit (via ReceivedProductCode onchange), stay in edit mode
-        // v4.32: Only fires reset logic when PP was actually opened (ppWasOpened flag).
         //        Previously fired on ANY tab switch (email, browser, etc.), resetting to search
         //        even when the user had simply switched tabs briefly.
         document.addEventListener('visibilitychange', function () {
@@ -1038,7 +875,6 @@
                 ppWasOpened = false;   // consume the flag
                 var editSection = document.getElementById('editSection');
                 if (editSection && !editSection.classList.contains('hidden')) {
-                    // v4.32: Briefly disable Save while GAS iframe re-initialises after
                     // returning from the PP tab. Prevents a google.script.run call being
                     // made before the GAS runtime is fully ready, which causes the call
                     // to silently hang with neither success nor failure handler firing.
@@ -1065,14 +901,12 @@
         // ============ EXIT / DONE FOR TODAY ============
 
         function exitPortal() {
-            // v3.3: Show spinner immediately
             setSpinnerText('Logging out...');
             document.getElementById('spinnerOverlay').classList.remove('hidden');
 
             var isAdmin = currentUser && currentUser.isAdmin;
 
             if (isAdmin) {
-                // v4.16: Always log out server-side first, then close/show message
                 google.script.run
                     .withSuccessHandler(function () {
                         currentUser = null;
@@ -1467,7 +1301,6 @@
                     populateSelect(fldId, vals);
                 }
             }
-            // v4.0: Box Code 3 and Received Product Code 3 mirror options from 1 & 2.
             // If LU_FieldMap already maps them, populateSelect is idempotent. If not,
             // this cloneSelectOptions fallback ensures they are always populated.
             cloneSelectOptions('fld_ScheduledBoxCode1', 'fld_ScheduledBoxCode3');
@@ -1539,7 +1372,6 @@
                         }
 
                         // Populate Funding Source
-                        // v4.7: fld_FundingSourceScheduling removed; fld_FundingSource is the single field
                         if (result.fundingCode) {
                             var completionSel = document.getElementById('fld_FundingSource');
                             for (var j = 0; j < completionSel.options.length; j++) {
@@ -1584,7 +1416,6 @@
         }
 
         function getFundingDescription(fundingCode) {
-            // v4.9: use fundingSourcesData (was fundingSourceDetails).
             // Handle both Sheets path (Code/Description) and MySQL path (funding_code/funding_source).
             var src = lookups.fundingSourcesData || lookups.fundingSourceDetails;
             if (!src) return '';
@@ -1740,7 +1571,6 @@
             document.getElementById('notFoundSection').classList.add('hidden');
             document.getElementById('editSection').classList.remove('hidden');
 
-            // v4.31: declare isArchived BEFORE any use — var hoisting caused it to be
             // undefined at lines 1532/1540, so isArchivedRecord and sessionStorage
             // always stored '' for archive records, making the save restore fail.
             var isArchived = !!(rec && rec['_archived']);
@@ -1748,11 +1578,9 @@
             // Set hidden fields
             document.getElementById('rowIndex').value = rowIdx;
             document.getElementById('recordId').value = rec['ID'];
-            // v4.29: store archive routing info for saveRecord()
             document.getElementById('isArchivedRecord').value = isArchived ? '1' : '';
             document.getElementById('archiveSource').value = (rec && rec['_archiveSource']) || '';
 
-            // v4.30: persist rowIndex/recordId in sessionStorage so they survive
             // a GAS page re-evaluation when focus returns from the PP tab
             try {
                 sessionStorage.setItem('sv_rowIndex', rowIdx != null ? String(rowIdx) : '');
@@ -1781,8 +1609,6 @@
             }
 
             // Populate Information Section (read-only)
-            // v4.12/v4.18: archive banner, Admin Notes visibility, Save button — all null-guarded
-            // v4.31: isArchived moved to top of function — declaration removed here
             var archiveBannerEl = document.getElementById('archiveBanner');
             if (archiveBannerEl) archiveBannerEl.classList.toggle('hidden', !isArchived);
             var archiveSourceEl = document.getElementById('archiveSourceLabel');
@@ -1808,7 +1634,6 @@
             document.getElementById('info_TakeBabyBox').value = rec['Take Baby Box?'] || '';
 
             // Load editable field values from record
-            // v4.20: for select elements, if val is '' reset to index 0 to prevent
             // the previous record's selection persisting when a field is blank.
             for (var elId in FIELD_MAP) {
                 var colName = FIELD_MAP[elId];
@@ -1842,19 +1667,16 @@
             }
 
             // Load Funding Code into the single Funding Source field
-            // v4.7: fld_FundingSourceScheduling removed; use fld_FundingSource only
             var fundingCodeVal = rec['Funding Code'] || '';
             if (fundingCodeVal) {
                 var completionFundingSel = document.getElementById('fld_FundingSource');
                 if (completionFundingSel) completionFundingSel.value = fundingCodeVal;
             }
 
-            // v4.33: Show/hide the ✎ Products buttons based on existing code values
             updatePPButton('ppBtn1', (document.getElementById('fld_ReceivedProductCode1') || {}).value || '');
             updatePPButton('ppBtn2', (document.getElementById('fld_ReceivedProductCode2') || {}).value || '');
             updatePPButton('ppBtn3', (document.getElementById('fld_ReceivedProductCode3') || {}).value || '');
 
-            // v4.34: Demographic completeness check — async, non-blocking
             var archSrcForDemo = (rec && rec['_archiveSource']) ? rec['_archiveSource'] : '';
             sv_checkDemographics(rec['ID'], archSrcForDemo);
         }
@@ -1862,7 +1684,6 @@
         // ============ SAVE ============
 
         function saveRecord() {
-            // v4.30 (fix): unconditionally restore hidden field state from sessionStorage
             // if lost when the browser returned focus from the PP tab.
             // Must run before any checks — archive records have no rowIndex so the
             // previous conditional restore never fired, leaving isArchivedRecord blank.
@@ -1893,13 +1714,11 @@
                 rowIdx = currentRowIndex;
             }
 
-            // v4.29: archive records route to updateArchiveRecord() — no rowIndex needed
             var isArchivedRec = document.getElementById('isArchivedRecord').value === '1';
             var archiveSrc = document.getElementById('archiveSource').value;
             var recId = document.getElementById('recordId').value;
 
             if (!isArchivedRec) {
-                // v4.9: accept G2N-NNNNN (MySQL path) as a valid rowIndex
                 var isG2N = typeof rowIdx === 'string' && rowIdx.startsWith('G2N-');
                 if (!rowIdx || (!isG2N && isNaN(parseInt(rowIdx)))) {
                     showMessage('saveMessage', 'Error: No record loaded. Row index is: ' + rowIdx, 'error');
@@ -1918,7 +1737,6 @@
                 }
             }
 
-            // v4.10: box_code derivation — received_prod_code1 overrides sched_box_code1.
             // Both Sheets and MySQL paths: if received_prod_code1 is set it wins;
             // otherwise fall back to sched_box_code1.
             var schedBoxCode1 = document.getElementById('fld_ScheduledBoxCode1').value;
@@ -1929,7 +1747,6 @@
                 data['Box Code'] = boxCode;
             }
 
-            // v4.9: Always save Funding Source description alongside Funding Code.
             var fundingCode = document.getElementById('fld_FundingSource').value;
             if (fundingCode) {
                 var desc = getFundingDescription(fundingCode);
@@ -1938,17 +1755,13 @@
                 }
             }
 
-            // v3.8: Show spinner during save
             setSpinnerText('Saving...');
             document.getElementById('spinnerOverlay').classList.remove('hidden');
 
-            // v4.32: Disable Save button while save is in-flight (prevent double-click / re-entry).
             // Re-enabled in both success and failure handlers.
             var svSaveBtnEl = document.getElementById('svSaveBtn');
             if (svSaveBtnEl) { svSaveBtnEl.disabled = true; }
 
-            // v4.32: Watchdog — if GAS never responds within 45s, auto-retry once.
-            // v4.36: On first timeout, silently re-fires saveRecord(). If it times out
             // again, shows error with a manual Retry button. Root cause (logAudit
             // appendRow deadlock) fixed in Code.js v6.4; auto-retry is a safety net.
             var saveAttempt = (saveRecord._attempt || 0) + 1;
@@ -1980,7 +1793,6 @@
                 if (svSaveBtnEl) { svSaveBtnEl.disabled = false; }
             }
 
-            // v4.29: Route to correct server function based on archive flag
             if (isArchivedRec) {
                 google.script.run
                     .withSuccessHandler(function (result) {
@@ -2182,23 +1994,18 @@
             document.getElementById('searchFirstName').value = '';
             document.getElementById('searchLastName').value = '';
             document.getElementById('searchDate').value = '';
-            // v4.29: reset save button state so it's correct when next record opens
             var svSaveBtnEl = document.getElementById('svSaveBtn');
             if (svSaveBtnEl) { svSaveBtnEl.disabled = false; svSaveBtnEl.title = ''; svSaveBtnEl.style.display = ''; }
-            // v4.29: reset archive routing fields
             document.getElementById('isArchivedRecord').value = '';
             document.getElementById('archiveSource').value = '';
-            // v4.33: hide PP buttons so they don't persist to the next record
             ['ppBtn1', 'ppBtn2', 'ppBtn3'].forEach(function (id) {
                 var btn = document.getElementById(id);
                 if (btn) btn.classList.add('hidden');
             });
-            // v4.34: hide demographics warning
             var demoWarn = document.getElementById('demographicsWarning');
             if (demoWarn) demoWarn.classList.add('hidden');
             currentRecord = null;
             currentRowIndex = null;
-            // v4.30: clear sessionStorage so a stale rowIndex cannot be reused for the next record
             try {
                 sessionStorage.removeItem('sv_rowIndex');
                 sessionStorage.removeItem('sv_recordId');
