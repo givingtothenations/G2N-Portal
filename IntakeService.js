@@ -14,9 +14,10 @@
  *       - Auto-detect event mode from signature date: if no eventInfo passed (or not
  *         active), checks the submitted signatureDate against LU_EventInfo server-side.
  *         Sets outdoorEvent=Yes, boxCode, fundingSource, Received Product Code 1 when matched.
- * v3.7 - Fixed appendRow race condition: replaced setNumberFormat-before-appendRow
- *         with setValues at a deterministic row, then applies formatting after write.
- *         Prevents ID formatting from landing on the wrong row under concurrent writes.
+ * v3.7 - Fixed appendRow race condition.
+ * v3.8 - Non-event intake now defaults Service Status to "Open". Applies to
+ *         public AI submissions and SV staff-mode submissions. Event mode
+ *         continues to set "Picked Up" as before.
  */
 
 /**
@@ -123,8 +124,9 @@ function submitIntakeForm(formData, eventInfo) {
             setColumnValue(newRow, headers, 'Final Service Contact Date', todayFormatted);
             setColumnValue(newRow, headers, 'Next Service Availability Date', next90Formatted);
         } else {
-            // Non-event mode - set Request Type to Direct
+            // Non-event mode — set Request Type to Direct and Service Status to Open
             setColumnValue(newRow, headers, 'Request Type', 'Direct');
+            setColumnValue(newRow, headers, 'Service Status', 'Open');
         }
 
         // v3.6: Default "Entered By" to "Applicant" for public intake submissions

@@ -13,6 +13,11 @@
          Auto-lookup of start date/interval/funding still triggers on blur.
   v3.6 - Added 'Admin Notes' editable textarea to Information section.
          Added textarea CSS. Added fld_AdminNotes to FIELD_MAP.
+  v4.30 - openRecord: added explicit fld_ServiceStatus assignment after the
+           FIELD_MAP loop. fld_ServiceStatus is a select populated by lookups
+           but its SV Field ID in LU_FieldMap may be absent, which causes the
+           FIELD_MAP loop to skip it and leave the dropdown blank even though
+           the record carries the correct Service Status value.
 -->
 
 <!DOCTYPE html>
@@ -1664,6 +1669,18 @@
                 if (enteredByEl) {
                     enteredByEl.value = currentUser.code;
                 }
+            }
+
+            // v4.30: Explicitly set Service Status after the FIELD_MAP loop.
+            // fld_ServiceStatus may not have a SV Field ID in LU_FieldMap, which
+            // causes the loop above to skip it even though the record has the value.
+            // This fallback ensures the dropdown always reflects the stored status.
+            var svcStatusEl = document.getElementById('fld_ServiceStatus');
+            if (svcStatusEl) {
+                var svcVal = (rec['Service Status'] || '').toString();
+                svcStatusEl.value = svcVal;
+                // If the value didn't match any option, reset to blank placeholder
+                if (svcStatusEl.value !== svcVal) svcStatusEl.selectedIndex = 0;
             }
 
             // Load Funding Code into the single Funding Source field

@@ -1,24 +1,17 @@
 ﻿/**
  * Code.gs
- * Main entry point and configuration for G2N Request Management System
- * Handles web app routing (doGet), custom menus, workbook connections,
- * audit logging, monthly archive triggers, and form response sync.
- * v3.6 - Phase 4: Added HYGIENE_STATS_WORKBOOK_ID to CONFIG
- * v4.0 - Phase 5: Added LOGIN_FOLDER_ID, ARCHIVES_BACKUPS_FOLDER_ID to CONFIG.
- *         Added archiveHealthCheck() for AM/Products archive integrity.
- *         Added multi-archive rollover support (year-based workbooks).
- * v4.1 - Phase 5 fix: Rollover now splits G2N_Archive by year into separate
- *         workbooks (G2N_Archive_YYYY), each with Archive + Products_Archive sheets.
- *         Removed yearLabel parameter — years auto-detected from Request Date.
- *         Added previewArchiveRollover() for preview before execute.
- *         Existing year workbooks are appended to (not overwritten).
- * v4.2 - Added getArchiveCapacityPct(), checkAndAutoRollover() for auto year-split
- *         when G2N_Archive >= 85% capacity. Added getAdminEmails() and
- *         sendArchiveSummaryEmail() — emails all active admins after scheduled
- *         archive with record counts, file deletions, audit backup, and rollover status.
- * v4.3 - Added createAuditLog() — was called by logAudit() but never defined.
- *         Creates AuditLog sheet with styled headers if missing from AM.
- *         Fixed getSheetHeaders() to trim whitespace — matches all other header reads.
+ * Main entry point and configuration for G2N Request Management System.
+ *
+ * v4.4 - diagArchiveHeaders(): diagnostic comparing AM vs all archive workbook headers.
+ * v4.5 - diagArchiveHeaders(): fixed blank column name display; added data content check.
+ * v4.6 - onAmHeaderEdit(): installable trigger watches AM header row.
+ * v4.7 - Restored six public portal URL wrappers (showStaffPortalUrl etc).
+ * v4.8 - fixBlankServiceStatus(): one-time script to set column BM in
+ *         Applicants_Master and G2N_Archive to "Open" where the cell is
+ *         blank or contains only whitespace. Run once from G2N Management
+ *         > Setup > Fix Blank Service Status (BM). Writes a summary dialog
+ *         with the count of cells updated in each sheet.
+ *         Management menu clicks.
  */
 
 // ============ CONFIGURATION ============
@@ -122,6 +115,10 @@ function onOpen() {
                     .addItem('Remove Lookup Cache Trigger', 'removeLookupCacheTrigger')
                     .addItem('Clear Lookup Cache Now', 'invalidateLookupCache')
                     .addSeparator()
+                    .addItem('Install Header Watch Trigger', 'installHeaderWatchTrigger')
+                    .addSeparator()
+                    .addItem('Fix Blank Service Status → Open (column BM)', 'fixBlankServiceStatus')
+                    .addSeparator()
                     .addItem('Validate Addresses (Skip HIGH)', 'validateAddressesMenu')
                     .addItem('Continue Address Validation', 'continueAddressValidationMenu'));
         }
@@ -132,6 +129,180 @@ function onOpen() {
 
     menu.addToUi();
 }
+
+
+/**
+ * Installable trigger: fires when any cell in Applicants_Master is edited.
+ * When a header cell (row 1) is changed on the master sheet:
+ *   1. Looks up the old header name in LU_FieldMap Raw Header column
+ *   2. Updates Raw Header to the new name
+ *   3. Writes the old name to Previous Header Name column
+ *   4. Clears the lookup cache so the rename takes effect immediately
+ *   5. Logs the rename to AuditLog
+ *
+ * IMPORTANT: This is an INSTALLABLE trigger (not a simple trigger).
+ * It must be installed via G2N Management > Setup > Install Header Watch Trigger.
+ * Simple onEdit triggers cannot open other spreadsheets (G2N_Lookups).
+ *
+ * v4.6 - New function.
+ * @param {GoogleAppsScript.Events.SheetsOnEdit} e - Edit event object
+ */
+function onAmHeaderEdit(e) {
+    try {
+        var range = e.range;
+        var sheet = range.getSheet();
+
+        // Only care about row 1 on the master sheet
+        if (range.getRow() !== 1) return;
+        if (sheet.getName() !== CONFIG.MASTER_SHEET) return;
+
+        var oldName = (e.oldValue || '').toString().trim();
+        var newName = (e.value || range.getValue() || '').toString().trim();
+
+        // Skip if blank→blank, or unchanged, or new value is blank
+        if (!oldName || !newName || oldName === newName) return;
+
+        Logger.log('onAmHeaderEdit: Header rename detected — col ' + range.getColumn() +
+            ' "' + oldName + '" → "' + newName + '"');
+
+        // ── Find and update LU_FieldMap ───────────────────────────────────────
+        var looksWb = getLookupsWorkbook();
+        var fmSheet = looksWb.getSheetByName('LU_FieldMap');
+        if (!fmSheet || fmSheet.getLastRow() < 2) {
+            Logger.log('onAmHeaderEdit: LU_FieldMap not found — rename not recorded');
+            return;
+        }
+
+        var fmData = fmSheet.getDataRange().getValues();
+        var fmHeaders = trimHeaders(fmData[0]);
+        var rawCol = fmHeaders.indexOf('Raw Header');
+        var prevCol = fmHeaders.indexOf('Previous Header Name');
+
+        if (rawCol === -1) {
+            Logger.log('onAmHeaderEdit: "Raw Header" column not found in LU_FieldMap');
+            return;
+        }
+
+        // Find the row matching the old header name
+        var foundRow = -1;
+        for (var i = 1; i < fmData.length; i++) {
+            var rh = (fmData[i][rawCol] || '').toString().trim();
+            if (rh === oldName) { foundRow = i + 1; break; } // 1-based sheet row
+        }
+
+        if (foundRow === -1) {
+            Logger.log('onAmHeaderEdit: "' + oldName + '" not found in LU_FieldMap Raw Header — ' +
+                'rename logged to AuditLog but LU_FieldMap not updated. ' +
+                'Add the field to LU_FieldMap if it should be tracked.');
+            logAudit('HEADER_RENAME_UNTRACKED', null,
+                'AM header renamed: "' + oldName + '" → "' + newName + '" (col ' + range.getColumn() + ') — not in LU_FieldMap');
+            return;
+        }
+
+        // Update Raw Header to new name
+        fmSheet.getRange(foundRow, rawCol + 1).setValue(newName);
+
+        // Write old name to Previous Header Name (if column exists)
+        if (prevCol !== -1) {
+            fmSheet.getRange(foundRow, prevCol + 1).setValue(oldName);
+        } else {
+            Logger.log('onAmHeaderEdit: "Previous Header Name" column not found in LU_FieldMap — ' +
+                'add it as the last column. Raw Header updated but Previous Header Name not recorded.');
+        }
+
+        // Clear lookup cache so the rename is live immediately
+        invalidateLookupCache();
+
+        logAudit('HEADER_RENAME', null,
+            'AM header renamed: "' + oldName + '" → "' + newName + '" (col ' + range.getColumn() + ')' +
+            (prevCol !== -1 ? ' — LU_FieldMap updated' : ' — LU_FieldMap Raw Header updated (Previous Header Name column missing)'));
+
+        Logger.log('onAmHeaderEdit: LU_FieldMap row ' + foundRow + ' updated — ' +
+            'Raw Header: "' + newName + '", Previous Header Name: "' + oldName + '"');
+
+    } catch (err) {
+        Logger.log('onAmHeaderEdit error: ' + err.message);
+        // Non-fatal — do not throw, as that would disrupt the user's edit
+    }
+}
+
+
+/**
+ * Installs the AM header-watch trigger (installable onEdit for Applicants_Master).
+ * Run once from G2N Management > Setup. Skips if already installed.
+ * v4.6 - New function.
+ */
+function installHeaderWatchTrigger() {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+        if (triggers[i].getHandlerFunction() === 'onAmHeaderEdit') {
+            SpreadsheetApp.getUi().alert('Header watch trigger is already installed.');
+            return;
+        }
+    }
+    ScriptApp.newTrigger('onAmHeaderEdit')
+        .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+        .onEdit()
+        .create();
+    SpreadsheetApp.getUi().alert(
+        'Header watch trigger installed.\n\n' +
+        'Any future rename of an AM header row cell will automatically update LU_FieldMap.'
+    );
+    Logger.log('installHeaderWatchTrigger: onAmHeaderEdit trigger installed');
+}
+
+
+/**
+ * One-time script: set Service Status to "Open" wherever the cell is blank
+ * or contains only whitespace, in both Applicants_Master and G2N_Archive.
+ * Run once from G2N Management > Setup > Fix Blank Service Status (column BM).
+ * Resolves the column by header name via LU_FieldMap; falls back to column BM
+ * (index 40, 1-based col 41) if the header cannot be resolved.
+ * v4.8 - Added.
+ */
+function fixBlankServiceStatus() {
+    var ui = SpreadsheetApp.getUi();
+    var results = [];
+
+    function fixSheet_(sheet, label) {
+        if (!sheet || sheet.getLastRow() < 2) {
+            results.push(label + ': not found or empty — skipped.');
+            return;
+        }
+        var headers = trimHeaders(sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]);
+        var ssIdx = headers.indexOf(resolveAMField_('Service Status'));
+        if (ssIdx === -1) {
+            ssIdx = 40;  // BM fallback (0-based 40 = col 41 = BM)
+            results.push(label + ': header not found — using column BM as fallback.');
+        }
+        var colNum = ssIdx + 1;
+        var lastRow = sheet.getLastRow();
+        var range = sheet.getRange(2, colNum, lastRow - 1, 1);
+        var values = range.getValues();
+        var updated = 0;
+        for (var i = 0; i < values.length; i++) {
+            if ((values[i][0] || '').toString().trim() === '') {
+                values[i][0] = 'Open';
+                updated++;
+            }
+        }
+        if (updated > 0) range.setValues(values);
+        results.push(label + ': ' + updated + ' cell(s) updated to "Open".');
+    }
+
+    try {
+        fixSheet_(getMasterSheet(), 'Applicants_Master');
+        var archSheet = SpreadsheetApp.openById(CONFIG.ARCHIVE_WORKBOOK_ID)
+            .getSheetByName(CONFIG.MASTER_SHEET);
+        fixSheet_(archSheet, 'G2N_Archive');
+        logAudit('ADMIN', null, 'fixBlankServiceStatus: ' + results.join(' | '));
+        ui.alert('Fix Blank Service Status — Complete', results.join('\n'), ui.ButtonSet.OK);
+    } catch (e) {
+        Logger.log('fixBlankServiceStatus error: ' + e.message);
+        ui.alert('Error', 'fixBlankServiceStatus failed: ' + e.message, ui.ButtonSet.OK);
+    }
+}
+
 
 /**
  * Web app entry point â€” routes to the appropriate portal HTML
@@ -228,6 +399,76 @@ function showPortalUrlDialog_(title, url, color, hoverColor, footnote) {
         .setWidth(550)
         .setHeight(280);
     SpreadsheetApp.getUi().showModalDialog(html, title + ' URL');
+}
+
+/**
+ * v4.7: Public menu-callable wrappers for the consolidated showPortalUrlDialog_.
+ * The G2N Management menu items in onOpen() reference these by name; they
+ * must be defined as public (no trailing underscore) so GAS can resolve them
+ * at click time. Dropping these during the v4.4 consolidation caused the
+ * runtime error "Script function not found: showStaffPortalUrl".
+ *
+ * Footnote text reminds staff that the URL is shareable and stable across
+ * deployments (the deployment URL never changes when the existing deployment
+ * is edited — only when a New Deployment is created, which we never do).
+ */
+function showStaffPortalUrl() {
+    showPortalUrlDialog_(
+        'Staff/Volunteer Portal',
+        getWebAppUrl() + '?page=staff',
+        '#1a73e8', '#1557b0',
+        'Share this link with staff and volunteers. Bookmark it for quick access.'
+    );
+}
+
+function showAdminPortalUrl() {
+    showPortalUrlDialog_(
+        'Admin Portal',
+        getWebAppUrl() + '?page=admin',
+        '#d93025', '#b7261d',
+        'Admin-only access. Bookmark it for quick access.'
+    );
+}
+
+function showIntakeFormUrl() {
+    showPortalUrlDialog_(
+        'Applicant Intake Form',
+        getWebAppUrl(),
+        '#188038', '#0f6b27',
+        'Share this link publicly so applicants can submit requests.'
+    );
+}
+
+/**
+ * v4.7: Dev (test deployment) URL variants — owner-only sub-menu.
+ * Uses CONFIG.DEV_URL directly (not getWebAppUrl(), which may resolve to
+ * production when called from a production-bound spreadsheet context).
+ */
+function showStaffPortalDevUrl() {
+    showPortalUrlDialog_(
+        'Staff/Volunteer Portal (DEV)',
+        CONFIG.DEV_URL + '?page=staff',
+        '#1a73e8', '#1557b0',
+        'DEV URL — Test deployment only. Shares the same Google Sheets as production.'
+    );
+}
+
+function showAdminPortalDevUrl() {
+    showPortalUrlDialog_(
+        'Admin Portal (DEV)',
+        CONFIG.DEV_URL + '?page=admin',
+        '#d93025', '#b7261d',
+        'DEV URL — Test deployment only. Shares the same Google Sheets as production.'
+    );
+}
+
+function showIntakeFormDevUrl() {
+    showPortalUrlDialog_(
+        'Applicant Intake Form (DEV)',
+        CONFIG.DEV_URL,
+        '#188038', '#0f6b27',
+        'DEV URL — Test deployment only. Shares the same Google Sheets as production.'
+    );
 }
 
 /**
@@ -1693,4 +1934,194 @@ function applyHygieneSched(dryRun) {
         writeMacroResults_(label + 'Hygiene Sched — ' + totalCells + ' cell(s) ' + (dryRun ? 'would update' : 'updated') + ', ' + notFound.length + ' not found', resultRows);
         ui.alert(label + 'Complete. See MacroResults sheet.\n' + totalCells + ' cell(s) ' + (dryRun ? 'would be updated' : 'updated') + '.\n' + notFound.length + ' code(s) not found.');
     } catch (e) { Logger.log('applyHygieneSched: ' + e.message); ui.alert('Error: ' + e.message); }
+}
+
+/**
+ * Diagnostic: Compare AM column headers against all archive workbook headers.
+ * Detects mismatches that would cause data shifting in executeArchiveBatch()
+ * and performArchiveRollover() (both use positional writes, not column mapping).
+ *
+ * HOW TO RUN:
+ *   Apps Script editor → select diagArchiveHeaders → Run → View Execution Log
+ *   Results also written to a MacroResults sheet in Applicants_Master.
+ *
+ * v4.4 - New function.
+ * v4.5 - Fixed blank column name display: logs raw cell value alongside trimmed.
+ *         Added data content check for blank-header AM columns (shows if they
+ *         contain data that would be lost). Speeds up folder scan by checking
+ *         name pattern before opening workbook.
+ */
+function diagArchiveHeaders() {
+    var ui = SpreadsheetApp.getUi();
+    Logger.log('=== diagArchiveHeaders START ===');
+
+    try {
+        // ── Read AM headers (raw + trimmed) ──────────────────────────────────
+        var masterSheet = getMasterWorkbook().getSheetByName(CONFIG.MASTER_SHEET);
+        if (!masterSheet) { Logger.log('ERROR: Master sheet not found'); return; }
+
+        var lastCol = masterSheet.getLastColumn();
+        var amRaw = masterSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        var amHeaders = trimHeaders(amRaw);
+        Logger.log('AM: ' + amHeaders.length + ' columns');
+
+        // Log raw values for any blank-header columns
+        var blankAmCols = [];
+        for (var b = 0; b < amRaw.length; b++) {
+            var raw = amRaw[b];
+            var trimmed = amHeaders[b];
+            if (trimmed === '') {
+                blankAmCols.push(b + 1); // 1-based
+                Logger.log('  AM col ' + (b + 1) + ': BLANK header. Raw cell value: [' + JSON.stringify(raw) + '] type=' + typeof raw);
+            }
+        }
+
+        // For blank-header AM columns — check if they contain data
+        if (blankAmCols.length > 0) {
+            Logger.log('Checking blank-header AM columns for data content...');
+            var sampleRows = Math.min(masterSheet.getLastRow() - 1, 20);
+            if (sampleRows > 0) {
+                for (var bc = 0; bc < blankAmCols.length; bc++) {
+                    var colNum = blankAmCols[bc];
+                    var colData = masterSheet.getRange(2, colNum, sampleRows, 1).getValues();
+                    var nonBlank = colData.filter(function (r) {
+                        return r[0] !== null && r[0] !== undefined && r[0].toString().trim() !== '';
+                    });
+                    Logger.log('  AM col ' + colNum + ' (blank header): ' + nonBlank.length + '/' + sampleRows +
+                        ' sample rows have data. Example: [' +
+                        (nonBlank.length > 0 ? JSON.stringify(nonBlank[0][0]) : 'empty') + ']');
+                }
+            }
+        }
+
+        // ── Collect all archive workbooks ─────────────────────────────────────
+        var workbooks = [];
+
+        // G2N_Archive
+        try {
+            var archWB = SpreadsheetApp.openById(CONFIG.ARCHIVE_WORKBOOK_ID);
+            var archSheet = archWB.getSheetByName('Archive');
+            if (archSheet && archSheet.getLastRow() > 0) {
+                var archRaw = archSheet.getRange(1, 1, 1, archSheet.getLastColumn()).getValues()[0];
+                var archHeaders = trimHeaders(archRaw);
+                workbooks.push({ name: 'G2N_Archive', headers: archHeaders, raw: archRaw });
+                Logger.log('G2N_Archive: ' + archHeaders.length + ' columns');
+            } else {
+                Logger.log('G2N_Archive: Archive sheet empty or missing');
+            }
+        } catch (e) {
+            Logger.log('Could not open G2N_Archive: ' + e.message);
+        }
+
+        // G2N_Archive_YYYY workbooks
+        if (CONFIG.ARCHIVES_BACKUPS_FOLDER_ID) {
+            try {
+                var folder = DriveApp.getFolderById(CONFIG.ARCHIVES_BACKUPS_FOLDER_ID);
+                var files = folder.getFilesByType('application/vnd.google-apps.spreadsheet');
+                while (files.hasNext()) {
+                    var file = files.next();
+                    var fname = file.getName();
+                    if (!/^G2N_Archive_\d{4}$/.test(fname)) continue;
+                    try {
+                        var ywb = SpreadsheetApp.openById(file.getId());
+                        var ySheet = ywb.getSheetByName('Archive');
+                        if (ySheet && ySheet.getLastRow() > 0) {
+                            var yRaw = ySheet.getRange(1, 1, 1, ySheet.getLastColumn()).getValues()[0];
+                            var yHeaders = trimHeaders(yRaw);
+                            workbooks.push({ name: fname, headers: yHeaders, raw: yRaw });
+                            Logger.log(fname + ': ' + yHeaders.length + ' columns');
+                        } else {
+                            Logger.log(fname + ': Archive sheet empty or missing');
+                        }
+                    } catch (ye) {
+                        Logger.log('Could not open ' + fname + ': ' + ye.message);
+                    }
+                }
+            } catch (fe) {
+                Logger.log('Could not scan Archives_Backups folder: ' + fe.message);
+            }
+        }
+
+        if (workbooks.length === 0) {
+            Logger.log('No archive workbooks found to compare.');
+            ui.alert('No archive workbooks found. Check CONFIG.ARCHIVE_WORKBOOK_ID.');
+            return;
+        }
+
+        // ── Compare AM against each archive workbook ──────────────────────────
+        var resultRows = [['Workbook', 'Status', 'Col #', 'AM Column (raw)', 'Archive Column (raw)', 'Notes']];
+        var totalIssues = 0;
+
+        workbooks.forEach(function (wb) {
+            var archH = wb.headers;
+            var archRaw = wb.raw;
+            var issues = [];
+            var maxCols = Math.max(amHeaders.length, archH.length);
+
+            // Column count
+            if (amHeaders.length !== archH.length) {
+                issues.push({
+                    col: '', amDisp: '', archDisp: '',
+                    status: 'COUNT MISMATCH',
+                    notes: 'AM has ' + amHeaders.length + ' cols, Archive has ' + archH.length + ' cols — ' +
+                        Math.abs(amHeaders.length - archH.length) + ' column(s) difference'
+                });
+            }
+
+            // Column-by-column positional comparison
+            for (var i = 0; i < maxCols; i++) {
+                var amTrimmed = i < amHeaders.length ? amHeaders[i] : '(missing)';
+                var archTrimmed = i < archH.length ? archH[i] : '(missing)';
+                var amDisplay = i < amRaw.length ? (amRaw[i] !== '' ? String(amRaw[i]) : '[BLANK]') : '(missing)';
+                var archDisplay = i < archRaw.length ? (archRaw[i] !== '' ? String(archRaw[i]) : '[BLANK]') : '(missing)';
+
+                if (amTrimmed !== archTrimmed) {
+                    var status = amTrimmed === '(missing)' ? 'EXTRA IN ARCHIVE' :
+                        archTrimmed === '(missing)' ? 'MISSING FROM ARCHIVE' :
+                            amTrimmed === '' ? 'BLANK AM HEADER' :
+                                archTrimmed === '' ? 'BLANK ARCHIVE HEADER' : 'NAME MISMATCH';
+
+                    var notes = status === 'EXTRA IN ARCHIVE' ? 'Archive col ' + (i + 1) + ' "' + archDisplay + '" has no AM equivalent' :
+                        status === 'MISSING FROM ARCHIVE' ? 'AM col ' + (i + 1) + ' "' + amDisplay + '" not in Archive — data lost on archive' :
+                            status === 'BLANK AM HEADER' ? 'AM col ' + (i + 1) + ' has blank header — check if formula/helper column' :
+                                status === 'BLANK ARCHIVE HEADER' ? 'Archive col ' + (i + 1) + ' has blank header' :
+                                    'AM "' + amDisplay + '" writes to Archive "' + archDisplay + '" — DATA SHIFT';
+
+                    issues.push({ col: i + 1, amDisp: amDisplay, archDisp: archDisplay, status: status, notes: notes });
+
+                    Logger.log('  Col ' + (i + 1) + ' [' + status + '] AM=[' + amDisplay + '] ARCH=[' + archDisplay + '] — ' + notes);
+                }
+            }
+
+            if (issues.length === 0) {
+                Logger.log(wb.name + ': OK — all ' + amHeaders.length + ' columns match exactly');
+                resultRows.push([wb.name, 'OK — ' + amHeaders.length + ' columns match', '', '', '', '']);
+            } else {
+                issues.forEach(function (iss) {
+                    resultRows.push([wb.name, iss.status, iss.col, iss.amDisp, iss.archDisp, iss.notes]);
+                });
+                totalIssues += issues.length;
+            }
+        });
+
+        // ── Write results ─────────────────────────────────────────────────────
+        writeMacroResults_('Archive Header Diagnostic — ' + workbooks.length +
+            ' workbook(s), ' + totalIssues + ' issue(s)', resultRows);
+
+        var summary = totalIssues === 0
+            ? 'All archive workbooks match AM headers perfectly. No data shifting risk.'
+            : totalIssues + ' issue(s) found across ' + workbooks.length + ' workbook(s).\n\n' +
+            (blankAmCols.length > 0
+                ? 'NOTE: AM has ' + blankAmCols.length + ' blank-header column(s) at position(s): ' +
+                blankAmCols.join(', ') + '.\nCheck Execution Log for data content of these columns.\n\n'
+                : '') +
+            'See MacroResults sheet for full details.';
+
+        Logger.log('=== diagArchiveHeaders COMPLETE: ' + totalIssues + ' issue(s) found ===');
+        ui.alert('Archive Header Diagnostic\n\n' + summary);
+
+    } catch (e) {
+        Logger.log('diagArchiveHeaders ERROR: ' + e.message + '\n' + e.stack);
+        ui.alert('Diagnostic failed: ' + e.message);
+    }
 }

@@ -27,11 +27,15 @@
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * VERSION HISTORY
- * v2.0 - Added Funding Sources, Income Sources, Collaboration Source
- * v3.0 - Major report restructure; product DR/PF routing; code 3 support
- * v3.1 - Removed Report Totals; batch write; Grant Summary improvements
- * v3.2 - FIELD_DISPLAY_MAP and getFieldDisplayLabel()
- * v3.3 - Year-based archive iteration; trimHeaders()
+ * v3.7 - NONE in income calcs; product dedup; Households usedBefore.
+ * v3.8 - Closed unterminated header comment block.
+ * v3.9 - Fixed case-mismatch bug in distProdByBox lookup.
+ * v3.10 - Grant Summary: Baby Products Distributed in narrative and table.
+ * v4.1 - All reports include all Service Statuses; status breakdown in narrative;
+ *         Used Before (Yes/No) columns; Testimonials First/Last Name; resolvers updated.
+ * v4.2 - Distribution Stats record now stores applicantType (computed from usedBefore
+ *         via getApplicantType()). Previously the [Calc] Applicant Type column was blank
+ *         in Distribution Stats because only usedBefore was stored, not applicantType.
  */
 
 'use strict';
@@ -209,7 +213,10 @@ function loadProductLookupData(fromDate, toDate) {
             var qtyCol = dpH.indexOf('Quantity');
             if (boxCol !== -1 && qtyCol !== -1) {
                 for (var i = 1; i < dpData.length; i++) {
-                    var bc = (dpData[i][boxCol] || '').toString().trim();
+                    // v3.9: key is uppercased so lookup in calculateProductCounts
+                    // (which uppercases the AM code before lookup) always matches
+                    // regardless of case in the Distributed_Products sheet.
+                    var bc = (dpData[i][boxCol] || '').toString().trim().toUpperCase();
                     if (!bc) continue;
                     var qty = parseInt(dpData[i][qtyCol]) || 0;
                     if (!result.distProdByBox[bc]) result.distProdByBox[bc] = [];
@@ -330,6 +337,10 @@ function calculateProductCounts(id, productCode1, productCode2, productCode3,
     }
     var compositeKey = recId + '|' + dateKey;
     var drPfCounted = false;
+    // v3.7: Track already-counted BoxCodes (upper-cased) so a repeated code
+    // across Code 1 / Code 2 / Code 3 isn't double-counted. DR/PF is already
+    // handled by drPfCounted above. Applies to both regular and DB* baby.
+    var countedBoxCodes = {};
 
     for (var c = 0; c < codes.length; c++) {
         var code = codes[c];
@@ -344,9 +355,13 @@ function calculateProductCounts(id, productCode1, productCode2, productCode3,
                 drPfCounted = true;
             }
 
-        } else if (code.length >= 2 && code.charAt(1).toUpperCase() === 'B') {
-            // Baby product — 2nd character of BoxCode is 'B'
-            var bm = productData.distProdByBox[code];
+        } else if (cu.indexOf('DB') === 0) {
+            // v3.5: Baby product — BoxCode starts with "DB" (per G2N rule).
+            // v3.7: Dedup — same DB code in multiple slots counted once.
+            if (countedBoxCodes[cu]) continue;
+            countedBoxCodes[cu] = true;
+            // v3.9: use cu (uppercase) — distProdByBox is now keyed uppercase
+            var bm = productData.distProdByBox[cu];
             if (bm && bm.length > 0) {
                 var bs = 0;
                 for (var bi = 0; bi < bm.length; bi++) bs += bm[bi];
@@ -355,7 +370,11 @@ function calculateProductCounts(id, productCode1, productCode2, productCode3,
 
         } else {
             // Regular BoxCode
-            var dm = productData.distProdByBox[code];
+            // v3.7: Dedup — same BoxCode in multiple slots counted once.
+            if (countedBoxCodes[cu]) continue;
+            countedBoxCodes[cu] = true;
+            // v3.9: use cu (uppercase) — distProdByBox is now keyed uppercase
+            var dm = productData.distProdByBox[cu];
             if (dm && dm.length > 0) {
                 var ds = 0;
                 for (var di = 0; di < dm.length; di++) ds += dm[di];
@@ -552,7 +571,35 @@ function _getGrantResolvers_() {
         '[Calc] Products Requested': function (r) { return r.productsRequested || 0; },
         '[Calc] Products Distributed': function (r) { return r.productsDistributed || 0; },
         '[Calc] Baby Products Requested': function (r) { return r.babyRequested || 0; },
-        '[Calc] Baby Products Received': function (r) { return r.babyDistributed || 0; },
+        // v3.4: Hard-cut rename of '[Calc] Baby Products Received' to
+        // '[Calc] Baby Products Distributed'. LU_ReportColumns rows using
+        // the old key will emit blanks until updated.
+        '[Calc] Baby Products Distributed': function (r) { return r.babyDistributed || 0; },
+
+        // v3.6: Used Before — Yes → 1, else 0. Sums to a count of "Yes"
+        // responses at the bottom of any report that includes this column.
+        // Source field: "Have you used our services before?"
+        '[Calc] Used Before': function (r) {
+            var v = (r.usedBefore || '').toString().trim().toLowerCase();
+            return (v === 'yes' || v === 'y' || v === 'true' || v === '1') ? 1 : 0;
+        },
+
+        // v4.1: Binary Yes/No indicator columns for Used Before.
+        // Used Before (Yes) = 1 when applicantType is Returning, else 0.
+        // Used Before (No)  = 1 when applicantType is New (or no value), else 0.
+        // Column names come from LU_ReportColumns Override Label.
+        '[Calc] Used Before (Yes)': function (r) {
+            var v = (r.usedBefore || '').toString().trim().toLowerCase();
+            return (v === 'yes' || v === 'y' || v === 'true' || v === '1') ? 1 : 0;
+        },
+        '[Calc] Used Before (No)': function (r) {
+            var v = (r.usedBefore || '').toString().trim().toLowerCase();
+            return (v === 'yes' || v === 'y' || v === 'true' || v === '1') ? 0 : 1;
+        },
+
+        // v4.1: First and Last Name resolvers (needed by Testimonials)
+        'First Name': function (r) { return r.firstName || ''; },
+        'Last Name': function (r) { return r.lastName || ''; },
 
         // ── Age bracket totals (from rec.ages returned by calculateDetailedAgeBrackets) ──
         '[Calc] People in Household': function (r) { return r.ages ? r.ages.people : 0; },
@@ -674,6 +721,9 @@ function _getFallbackCols_(reportName) {
         'Households': DATE_PFX.concat([
             { key: 'City', width: 120 }, { key: 'State', width: 50 }, { key: 'Zip Code', width: 65 }, { key: 'County', width: 100 },
             { key: '[Calc] Applicant Type', width: 80 },
+            // v4.1: Used Before Yes/No binary indicators — labels from LU_ReportColumns.
+            { key: '[Calc] Used Before (Yes)', width: 90 },
+            { key: '[Calc] Used Before (No)', width: 90 },
             { key: 'Request Type', width: 90 }, { key: 'Service Status', width: 90 }, { key: 'Funding Code', width: 90 },
             { key: 'Military Status', width: 100 },
             { key: 'Please Select Your Racial Category', width: 100 },
@@ -687,7 +737,7 @@ function _getFallbackCols_(reportName) {
             { key: '[Calc] Products Requested', width: 90 },
             { key: '[Calc] Products Distributed', width: 90 },
             { key: '[Calc] Baby Products Requested', width: 130 },
-            { key: '[Calc] Baby Products Received', width: 130 }
+            { key: '[Calc] Baby Products Distributed', width: 130 }
         ]).concat(AGE_BLOCK),
 
         // ── Distribution Stats (58 columns — v3.9 exact) ────────────────────────
@@ -702,7 +752,12 @@ function _getFallbackCols_(reportName) {
             { key: '[Calc] Products Requested', width: 90 },
             { key: '[Calc] Products Distributed', width: 90 },
             { key: '[Calc] Baby Products Requested', width: 130 },
-            { key: '[Calc] Baby Products Received', width: 130 },
+            { key: '[Calc] Baby Products Distributed', width: 130 },
+            // v4.1: Replaced single [Calc] Used Before with Applicant Type + Yes/No indicators.
+            // Column Override Labels are set in LU_ReportColumns.
+            { key: '[Calc] Applicant Type', width: 80 },
+            { key: '[Calc] Used Before (Yes)', width: 90 },
+            { key: '[Calc] Used Before (No)', width: 90 },
             { key: 'How did you learn about our program?', width: 120 },
             { key: 'More information about the person or organization that referred you.', width: 130 },
             { key: 'What is the title or position of the person who referred you?', width: 120 },
@@ -752,7 +807,10 @@ function _getFallbackCols_(reportName) {
             { key: 'Briefly explain your current situation.', width: 250, wrapText: true },
             { key: 'How will receiving personal and home cleaning products help you?', width: 300, wrapText: true },
             { key: 'If you have received cleaning products from us in the past, how has receiving these products helped you?', width: 300, wrapText: true },
-            { key: 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.', width: 120 }
+            { key: 'May we use the information you have provided in the 2 questions above about HOW WILL and HOW DID receiving cleaning products help? ONLY the information from these 2 areas will be shared to help us show potential donors your need is real.', width: 120 },
+            // v4.1: First and Last Name added at right of report
+            { key: 'First Name', width: 100 },
+            { key: 'Last Name', width: 100 }
         ])
 
     };
@@ -1075,11 +1133,19 @@ function _writeGrantReportRaw_(reportKey, reportTitle, filePrefix,
 /**
  * Generate Applicants Open Requests report.
  *
- * Shows requests where Service Status is blank, null, or 'Open'.
+ * Selection criteria:
+ *   - Request Date between fromDate and toDate (inclusive)
+ *   - Service Status is blank/null OR equals 'Open'
+ *     (uses emptyOrValues so untouched rows — the real "open" signal —
+ *      are included alongside rows explicitly marked Open)
+ *   - Rows pulled from Applicants_Master AND all archive workbooks
+ *     in range (via getCombinedData).
+ *
  * Columns: driven by LU_ReportColumns 'Open Requests'.
  * Order: Quarter, Year, Month, Day, Address, City, State, Zip, County.
  *
  * v4.0: dataHeaders replaced with LU_ReportColumns lookup.
+ * v3.5: Children 2 and Under is now numeric (1/0) so totals sum correctly.
  *
  * @param {string} fromDateStr - YYYY-MM-DD
  * @param {string} toDateStr   - YYYY-MM-DD
@@ -1142,8 +1208,10 @@ function generateApplicantsOpenRequests(fromDateStr, toDateStr) {
                 serviceStatus: getStr(row, colIdx.serviceStatus),
                 firstName: fn,
                 lastName: ln,
-                // Children 2 and Under = Take Baby Box? X→1 (displayed as 1 or blank)
-                children2Under: getBabyBoxIndicator(getStr(row, colIdx.babyBox)),
+                // v3.5: Children 2 and Under = Take Baby Box? X → 1, else 0.
+                // Changed from getBabyBoxIndicator() (which returned "X" / "")
+                // so the column sums to a numeric count in spreadsheet totals.
+                children2Under: (getStr(row, colIdx.babyBox).toUpperCase() === 'X') ? 1 : 0,
                 id: getStr(row, colIdx.id),
                 originalFormId: getStr(row, colIdx.originalFormId)
             });
@@ -1201,10 +1269,10 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
         if (fromDate > toDate)
             return { success: false, error: 'From Date must be before To Date' };
 
-        var combined = getCombinedData(fromDate, toDate,
-            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+        // v4.1: All service statuses included — no longer filtered to Picked Up/Delivered.
+        var combined = getCombinedData(fromDate, toDate, []);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
+            return { success: false, error: 'No records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1283,6 +1351,7 @@ function generateHouseholdsReport(fromDateStr, toDateStr) {
                 babyRequested: products.babyRequested,
                 babyDistributed: products.babyDistributed,
                 children2Under: children2Under,
+                usedBefore: getStr(row, colIdx.usedBefore),  // v3.7: for [Calc] Used Before column
                 ages: ages
             });
         }
@@ -1335,10 +1404,10 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
         if (fromDate > toDate)
             return { success: false, error: 'From Date must be before To Date' };
 
-        var combined = getCombinedData(fromDate, toDate,
-            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+        // v4.1: All service statuses included — no longer filtered to Picked Up/Delivered.
+        var combined = getCombinedData(fromDate, toDate, []);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
+            return { success: false, error: 'No records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1372,7 +1441,8 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
             moreInfo: headers.indexOf(resolveAMField_(COL_MORE_INFO)),
             productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
             productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
-            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
+            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3')),
+            usedBefore: headers.indexOf(resolveAMField_(COL_USED_BEFORE))   // v3.4: for [Calc] Used Before column
         };
 
         var records = [];
@@ -1443,6 +1513,8 @@ function generateDistributionStatsReport(fromDateStr, toDateStr) {
                 incomeLevel: getStr(row, colIdx.incomeLevel),
                 rawAssistance: assistArr,      // v4.2: array for dynamic indicator cols
                 children2Under: children2Under,
+                usedBefore: getStr(row, colIdx.usedBefore),  // v3.4: for [Calc] Used Before column
+                applicantType: getApplicantType(getStr(row, colIdx.usedBefore)),  // v4.1: for [Calc] Applicant Type
                 ages: ages
             });
         }
@@ -1504,10 +1576,10 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
         if (fromDate > toDate)
             return { success: false, error: 'From Date must be before To Date' };
 
-        var combined = getCombinedData(fromDate, toDate,
-            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+        // v4.1: All service statuses included.
+        var combined = getCombinedData(fromDate, toDate, []);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No Picked Up or Delivered records found for the specified date range' };
+            return { success: false, error: 'No records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1525,7 +1597,9 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
             situation: headers.indexOf(resolveAMField_(COL_SITUATION)),
             help1: headers.indexOf(resolveAMField_(COL_HELP_1)),
             help2: headers.indexOf(resolveAMField_(COL_HELP_2)),
-            permission: headers.indexOf(resolveAMField_(COL_PERMISSION))
+            permission: headers.indexOf(resolveAMField_(COL_PERMISSION)),
+            firstName: headers.indexOf(resolveAMField_('First Name')),  // v4.1
+            lastName: headers.indexOf(resolveAMField_('Last Name'))     // v4.1
         };
 
         var records = [];
@@ -1552,7 +1626,9 @@ function generateTestimonialsReport(fromDateStr, toDateStr) {
                 situation: getStr(row, colIdx.situation),
                 help1: help1,
                 help2: getStr(row, colIdx.help2),
-                permission: getStr(row, colIdx.permission)
+                permission: getStr(row, colIdx.permission),
+                firstName: getStr(row, colIdx.firstName),   // v4.1
+                lastName: getStr(row, colIdx.lastName)       // v4.1
             });
         }
         if (records.length === 0)
@@ -1712,10 +1788,10 @@ function generateRequestFrequencyReport(fromDateStr, toDateStr) {
 
         var cols = _getColsWithFallback_('Request Frequency');
         // ── Sheets path ───────────────────────────────────────────────────────
-        var combined = getCombinedData(fromDate, toDate,
-            [{ column: 'Service Status', values: ['Picked Up', 'Delivered'] }]);
+        // v4.1: All service statuses included.
+        var combined = getCombinedData(fromDate, toDate, []);
         if (combined.totalCount === 0)
-            return { success: false, error: 'No records found for the specified date range with Picked Up or Delivered status' };
+            return { success: false, error: 'No records found for the specified date range' };
 
         var headers = combined.headers;
         var rows = combined.rows;
@@ -1877,9 +1953,8 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             return { success: false, error: 'From Date must be before To Date' };
         }
         // ── Sheets path ─────────────────────────────────────────────────────────
-        var filters = [
-            { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
-        ];
+        // v4.1: All service statuses included — geographic filters only.
+        var filters = [];
 
         // Add geographic filters if provided (support comma-separated multi-values)
         if (filterCounty && filterCounty.trim() !== '') {
@@ -1916,15 +1991,22 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             babyBox: headers.indexOf(resolveAMField_(COL_BABY_BOX)),   // v4.4: Children Under 2
             productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
             productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
-            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
+            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3')),
+            usedBefore: headers.indexOf(resolveAMField_(COL_USED_BEFORE))   // v3.6
         };
 
         // Compute metrics
         var uniqueHouseholds = new Set();
         var incomeCounts = {};
+        var statusCounts = {};   // v4.1: tally by Service Status for narrative breakdown
         var totalChildren = 0, totalAdults = 0, totalSeniors = 0;
-        var totalChildren2Under = 0;   // v4.4: Children Under 2
+        var totalChildren2Under = 0;
+        var totalUsedBefore = 0;
         var totalProductsDistributed = 0;
+        var totalBabyDistributed = 0;
+
+        // v4.1: add serviceStatus to colIdx
+        var svcStatusCol = headers.indexOf(resolveAMField_('Service Status'));
 
         for (var i = 0; i < rows.length; i++) {
             var row = rows[i];
@@ -1933,12 +2015,20 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             var clientKey = (firstName + '|' + lastName).toLowerCase();
             uniqueHouseholds.add(clientKey);
 
-            // Income levels
+            // v3.7: Income levels — NONE now counts.
             var income = getStr(row, colIdx.incomeLevel);
-            if (income !== '') {
-                if (!incomeCounts[income]) incomeCounts[income] = 0;
-                incomeCounts[income]++;
+            var incomeKey = income.trim();
+            if (incomeKey === '' || incomeKey.toUpperCase() === 'NONE') {
+                incomeKey = 'NONE';
             }
+            if (!incomeCounts[incomeKey]) incomeCounts[incomeKey] = 0;
+            incomeCounts[incomeKey]++;
+
+            // v4.1: Service Status counts
+            var svc = svcStatusCol !== -1 ? (row[svcStatusCol] || '').toString().trim() : '';
+            if (!svc) svc = 'Unknown';
+            if (!statusCounts[svc]) statusCounts[svc] = 0;
+            statusCounts[svc]++;
 
             // Age brackets
             var ages = calculateAgeBrackets(headers, row, 64);
@@ -1946,8 +2036,10 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             totalAdults += ages.adults;
             totalSeniors += ages.seniors;
 
-            // v4.4: Children Under 2 = Take Baby Box? X → 1
             if (getStr(row, colIdx.babyBox).toUpperCase() === 'X') totalChildren2Under++;
+
+            var ub = getStr(row, colIdx.usedBefore).toLowerCase();
+            if (ub === 'yes' || ub === 'y' || ub === 'true' || ub === '1') totalUsedBefore++;
 
             // Products
             var recId = getStr(row, colIdx.id);
@@ -1957,6 +2049,7 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             var code3 = getStr(row, colIdx.productCode3);
             var products = calculateProductCounts(recId, code1, code2, code3, reqDate, productData, headers, row);
             totalProductsDistributed += products.productsDistributed;
+            totalBabyDistributed += products.babyDistributed;
         }
 
         var householdCount = uniqueHouseholds.size;
@@ -1967,8 +2060,9 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
             fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
             householdCount, combined.totalCount,
             totalChildren, totalAdults, totalSeniors,
-            totalProductsDistributed,
-            incomeCounts, totalIncomeRecords, totalChildren2Under);
+            totalProductsDistributed, totalBabyDistributed,
+            incomeCounts, totalIncomeRecords, totalChildren2Under,
+            totalUsedBefore, statusCounts);   // v4.1: statusCounts added
 
     } catch (error) {
         Logger.log('Grant Summary report error: ' + error.message);
@@ -1983,7 +2077,8 @@ function generateGrantSummaryReport(fromDateStr, toDateStr, filterCounty, filter
  */
 function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filterZip, incomeLevel,
     householdCount, totalCount, totalChildren, totalAdults, totalSeniors,
-    totalProductsDistributed, incomeCounts, totalIncomeRecords, totalChildren2Under) {
+    totalProductsDistributed, totalBabyDistributed, incomeCounts, totalIncomeRecords,
+    totalChildren2Under, totalUsedBefore, statusCounts) {
 
     // Determine income threshold from selected income level (upper limit per requirements)
     var selectedIncomeLevel = incomeLevel || '$30,000 - $39,999';
@@ -1997,10 +2092,14 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
     var belowThresholdCount = 0;
     var incomeArr = [];
     for (var k in incomeCounts) {
-        var lowEnd = parseIncomeLowEnd(k);
-        var highEnd = parseIncomeHighEnd(k);
-        // isBelow: the entire income range is at or below the threshold
-        var isBelow = (highEnd >= 0 && highEnd <= threshold);
+        // v3.7: NONE is treated as $0 (below every positive threshold) and
+        // sorted to the top of the breakdown table via lowEnd = -1.
+        var isNone = (k.toUpperCase() === 'NONE');
+        var lowEnd = isNone ? -1 : parseIncomeLowEnd(k);
+        var highEnd = isNone ? 0 : parseIncomeHighEnd(k);
+        // isBelow: the entire income range is at or below the threshold.
+        // NONE always qualifies when threshold >= 0 (effectively always).
+        var isBelow = isNone ? true : (highEnd >= 0 && highEnd <= threshold);
         incomeArr.push({ level: k, count: incomeCounts[k], lowEnd: lowEnd, isBelow: isBelow });
         if (isBelow) {
             belowThresholdLevels.push({ level: k, count: incomeCounts[k] });
@@ -2010,12 +2109,20 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
 
     // Sort all income levels by low end ascending for display
     incomeArr.sort(function (a, b) { return a.lowEnd - b.lowEnd; });
+    // v3.7: sort NONE to the top of the below-threshold list as well.
     belowThresholdLevels.sort(function (a, b) {
-        return parseIncomeLowEnd(a.level) - parseIncomeLowEnd(b.level);
+        var la = (a.level.toUpperCase() === 'NONE') ? -1 : parseIncomeLowEnd(a.level);
+        var lb = (b.level.toUpperCase() === 'NONE') ? -1 : parseIncomeLowEnd(b.level);
+        return la - lb;
     });
 
-    // Overall % of households below threshold
-    var belowThresholdPct = householdCount > 0 ? Math.round((belowThresholdCount / householdCount) * 100) : 0;
+    // v3.6: Narrative percentages now use totalIncomeRecords (per-request basis),
+    // matching the Income Level Breakdown table's "% of All" column. Previously
+    // belowThresholdPct used householdCount as the denominator while
+    // belowThresholdCount was an income-record count, producing mismatched
+    // figures between the narrative and the breakdown table.
+    var belowThresholdPct = totalIncomeRecords > 0
+        ? Math.round((belowThresholdCount / totalIncomeRecords) * 100) : 0;
 
     // Build below-threshold breakdown lines
     var incomeLines = [];
@@ -2024,9 +2131,10 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
         incomeLines.push(pct + '% ' + belowThresholdLevels[j].level);
     }
 
-    // Date range description
-    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM yyyy');
-    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM yyyy');
+    // v3.6: Date range description — full dates (e.g. "January 1, 2026 to
+    // April 14, 2026") instead of month-only ("January 2026 to April 2026").
+    var fromDisplay = Utilities.formatDate(fromDate, CONFIG.TIMEZONE, 'MMMM d, yyyy');
+    var toDisplay = Utilities.formatDate(toDate, CONFIG.TIMEZONE, 'MMMM d, yyyy');
 
     // Geographic filter description
     var geoFilter = '';
@@ -2036,13 +2144,37 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
     var geoDesc = geoFilter ? ' in ' + geoFilter : '';
 
     // Build narrative
+    // v3.6: "% of requests" phrasing; v3.10: baby products; v4.1: status breakdown.
+    var babyPhrase = totalBabyDistributed > 0
+        ? ' We also distributed ' + totalBabyDistributed.toLocaleString() +
+        ' baby products to families with children under 2.'
+        : '';
+
+    // v4.1: Build ordered status breakdown sentence
+    var statusOrder = ['Picked Up', 'Delivered'];
+    var statusKeys = Object.keys(statusCounts || {});
+    var orderedStatuses = statusOrder.filter(function (s) { return statusCounts && statusCounts[s]; })
+        .concat(statusKeys.filter(function (s) {
+            return statusOrder.indexOf(s) === -1;
+        }).sort());
+    var statusPhrase = '';
+    if (orderedStatuses.length > 0) {
+        var statusParts = orderedStatuses.map(function (s) {
+            return statusCounts[s].toLocaleString() + ' ' + s;
+        });
+        statusPhrase = ' Of the ' + totalCount.toLocaleString() + ' total requests, ' +
+            statusParts.join(', ') + '.';
+    }
+
     var narrative = 'Assessing the ' + householdCount.toLocaleString() + ' households our Healthy Essentials Pantry has served' +
         geoDesc + ' from ' + fromDisplay + ' to ' + toDisplay + ', ' +
-        belowThresholdPct + '% of the households served had an annual income of ' + thresholdFormatted + ' or less. ' +
-        (incomeLines.length > 0 ? 'Within these households, ' + incomeLines.join(', ') + '. ' : '') +
+        belowThresholdPct + '% of the requests received came from households with an annual income of ' + thresholdFormatted + ' or less. ' +
+        (incomeLines.length > 0 ? 'Within these requests, ' + incomeLines.join(', ') + '. ' : '') +
+        statusPhrase + ' ' +
         'We positively impacted the lives of ' + totalChildren.toLocaleString() + ' children, ' +
         totalAdults.toLocaleString() + ' adults, and ' + totalSeniors.toLocaleString() + ' seniors with ' +
-        totalProductsDistributed.toLocaleString() + ' hygiene products. ' +
+        totalProductsDistributed.toLocaleString() + ' hygiene products.' +
+        babyPhrase + ' ' +
         'We believe each item represents not just cleanliness, but a step toward restoring dignity and promoting health.';
 
     // Create a Google Doc with the narrative
@@ -2067,16 +2199,25 @@ function _buildGrantSummaryDoc_(fromDate, toDate, filterCounty, filterCity, filt
     headerRow.appendTableCell('Metric').setBackgroundColor('#4a86e8');
     headerRow.appendTableCell('Value').setBackgroundColor('#4a86e8');
 
+    // v3.6: Added "Used Before" row; v3.10: Baby Products; v4.1: Status breakdown.
     var metrics = [
         ['Households Served', householdCount.toLocaleString()],
-        ['Total Requests', totalCount.toLocaleString()],
+        ['Total Requests', totalCount.toLocaleString()]
+    ];
+    // v4.1: Add one row per Service Status
+    orderedStatuses.forEach(function (s) {
+        metrics.push(['  — ' + s, statusCounts[s].toLocaleString()]);
+    });
+    metrics = metrics.concat([
         ['Households at or Below ' + thresholdFormatted, belowThresholdCount.toLocaleString() + ' (' + belowThresholdPct + '%)'],
         ['Children', totalChildren.toLocaleString()],
         ['Children Under 2', (totalChildren2Under || 0).toLocaleString()],
         ['Adults', totalAdults.toLocaleString()],
         ['Seniors', totalSeniors.toLocaleString()],
-        ['Products Distributed', totalProductsDistributed.toLocaleString()]
-    ];
+        ['Used Before (Yes)', (totalUsedBefore || 0).toLocaleString()],
+        ['Products Distributed', totalProductsDistributed.toLocaleString()],
+        ['Baby Products Distributed', (totalBabyDistributed || 0).toLocaleString()]
+    ]);
 
     for (var m = 0; m < metrics.length; m++) {
         var dataRow = table.appendTableRow();

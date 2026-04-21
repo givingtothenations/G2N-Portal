@@ -3,7 +3,6 @@
  * Search and retrieval operations for Applicants_Master records
  * Supports search by Record ID, Original Form ID, and Name+Date.
  * Provides filtered record lists for dashboard, status, and distribution code views.
- * v2.1 - Corrected field references to match Applicants_Master headers
  * v2.2 - Adopted shared trimHeaders() utility (#11).
  *         Removed redundant trim in rowToRecord() — callers pass trimmed headers (#16).
  *         Moved JSDoc comments out of searchRecords() function body (#17).
@@ -14,6 +13,16 @@
  *         scans G2N_Archive and all G2N_Archive_YYYY workbooks. For nameDate,
  *         archive hits are appended to AM results. Archive records carry
  *         _archived:true and _archiveSource:workbookName; rowIndex is null.
+ * v2.6 - Diagnostic + header-scan fallback for ID/First Name/Last Name/
+ *         Request Date columns (same pattern v2.4 applied to Original
+ *         Form ID only). Fixes "search not returning records" on an ID
+ *         that exists in AM when LU_FieldMap has drifted from the AM
+ *         raw headers — resolveAMField_() silently returns the input
+ *         unchanged on a miss, producing -1 indices and zero-result
+ *         searches with no error message. Now searches also log the
+ *         resolved indices and return an explicit error when a required
+ *         column cannot be located by either the FieldMap or a direct
+ *         case-insensitive header scan.
  */
 
 /**
@@ -32,25 +41,52 @@ function searchRecords(criteria) {
         const data = sheet.getDataRange().getValues();
         const headers = trimHeaders(data[0]);
 
-        // Get column indices via FieldMapService for resilience to header renames
+        // v2.6: Resolve columns with FieldMap first, then fall back to a direct
+        // case-insensitive header scan. resolveAMField_() silently returns the
+        // input on a FieldMap miss, so the raw resolved name may not exist in
+        // the trimmed headers array. Without this fallback, every data[i][-1]
+        // is undefined and every search silently returns zero matches.
+        function _resolveColIdx(amFieldName) {
+            var idx = headers.indexOf(resolveAMField_(amFieldName));
+            if (idx !== -1) return idx;
+            var target = amFieldName.toLowerCase();
+            var lowerHeaders = headers.map(function (h) { return h.toLowerCase(); });
+            return lowerHeaders.indexOf(target);
+        }
+
         const colIndices = {
-            id: headers.indexOf(resolveAMField_('ID')),
-            firstName: headers.indexOf(resolveAMField_('First Name')),
-            lastName: headers.indexOf(resolveAMField_('Last Name')),
-            formId: headers.indexOf(resolveAMField_('Original Form ID')),
-            requestDate: headers.indexOf(resolveAMField_('Request Date')),
-            phone: headers.indexOf(resolveAMField_('Phone Number')),
-            email: headers.indexOf(resolveAMField_('Email')),
-            city: headers.indexOf(resolveAMField_('City')),
-            state: headers.indexOf(resolveAMField_('State')),
-            serviceStatus: headers.indexOf(resolveAMField_('Service Status'))
+            id: _resolveColIdx('ID'),
+            firstName: _resolveColIdx('First Name'),
+            lastName: _resolveColIdx('Last Name'),
+            formId: _resolveColIdx('Original Form ID'),
+            requestDate: _resolveColIdx('Request Date'),
+            phone: _resolveColIdx('Phone Number'),
+            email: _resolveColIdx('Email'),
+            city: _resolveColIdx('City'),
+            state: _resolveColIdx('State'),
+            serviceStatus: _resolveColIdx('Service Status')
         };
+
+        // v2.6: Log the resolved indices so a failed search leaves a trail
+        // in the Executions log. "ID=-1" is the real signal for the common
+        // FieldMap-drift cause of silent zero-result searches.
+        Logger.log('searchRecords: criteria=' + JSON.stringify(criteria) +
+            ' colIndices=' + JSON.stringify(colIndices));
 
         const searchType = criteria.searchType || 'id';
 
         // Search by Record ID (exact match)
         if (searchType === 'id' && criteria.id) {
+            if (colIndices.id === -1) {
+                return {
+                    success: false, error:
+                        'ID column not found in Applicants_Master. Check LU_FieldMap → run G2N Management > Setup > Clear Lookup Cache Now.'
+                };
+            }
             const searchId = parseInt(criteria.id);
+            if (isNaN(searchId)) {
+                return { success: false, error: 'Invalid Record ID (must be a number).' };
+            }
             for (let i = 1; i < data.length; i++) {
                 if (parseInt(data[i][colIndices.id]) === searchId) {
                     return {
@@ -106,6 +142,14 @@ function searchRecords(criteria) {
 
         // Search by Last Name, First Name, and optional Request Date
         if (searchType === 'nameDate') {
+            // v2.6: Guard against FieldMap drift — if name columns can't be
+            // resolved the search would silently return zero matches.
+            if (colIndices.firstName === -1 || colIndices.lastName === -1) {
+                return {
+                    success: false, error:
+                        'Name columns not found in Applicants_Master. Check LU_FieldMap → run G2N Management > Setup > Clear Lookup Cache Now.'
+                };
+            }
             const firstName = (criteria.firstName || '').toLowerCase().trim();
             const lastName = (criteria.lastName || '').toLowerCase().trim();
             const searchDate = criteria.date || '';
@@ -220,7 +264,9 @@ function searchArchiveSheets_(criteria) {
             var files = folder.getFiles();
             while (files.hasNext()) {
                 var file = files.next();
-                if (file.getMimeType() !== MimeType.GOOGLE_SHEETS) continue;
+                // v2.6: MimeType enum is deprecated — use the literal MIME string
+                // (same pattern ReportService uses). 'application/vnd.google-apps.spreadsheet'
+                if (file.getMimeType() !== 'application/vnd.google-apps.spreadsheet') continue;
                 if (/^G2N_Archive(_\d{4})?$/.test(file.getName())) {
                     try {
                         workbooksToSearch.push({

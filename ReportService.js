@@ -16,27 +16,70 @@
  *   - File Cleanup: Deletes report files older than 1 month (excl. Distribution);
  *                  Distribution folder deletes files for inactive SchedDisbCodes
  *
- * v4.0 - Phase 4: Scheduling Report enhancements (History column,
- *         data validation, sort by ID, magenta highlight, auto-detect
- *         last AM ID), Distribution Report times from LU_DistribCodes,
- *         editable report data retrieval
- * v4.1 - Process Scheduling Report: LU_SchedDisbCodes lookup writes
- *         Distribution Start Date, Distribution Interval, Funding Source,
- *         Generic Distribution Code to AM.
- *         Process Distribution: Box 1→Box Code/Sched Box Code 1/Received
- *         Product Code 1, Box 2→Sched Box Code 2/Received Product Code 2.
- *         Date fallback: ending date from Available Dates when Date Picked
- *         Up is blank for Last Date Served, Final SCD, Next Service Avail.
- *         Updated baby box footer text with word wrap.
- * v4.2 - Process Scheduling Report: Service Status write-back now also
- *         updates Last Date Served, Final SCD with current date and
- *         Next Service Availability Date with current date + 90 days
  * v4.3 - Hygiene Box Distribution Stats: finds sheet by distribution code
  *         (tries full code then generic), writes by header name:
  *         Completed in Spreadsheet, Distribution Date Range, Scheduled
  *         Distrib Code, Total Scheduled-Recipients/Boxes, With Baby Box,
  *         Picked Up-Generic/Baby, Restock-# Recipients, % No Pick Up
  * v4.4 - Fixed Hygiene Stats column name: Restock-# Recipients (dash not =)
+ * v5.40 - executeArchiveBatch(): added syncArchiveHeaders_() + remapRowToHeaders_()
+ *         before every archive write. syncArchiveHeaders_() appends any AM columns
+ *         missing from Archive. remapRowToHeaders_() remaps each AM row to Archive
+ *         column order by header name — eliminates positional write risk entirely.
+ * v5.41 - syncArchiveHeaders_(): added rename detection via LU_FieldMap
+ *         byPreviousHeaderName. Renames Archive column headers in place when a
+ *         rename is recorded in Previous Header Name column; falls back to append.
+ * v5.42 - generateRestockReport(): response now includes totalRows, centers[]
+ *         per-center array, grandTotalScheduled, grandTotalRestock, grandAvgPct.
+ * v5.43 - diagProductCounts(): diagnostic report for AP → Grants tab. For a
+ *         given date range, pulls all Picked Up/Delivered records and shows
+ *         per-record, per-box-code actual product count vs expected. Flags
+ *         missing box codes in Distributed_Products, missing DR/PF entries,
+ *         and any code-slot that resolved to zero products. Writes a Google
+ *         Sheet to the Grants folder with three tabs: Summary (box codes vs
+ *         expected), Detail (one row per record per code slot), Mismatches
+ *         (records whose totals don't match expected).
+ * v5.44 - diagProductCounts(): added expected counts for box code E (10) and
+ *         DG1 (18). Added Income Level Bracket summary block as the uppermost
+ *         section of the Summary tab — count of Picked Up/Delivered records
+ *         per income bracket, sorted low-to-high, NONE first.
+ * v5.45 - diagProductCounts(): restructured as crosstab. Summary tab: one row
+ *         per income level, columns = Record Count + one column per unique box
+ *         code; cell = count of records at that level that used that code;
+ *         difference column flags where code count < record count. Mismatches
+ *         tab: one row per record with at least one code mismatch; columns =
+ *         ID, First Name, Last Name, Income Level, Code 1, Code 2, Code 3 +
+ *         per-code actual vs expected. Detail tab retained as full row-level log.
+ * v5.46 - diagProductCounts(): added Tab 4 "Gaps by Income Level". For each
+ *         income level × box code combination where the matched record count
+ *         is less than the income level record count, lists each gap record
+ *         with ID, First Name, Last Name, Code 1, Code 2, Code 3 and the
+ *         specific issue (code absent from slots, count mismatch, or NOT IN
+ *         Distributed_Products). Group summary columns (income level, box code,
+ *         gap count) appear only on the first row of each group.
+ * v5.47 - diagProductCounts(): added Tab 5 "All Slots Trace". For every gap
+ *         record, traces all three code slots through the product calc logic.
+ * v5.48 - All Slots Trace: per-cell issue highlighting.
+ * v5.49 - Tab 5 replaced with "Gap Root Cause". One row per unique gap record.
+ * v5.50 - Complete rebuild of diagProductCounts. Replaced flawed cross-record
+ *         crosstab approach (which produced spurious "gaps" whenever records
+ *         used different box codes) with per-record slot analysis. Each record
+ *         is evaluated against only its own Code 1/2/3. Results: OK, WRONG
+ *         COUNT, NOT FOUND, DEDUPED, BABY CODE, DR/PF, EMPTY. Issues = NOT
+ *         FOUND or WRONG COUNT only. Three tabs: Summary (by income level),
+ *         All Records (every record with slot results), Issues Only (filtered).
+ * v5.51 - diagProductCounts() rebuilt around the Grant Summary code path.
+ * v5.52 - diagProductCounts(): added Last Date Served, Processed By, Entered By.
+ * v5.53 - Fixed blank values for Processed By / Entered By via SV Field ID lookup.
+ * v5.54 - Split Missing Records into two tabs: "Needs Attention" (codes present
+ *         but productsDistributed=0 — actionable) and "By Design" (baby-only or
+ *         no codes — correct behaviour, not errors). Summary updated to show
+ *         both counts separately. Clarified notes so baby-only records are
+ *         clearly labelled "correct — no action needed".
+ * v5.55 - generateSchedulingReport(): fixed History flag and LU_SchedID integration.
+ *         History now uses Request Date (not AM ID) as the recency criterion.
+ *         beginId from LU_SchedID now drives Tier 1 history (rowId < beginId =
+ *         from a prior run = always History). Sort updated to Request Date asc.
  */
 
 'use strict';
@@ -432,10 +475,82 @@ function generateRestockReport() {
             Logger.log('generateRestockReport: no box codes found for: ' + noBoxWarnings.join('; '));
         }
 
-        // Unique distribution centers from detail rows
-        var centerSet = {};
-        detailRows.forEach(function (r) { centerSet[r.center] = true; });
-        var centerCount = Object.keys(centerSet).length;
+        // v5.42: Build per-center summary for the AP restock table.
+        // The client expects: centers[{center, distributions, totalScheduled,
+        // totalRestock, avgPctNoPickup}], plus grand totals.
+        //
+        // Distributions  = unique (schedCode + dateRange) per center
+        // Total Scheduled = sum of Total Scheduled-Recipients per that unique run
+        // Total Restock   = sum of Restock-# Recipients per that unique run
+        // Avg % No Pick Up = Total Restock / Total Scheduled × 100 (per center)
+        //
+        // We re-read the Hygiene Stats workbook once more to pull Total
+        // Scheduled-Recipients per run (not carried through detailRows,
+        // which are product-expanded). Doing it here avoids restructuring
+        // the detailRows pipeline above.
+        var centerStats = {}; // centerName → {runs:{runKey:{scheduled,restock}}, scheduledSum, restockSum}
+        sheets.forEach(function (sheet) {
+            var centerName = sheet.getName();
+            if (sheet.getLastRow() < 2) return;
+            var sdata = sheet.getDataRange().getValues();
+            var shdrs = trimHeaders(sdata[0]);
+            var cSched = shdrs.indexOf('Scheduled Distrib Code');
+            var cDate = shdrs.indexOf('Distribution Date Range');
+            var cRestock = shdrs.indexOf('Restock-# Recipients');
+            var cTotalRec = shdrs.indexOf('Total Scheduled-Recipients');
+            if (cRestock === -1 && cTotalRec === -1) return;
+
+            for (var ri = 1; ri < sdata.length; ri++) {
+                var srow = sdata[ri];
+                var schedV = cSched !== -1 ? (srow[cSched] || '').toString().trim().toUpperCase() : '';
+                var dateV = cDate !== -1 ? (srow[cDate] || '').toString().trim() : '';
+                var restockV = cRestock !== -1 ? (parseInt(srow[cRestock]) || 0) : 0;
+                var schedRec = cTotalRec !== -1 ? (parseInt(srow[cTotalRec]) || 0) : 0;
+                if (schedRec === 0 && restockV === 0) continue;
+
+                if (!centerStats[centerName]) {
+                    centerStats[centerName] = { runs: {}, scheduledSum: 0, restockSum: 0 };
+                }
+                var runKey = schedV + '||' + dateV;
+                if (!centerStats[centerName].runs[runKey]) {
+                    centerStats[centerName].runs[runKey] = { scheduled: 0, restock: 0 };
+                    centerStats[centerName].runs[runKey].scheduled = schedRec;
+                    centerStats[centerName].runs[runKey].restock = restockV;
+                    centerStats[centerName].scheduledSum += schedRec;
+                    centerStats[centerName].restockSum += restockV;
+                }
+            }
+        });
+
+        // Shape into client-friendly array, sorted by center name
+        var centers = [];
+        var centerNames = Object.keys(centerStats).sort();
+        var grandTotalScheduled = 0;
+        var grandTotalRestock = 0;
+        var totalDistributions = 0;
+        centerNames.forEach(function (cn) {
+            var cs = centerStats[cn];
+            var runCount = Object.keys(cs.runs).length;
+            var pct = cs.scheduledSum > 0
+                ? Math.round((cs.restockSum / cs.scheduledSum) * 1000) / 10
+                : 0;
+            centers.push({
+                center: cn,
+                distributions: runCount,
+                totalScheduled: cs.scheduledSum,
+                totalRestock: cs.restockSum,
+                avgPctNoPickup: pct
+            });
+            grandTotalScheduled += cs.scheduledSum;
+            grandTotalRestock += cs.restockSum;
+            totalDistributions += runCount;
+        });
+
+        var grandAvgPct = grandTotalScheduled > 0
+            ? Math.round((grandTotalRestock / grandTotalScheduled) * 1000) / 10
+            : 0;
+
+        var centerCount = centers.length;
 
         moveToFolder(ss.getId(), CONFIG.REPORTS_FOLDER_ID);
         logAudit('REPORT', null, 'Generated Restock Products Report: ' + centerCount +
@@ -443,7 +558,14 @@ function generateRestockReport() {
 
         return {
             success: true,
+            // v5.42: fields expected by AP restock table builder
+            totalRows: totalDistributions,   // total run count across all centers
             centerCount: centerCount,
+            centers: centers,                // per-center summary rows
+            grandTotalScheduled: grandTotalScheduled,
+            grandTotalRestock: grandTotalRestock,
+            grandAvgPct: grandAvgPct,
+            // Legacy fields retained for backward compatibility
             totalRestockUnits: grandTotalUnits,
             detailCount: detailRows.length,
             warnings: noBoxWarnings.length,
@@ -698,6 +820,8 @@ function generateSchedulingReport(beginId) {
             Logger.log('generateSchedulingReport: active codes lookup (non-fatal): ' + acErr.message);
         }
         var schedDisbCodeColIdx = headers.indexOf(resolveAMField_('Scheduled Distribution Code'));
+        // v5.55: Resolve Request Date column for History flag calculation
+        var rdColIdx = headers.indexOf(resolveAMField_('Request Date'));
 
         var records = [];
         for (var i = 1; i < data.length; i++) {
@@ -711,34 +835,71 @@ function generateSchedulingReport(beginId) {
                 if (rowCode && !activeCodeSet[rowCode]) continue;
             }
 
+            // v5.55: Store requestDate as a timestamp for History flag comparison
+            var rdRaw = rdColIdx !== -1 ? data[i][rdColIdx] : '';
+            var rdDate = (rdRaw instanceof Date) ? rdRaw : new Date(rdRaw);
+            var rdTs = (!rdDate || isNaN(rdDate.getTime())) ? 0 : rdDate.getTime();
+
             records.push({
                 rowData: data[i],
                 lastName: ln,
                 firstName: fn,
                 rowId: parseInt(data[i][idCol]) || 0,
-                amRowIndex: i + 1,  // 1-based row in AM sheet
+                requestDateTs: rdTs,   // v5.55: timestamp for sort + History flag
+                amRowIndex: i + 1,
                 isHistory: false
             });
         }
         if (records.length === 0)
             return { success: false, error: 'No records found in Applicants_Master' };
 
-        // ── Sort: Last Name, First Name, ID ───────────────────────────────────
+        // ── Sort: Last Name, First Name, Request Date (asc), ID as tiebreaker ──
+        // v5.55: Changed tiebreaker from ID to Request Date so History flag below
+        // correctly identifies the most-recent request per person by date.
         records.sort(function (a, b) {
             var lc = a.lastName.localeCompare(b.lastName); if (lc) return lc;
             var fc = a.firstName.localeCompare(b.firstName); if (fc) return fc;
+            var dc = a.requestDateTs - b.requestDateTs; if (dc) return dc;
             return a.rowId - b.rowId;
         });
 
         // ── History flag ──────────────────────────────────────────────────────
-        var maxIdPerName = {};
+        // v5.55: Two-tier History logic incorporating beginId (from LU_SchedID):
+        //
+        //   Tier 1 — Previous-run records: any record whose AM ID < beginId was
+        //     included in a prior Scheduling Report run → always marked History.
+        //     beginId is read from LU_LastScheduled by AP (via getLastScheduledId)
+        //     and passed as the first parameter to this function.
+        //     NOTE: if CONFIG.LOOKUPS.SAVED_SCHEDULE_ID does not match the actual
+        //     sheet name in G2N_Lookups, getLastScheduledId/appendLastScheduledId
+        //     silently fail. Verify CONFIG.LOOKUPS.SAVED_SCHEDULE_ID = 'LU_SchedID'
+        //     (or whatever the sheet is named).
+        //
+        //   Tier 2 — Per-person recency: among records with ID >= beginId (new
+        //     this run), the most recent Request Date per person = current;
+        //     all earlier Request Dates for the same person = History.
+        //
+        // Result: only one non-History row per person (the latest request from
+        // the current run); all prior requests — whether from old runs or within
+        // the current run — are marked History.
+        var maxNewDatePerName = {};
         records.forEach(function (rec) {
-            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
-            maxIdPerName[k] = Math.max(maxIdPerName[k] || 0, rec.rowId);
+            if (rec.rowId >= beginId) {
+                var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+                if (!maxNewDatePerName[k] || rec.requestDateTs > maxNewDatePerName[k]) {
+                    maxNewDatePerName[k] = rec.requestDateTs;
+                }
+            }
         });
         records.forEach(function (rec) {
-            var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
-            rec.isHistory = rec.rowId < (maxIdPerName[k] || rec.rowId);
+            if (rec.rowId < beginId) {
+                // Tier 1: from a previous scheduling run
+                rec.isHistory = true;
+            } else {
+                // Tier 2: new this run — History if a newer request exists for same person
+                var k = rec.firstName.toLowerCase() + '|' + rec.lastName.toLowerCase();
+                rec.isHistory = rec.requestDateTs < (maxNewDatePerName[k] || rec.requestDateTs);
+            }
         });
 
         // ── Create spreadsheet ────────────────────────────────────────────────
@@ -2759,6 +2920,126 @@ function countOldFilesInFolder(folderId, cutoffDate) {
  * @param {number} alreadyArchived - Count of previously archived records (for batching)
  * @returns {Object} { success, archivedInBatch, deletedInBatch, log[] }
  */
+/**
+ * Syncs an Archive sheet's header row to match AM headers.
+ * - Renames Archive columns whose Previous Header Name matches an AM column
+ *   that has since been renamed (detected via LU_FieldMap byPreviousHeaderName).
+ * - Adds any AM columns still missing from Archive after rename resolution.
+ * - Skips columns with blank AM headers.
+ * - Never removes Archive columns (data preservation).
+ * - Logs all changes to the archive log array.
+ * Called by executeArchiveBatch() before every write.
+ * v5.40 - New function.
+ * v5.41 - Added rename detection via LU_FieldMap Previous Header Name column.
+ * @param {Sheet}  archiveSheet - The Archive sheet to sync
+ * @param {Array}  amHeaderRow  - Raw AM header row (data[0], not yet trimmed)
+ * @param {Array}  log          - Archive log array for status messages
+ * @returns {Object} { added, renamed, alreadyInSync }
+ */
+function syncArchiveHeaders_(archiveSheet, amHeaderRow, log) {
+    var amHeaders = trimHeaders(amHeaderRow);
+    var archLastCol = archiveSheet.getLastColumn();
+    var archRaw = archiveSheet.getRange(1, 1, 1, archLastCol).getValues()[0];
+    var archHeaders = trimHeaders(archRaw);
+
+    // Build set of current AM headers (non-blank)
+    var amSet = {};
+    amHeaders.forEach(function (h) { if (h) amSet[h] = true; });
+
+    // Build set of current Archive headers
+    var archSet = {};
+    archHeaders.forEach(function (h, i) { if (h) archSet[h] = i; }); // name → 0-based index
+
+    // Load rename registry from LU_FieldMap
+    var renameMap = {}; // { oldName: newName }
+    try {
+        var fm = loadFieldMap();
+        if (fm.byPreviousHeaderName) {
+            for (var oldName in fm.byPreviousHeaderName) {
+                renameMap[oldName] = fm.byPreviousHeaderName[oldName];
+            }
+        }
+    } catch (fmErr) {
+        Logger.log('syncArchiveHeaders_: Could not load FieldMap for rename detection: ' + fmErr.message);
+    }
+
+    var renamedCount = 0;
+    var addedCount = 0;
+
+    // ── Step 1: Rename Archive columns where Previous Header Name matches ─────
+    archHeaders.forEach(function (archH, i) {
+        if (!archH) return;
+        // Is this an old name that has since been renamed in AM?
+        if (renameMap[archH] && amSet[renameMap[archH]] && !archSet[renameMap[archH]]) {
+            var newName = renameMap[archH];
+            // Rename the Archive header cell in place
+            archiveSheet.getRange(1, i + 1).setValue(newName);
+            log.push({
+                status: 'success',
+                message: 'Archive header sync: renamed col ' + (i + 1) + ' "' + archH + '" → "' + newName + '"'
+            });
+            Logger.log('syncArchiveHeaders_: renamed Archive col ' + (i + 1) + ' "' + archH + '" → "' + newName + '"');
+            // Update local tracking
+            delete archSet[archH];
+            archSet[newName] = i;
+            archHeaders[i] = newName;
+            renamedCount++;
+        }
+    });
+
+    // ── Step 2: Append AM columns still missing from Archive ──────────────────
+    var toAdd = [];
+    amHeaders.forEach(function (h) {
+        if (h && !archSet.hasOwnProperty(h)) toAdd.push(h);
+    });
+
+    if (toAdd.length > 0) {
+        var startCol = archiveSheet.getLastColumn() + 1;
+        archiveSheet.getRange(1, startCol, 1, toAdd.length).setValues([toAdd])
+            .setFontWeight('bold').setBackground('#f4b400').setFontColor('white');
+        log.push({
+            status: 'success',
+            message: 'Archive header sync: added ' + toAdd.length + ' new column(s): ' + toAdd.join(', ')
+        });
+        Logger.log('syncArchiveHeaders_: added ' + toAdd.length + ' column(s): ' + toAdd.join(', '));
+        addedCount = toAdd.length;
+    }
+
+    if (renamedCount === 0 && addedCount === 0) {
+        log.push({ status: 'info', message: 'Archive header sync: already in sync (' + archHeaders.length + ' columns)' });
+        return { added: 0, renamed: 0, alreadyInSync: true };
+    }
+
+    return { added: addedCount, renamed: renamedCount, alreadyInSync: false };
+}
+
+
+/**
+ * Remaps an AM data row to match a target header order.
+ * For each target column, finds the value from the source row by header name.
+ * Missing source columns produce empty string. Extra source columns are dropped.
+ * Used by executeArchiveBatch() to write correctly regardless of column order.
+ * v5.40 - New function.
+ * @param {Array}  sourceRow     - Source data row (AM row values)
+ * @param {Array}  sourceHeaders - Trimmed AM header names
+ * @param {Array}  targetHeaders - Trimmed Archive header names
+ * @returns {Array} Row values aligned to targetHeaders
+ */
+function remapRowToHeaders_(sourceRow, sourceHeaders, targetHeaders) {
+    // Build source column index map
+    var srcIdx = {};
+    sourceHeaders.forEach(function (h, i) { if (h) srcIdx[h] = i; });
+
+    return targetHeaders.map(function (h) {
+        if (!h) return '';
+        var i = srcIdx[h];
+        return (i !== undefined && i < sourceRow.length)
+            ? (sourceRow[i] !== null && sourceRow[i] !== undefined ? sourceRow[i] : '')
+            : '';
+    });
+}
+
+
 function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
     const ARCHIVE_WORKBOOK_NAME = 'G2N_Archive';
 
@@ -2831,6 +3112,14 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
         const idCol = headers.indexOf(resolveAMField_('ID'));
         const finalServiceContactDateCol = headers.indexOf(resolveAMField_('Final Service Contact Date'));
 
+        // ===== SYNC ARCHIVE HEADERS TO AM =====
+        // Compares AM headers to Archive headers and adds any missing columns so
+        // positional writes always land in the correct column. Runs every time —
+        // if already in sync this costs one header read and exits immediately.
+        var archSyncResult = syncArchiveHeaders_(archiveSheet, data[0], log);
+        // After sync, re-read archive headers so we know the current column order
+        var archHeaders = trimHeaders(archiveSheet.getRange(1, 1, 1, archiveSheet.getLastColumn()).getValues()[0]);
+
         // ===== SPLIT into keep vs archive arrays =====
         const keepRows = [];
         const archiveRows = [];
@@ -2852,7 +3141,8 @@ function executeArchiveBatch(cutoffDateStr, alreadyArchived) {
                 }
 
                 if (shouldArchive) {
-                    archiveRows.push(data[i]);
+                    // Remap AM row to Archive column order (handles any column differences)
+                    archiveRows.push(remapRowToHeaders_(data[i], headers, archHeaders));
                     archiveIdDates.push({ id: data[i][idCol], requestDate: requestDate });
                 } else {
                     keepRows.push(data[i]);
@@ -3895,5 +4185,325 @@ function getLoginRawEvents(startDate, endDate) {
     } catch (error) {
         Logger.log('getLoginRawEvents error: ' + error.message);
         return [];
+    }
+}
+
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v5.43 — PRODUCT COUNT DIAGNOSTIC
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Diagnostic: compares the two ID lists that Grant Summary builds internally
+ * and identifies the records counted in Total Requests that contribute zero
+ * to Products Distributed.
+ *
+ * List 1 (Total Requests): every record where Service Status = Picked Up or
+ *   Delivered and Request Date is in range — exactly the same getCombinedData()
+ *   call Grant Summary uses.
+ *
+ * List 2 (Products Distributed contributors): records from List 1 where
+ *   calculateProductCounts() returns productsDistributed > 0, using the
+ *   same loadProductLookupData() call Grant Summary uses.
+ *
+ * Missing = List 1 minus List 2.
+ *
+ * For missing records the diagnostic notes why productsDistributed was 0:
+ *   - "No codes" — all three slots blank
+ *   - "Baby codes only" — all non-blank slots start with DB (baby products
+ *      go to babyDistributed, not productsDistributed — by design)
+ *   - "Codes not in lookup" — codes present but distProdByBox / drPfByIdDate
+ *      returned nothing
+ *   - "Mixed" — combination of the above
+ *
+ * Output: Google Sheet in Grants folder with two tabs:
+ *   1. Summary  — record counts and % missing
+ *   2. Missing Records — ID, First Name, Last Name, Service Status,
+ *                        Request Date, Code 1, Code 2, Code 3, Baby Dist, Note
+ *
+ * @param {string} fromDateStr - YYYY-MM-DD
+ * @param {string} toDateStr   - YYYY-MM-DD
+ * @returns {Object} { success, recordCount, mismatchCount, reportUrl, downloadUrl, error }
+ */
+function diagProductCounts(fromDateStr, toDateStr) {
+    try {
+        if (!fromDateStr || !toDateStr) {
+            return { success: false, error: 'Both From Date and To Date are required.' };
+        }
+        var fromDate = parseDateInput(fromDateStr, false);
+        var toDate = parseDateInput(toDateStr, true);
+        if (fromDate > toDate) {
+            return { success: false, error: 'From Date must be before To Date.' };
+        }
+
+        // ── Step 1: Same getCombinedData call as generateGrantSummaryReport ──
+        // Filter: Service Status = Picked Up or Delivered (List 1)
+        var combined = getCombinedData(fromDate, toDate, [
+            { column: 'Service Status', values: ['Picked Up', 'Delivered'] }
+        ]);
+
+        if (combined.totalCount === 0) {
+            return {
+                success: false,
+                error: 'No Picked Up / Delivered records for ' +
+                    fromDateStr + ' to ' + toDateStr + '.'
+            };
+        }
+
+        var headers = combined.headers;
+        var rows = combined.rows;
+
+        // ── Step 2: Same loadProductLookupData call as generateGrantSummaryReport
+        var productData = loadProductLookupData(fromDate, toDate);
+
+        // Column indices — identical to Grant Summary
+        var colIdx = {
+            id: headers.indexOf(resolveAMField_('ID')),
+            firstName: headers.indexOf(resolveAMField_('First Name')),
+            lastName: headers.indexOf(resolveAMField_('Last Name')),
+            requestDate: headers.indexOf(resolveAMField_('Request Date')),
+            serviceStatus: headers.indexOf(resolveAMField_('Service Status')),
+            lastDateServed: headers.indexOf(resolveAMField_('Last Date Served')),
+            productCode1: headers.indexOf(resolveAMField_('Received Product Code 1')),
+            productCode2: headers.indexOf(resolveAMField_('Received Product Code 2')),
+            productCode3: headers.indexOf(resolveAMField_('Received Product Code 3'))
+        };
+
+        // v5.53: Processed By and Entered By raw AM headers are driven by LU_FieldMap
+        // which we can't query statically. Resolve via FieldMapService SV Field ID
+        // lookup first, then fall back to a case-insensitive header scan so the
+        // diagnostic works regardless of how the columns were named in the sheet.
+        function resolveByFieldId_(fieldId, fallbackSubstring) {
+            // Try resolving through FieldMapService by SV Field ID
+            try {
+                var fm = loadFieldMap();
+                var entry = fm.bySvFieldId[fieldId];
+                if (entry) {
+                    var idx = headers.indexOf(entry.rawHeader);
+                    if (idx !== -1) return idx;
+                }
+            } catch (e) { /* non-fatal */ }
+            // Fallback: case-insensitive partial match on header name
+            var lower = fallbackSubstring.toLowerCase();
+            for (var hi = 0; hi < headers.length; hi++) {
+                if (headers[hi].toLowerCase().indexOf(lower) !== -1) return hi;
+            }
+            return -1;
+        }
+        colIdx.processedBy = resolveByFieldId_('fld_ProcessedBy', 'processed by');
+        colIdx.enteredBy = resolveByFieldId_('fld_EnteredBy', 'entered by');
+
+        Logger.log('diagProductCounts colIdx: processedBy=' + colIdx.processedBy +
+            ' enteredBy=' + colIdx.enteredBy +
+            ' lastDateServed=' + colIdx.lastDateServed);
+
+        if (colIdx.id === -1) {
+            return { success: false, error: 'ID column not found in record set.' };
+        }
+
+        // ── Step 3: Walk every row exactly as Grant Summary does.
+        // Collect List 1 (all IDs) and List 2 (IDs where productsDistributed > 0).
+        var missingRecords = [];   // in List 1 but not List 2
+        var totalCount = rows.length;
+        var contributorCount = 0;
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var recId = getStr(row, colIdx.id);
+            var reqDate = new Date(row[colIdx.requestDate]);
+            var code1 = getStr(row, colIdx.productCode1);
+            var code2 = getStr(row, colIdx.productCode2);
+            var code3 = getStr(row, colIdx.productCode3);
+
+            // Same calculateProductCounts call Grant Summary uses
+            var products = calculateProductCounts(
+                recId, code1, code2, code3, reqDate, productData, headers, row);
+
+            if (products.productsDistributed > 0) {
+                contributorCount++;
+            } else {
+                // Classify why productsDistributed = 0
+                var codes = [code1, code2, code3].filter(function (c) { return c !== ''; });
+                var category = '';  // 'BY_DESIGN' or 'NEEDS_ATTENTION'
+                var note = '';
+                if (codes.length === 0) {
+                    category = 'BY_DESIGN';
+                    note = 'No product codes assigned — all three slots blank. ' +
+                        'This record has no box codes so there is nothing to count. ' +
+                        'Expected if this was a baby-box-only visit tracked elsewhere.';
+                } else {
+                    var allBaby = codes.every(function (c) {
+                        return c.toUpperCase().indexOf('DB') === 0;
+                    });
+                    if (allBaby) {
+                        category = 'BY_DESIGN';
+                        note = 'Baby codes only (' + codes.join(', ') + '). ' +
+                            'Baby products go to Baby Products Distributed (=' +
+                            products.babyDistributed + '), not Products Distributed. ' +
+                            'This is correct — no action needed.';
+                    } else {
+                        category = 'NEEDS_ATTENTION';
+                        note = 'Codes present (' + codes.join(', ') + ') but ' +
+                            'productsDistributed=0. ' +
+                            'Check that these box codes exist in Distributed_Products ' +
+                            'with the correct product rows.';
+                    }
+                }
+
+                missingRecords.push({
+                    id: recId,
+                    fn: getStr(row, colIdx.firstName),
+                    ln: getStr(row, colIdx.lastName),
+                    ss: getStr(row, colIdx.serviceStatus),
+                    rdFmt: isNaN(reqDate.getTime()) ? '' :
+                        Utilities.formatDate(reqDate, CONFIG.TIMEZONE, 'M/d/yyyy'),
+                    lastServed: (function () {
+                        var v = colIdx.lastDateServed !== -1 ? row[colIdx.lastDateServed] : '';
+                        if (!v) return '';
+                        var d = (v instanceof Date) ? v : new Date(v);
+                        return isNaN(d.getTime()) ? '' :
+                            Utilities.formatDate(d, CONFIG.TIMEZONE, 'M/d/yyyy');
+                    })(),
+                    processedBy: getStr(row, colIdx.processedBy),
+                    enteredBy: getStr(row, colIdx.enteredBy),
+                    code1: code1,
+                    code2: code2,
+                    code3: code3,
+                    babyDist: products.babyDistributed,
+                    category: category,
+                    note: note
+                });
+            }
+        }
+
+        // Split missingRecords into two lists
+        var needsAttention = missingRecords.filter(function (r) { return r.category === 'NEEDS_ATTENTION'; });
+        var byDesign = missingRecords.filter(function (r) { return r.category === 'BY_DESIGN'; });
+        var missingCount = missingRecords.length;
+
+        // ── Step 4: Write Google Sheet ────────────────────────────────────────
+        var stamp = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd_HHmm');
+        var wb = SpreadsheetApp.create(
+            'Product_Count_Diagnostic_' + fromDateStr + '_to_' + toDateStr + '_' + stamp);
+
+        // ── Tab 1: Summary ────────────────────────────────────────────────────
+        var sumSheet = wb.getActiveSheet();
+        sumSheet.setName('Summary');
+
+        var sumHdrs = ['Metric', 'Count'];
+        sumSheet.getRange(1, 1, 1, 2).setValues([sumHdrs])
+            .setFontWeight('bold').setBackground('#1a73e8').setFontColor('white');
+
+        var pctAttn = totalCount > 0
+            ? Math.round((needsAttention.length / totalCount) * 100) + '%' : '0%';
+
+        var sumData = [
+            ['Date Range', fromDateStr + ' to ' + toDateStr],
+            ['Source', 'Applicants_Master + Archive (' + combined.masterCount +
+                ' master, ' + combined.archiveCount + ' archive)'],
+            ['', ''],
+            ['Total Qualifying Records (List 1 — same as Grant Summary Total Requests)',
+                totalCount],
+            ['Records Contributing to Products Distributed (List 2)',
+                contributorCount],
+            ['', ''],
+            ['Records NOT Contributing — NEEDS ATTENTION (codes present but 0 products)',
+                needsAttention.length],
+            ['% of Total Needing Attention', pctAttn],
+            ['', ''],
+            ['Records NOT Contributing — BY DESIGN (baby-only or no codes assigned)',
+                byDesign.length],
+            ['  — Baby codes only (correct — counted in Baby Products Distributed)',
+                byDesign.filter(function (r) { return r.note.indexOf('Baby codes') === 0; }).length],
+            ['  — No codes assigned (no box codes in any slot)',
+                byDesign.filter(function (r) { return r.note.indexOf('No product codes') === 0; }).length]
+        ];
+
+        sumSheet.getRange(2, 1, sumData.length, 2).setValues(sumData);
+
+        // Highlight Needs Attention rows red, By Design rows blue
+        sumSheet.getRange(8, 1, 1, 2)
+            .setBackground(needsAttention.length > 0 ? '#fce8e6' : '#e6f4ea')
+            .setFontWeight('bold')
+            .setFontColor(needsAttention.length > 0 ? '#d93025' : '#34a853');
+        sumSheet.getRange(9, 1, 1, 2)
+            .setBackground(needsAttention.length > 0 ? '#fce8e6' : '#e6f4ea')
+            .setFontWeight('bold')
+            .setFontColor(needsAttention.length > 0 ? '#d93025' : '#34a853');
+        sumSheet.getRange(11, 1, 1, 2).setBackground('#e8f0fe').setFontWeight('bold');
+        sumSheet.getRange(12, 1, 1, 2).setBackground('#f8f9fa');
+        sumSheet.getRange(13, 1, 1, 2).setBackground('#f8f9fa');
+        sumSheet.autoResizeColumn(1);
+        sumSheet.autoResizeColumn(2);
+        sumSheet.setColumnWidth(1, 580);
+
+        // ── Common headers for detail tabs ────────────────────────────────────
+        var missHdrs = [
+            'Record ID', 'First Name', 'Last Name',
+            'Service Status', 'Request Date', 'Last Date Served',
+            'Processed By', 'Entered By',
+            'Received Product Code 1',
+            'Received Product Code 2',
+            'Received Product Code 3',
+            'Baby Products Distributed',
+            'Note'
+        ];
+
+        function writeMissTab_(tabName, headerBg, records) {
+            var sh = wb.insertSheet(tabName);
+            sh.getRange(1, 1, 1, missHdrs.length).setValues([missHdrs])
+                .setFontWeight('bold').setBackground(headerBg).setFontColor('white');
+            sh.setFrozenRows(1);
+            if (records.length > 0) {
+                var data = records.map(function (r) {
+                    return [r.id, r.fn, r.ln, r.ss, r.rdFmt, r.lastServed,
+                    r.processedBy, r.enteredBy,
+                    r.code1, r.code2, r.code3, r.babyDist, r.note];
+                });
+                sh.getRange(2, 1, data.length, missHdrs.length).setValues(data);
+                for (var mi = 0; mi < data.length; mi++) {
+                    var bg = (headerBg === '#d93025') ? '#fce8e6' :
+                        (data[mi][11] > 0) ? '#e8f0fe' : '#f1f3f4';
+                    sh.getRange(mi + 2, 1, 1, missHdrs.length).setBackground(bg);
+                    sh.getRange(mi + 2, 13).setFontWeight('bold');
+                }
+            } else {
+                sh.getRange(2, 1).setValue('None.');
+                sh.getRange(2, 1).setFontStyle('italic').setFontColor('#34a853');
+            }
+            for (var mc = 1; mc <= missHdrs.length; mc++) sh.autoResizeColumn(mc);
+            return sh;
+        }
+
+        // ── Tab 2: Needs Attention ────────────────────────────────────────────
+        writeMissTab_('Needs Attention', '#d93025', needsAttention);
+
+        // ── Tab 3: By Design (not errors) ────────────────────────────────────
+        writeMissTab_('By Design', '#4a86e8', byDesign);
+
+        // Reorder: Summary first
+        wb.setActiveSheet(sumSheet);
+        wb.moveActiveSheet(1);
+
+        moveToFolder(wb.getId(), CONFIG.GRANTS_FOLDER_ID);
+        logAudit('REPORT', null, 'Generated Product Count Diagnostic: ' +
+            fromDateStr + ' to ' + toDateStr + ' — ' +
+            totalCount + ' qualifying, ' + needsAttention.length + ' need attention, ' +
+            byDesign.length + ' by design');
+
+        return {
+            success: true,
+            recordCount: totalCount,
+            detailCount: totalCount,
+            mismatchCount: missingCount,
+            reportUrl: wb.getUrl(),
+            downloadUrl: 'https://docs.google.com/spreadsheets/d/' + wb.getId() + '/export?format=xlsx'
+        };
+
+    } catch (e) {
+        Logger.log('diagProductCounts error: ' + e.message + '\n' + e.stack);
+        return { success: false, error: 'Diagnostic failed: ' + e.message };
     }
 }

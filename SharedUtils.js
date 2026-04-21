@@ -4,7 +4,6 @@
  * Extracted from Code.gs and GrantsReportService.gs to centralize
  * reusable helpers and eliminate duplication across service files.
  *
- * v1.0 - Initial creation. Consolidated from:
  * v1.1 - Added resolveAMField_() and getReportHeader_() — FieldMapService
  *         integration helpers shared across all service files.
  *         Code.gs: trimHeaders(), htmlDateToSheet(), extractYear(), isRowActive()
@@ -18,6 +17,28 @@
  *         causing getActiveSchedDisbCodes() to return empty when Active
  *         column contained 'Y' or other truthy variants.
  *         Fixes Distribution Report / Process Distribution dropdown empty.
+ * v1.3 - Added rowToRecord(headers, row) — builds a {header: value} object
+ *         from parallel headers[] and row[] arrays. Fixes SearchService
+ *         runtime error "rowToRecord is not defined" when SV is launched
+ *         from URL (search by ID, Form ID, Name+Date, and archive fallthrough
+ *         all depend on this helper).
+ * v1.4 - rowToRecord: Date cell values are now formatted as M/d/yyyy strings
+ *         (CONFIG.TIMEZONE) instead of passed through as Date objects. SV's
+ *         openRecord → FIELD_MAP loop calls rec[colName].toString() and
+ *         feeds the result into <input type="date"> / text inputs; a raw
+ *         Date.toString() produces "Sat Apr 19 2026 00:00:00 GMT..." which
+ *         fails silently for date inputs and hangs the UI in follow-on
+ *         handlers like sv_checkDemographics. Returning M/d/yyyy matches
+ *         what the previous (pre-v1.3) search pipeline delivered and what
+ *         client code already parses via split('/').
+ * v1.5 - rowToRecord: hardened against google.script.run serialization
+ *         failures. Invalid Date cells (NaN getTime) return '' instead of
+ *         being passed to Utilities.formatDate, which was throwing and
+ *         causing the client success handler to receive null — observed
+ *         on SV as "Uncaught Bs: Cannot read properties of null (reading
+ *         'success')". Non-primitive, non-Date cell values are now
+ *         coerced via toString() with a try/catch guard so unexpected
+ *         object shapes can't break serialization.
  * 
  * Sections:
  *   DATE UTILITIES — trimHeaders, htmlDateToSheet, extractYear, parseDateInput, normalizeDate
@@ -341,4 +362,64 @@ function formatPhoneNumber_(raw) {
         return '(' + digits.substring(0, 3) + ') ' + digits.substring(3, 6) + '-' + digits.substring(6);
     }
     return (raw || '').toString().trim();
+}
+
+
+// ============ ROW → RECORD UTILITY ============
+
+/**
+ * Build a {header: value} object from parallel headers[] and row[] arrays.
+ * Callers are expected to pass already-trimmed headers (trimHeaders()).
+ * Values are passed through as-is (no normalization); dates remain Date
+ * objects, numbers remain numbers. Undefined row cells are coerced to ''.
+ *
+ * Used by SearchService (ID, Form ID, Name+Date searches and archive
+ * fall-through) and available to any service that needs an object view
+ * of a single AM/archive row.
+ *
+ * @param {string[]} headers - Trimmed column headers from row 1
+ * @param {Array}    row     - A single data row (same length as headers)
+ * @returns {Object} Record object keyed by header name
+ */
+function rowToRecord(headers, row) {
+    var record = {};
+    if (!headers || !row) return record;
+    for (var i = 0; i < headers.length; i++) {
+        var key = headers[i];
+        if (key === undefined || key === null || key === '') continue;
+        var val = row[i];
+        if (val === undefined || val === null) {
+            record[key] = '';
+        } else if (val instanceof Date) {
+            // v1.4: Serialize Date cells as M/d/yyyy strings so the SV client
+            // (which calls .toString() + .split('/') on record values) sees
+            // the same format it historically saw before rowToRecord existed.
+            // v1.5: Invalid Dates (NaN getTime) → '' instead of formatting,
+            // since Utilities.formatDate on an invalid Date throws and that
+            // exception causes google.script.run to deliver null to the
+            // client success handler (observed as "Cannot read properties
+            // of null (reading 'success')" on SV search).
+            if (isNaN(val.getTime())) {
+                record[key] = '';
+            } else {
+                try {
+                    record[key] = Utilities.formatDate(val, CONFIG.TIMEZONE, 'M/d/yyyy');
+                } catch (de) {
+                    record[key] = '';
+                }
+            }
+        } else if (typeof val === 'number' || typeof val === 'boolean' || typeof val === 'string') {
+            // v1.5: Only pass through primitive cell types. Anything else
+            // (function, unexpected object) is stringified so the record
+            // round-trips cleanly through google.script.run serialization.
+            record[key] = val;
+        } else {
+            try {
+                record[key] = val.toString();
+            } catch (te) {
+                record[key] = '';
+            }
+        }
+    }
+    return record;
 }

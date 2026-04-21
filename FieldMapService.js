@@ -1,46 +1,19 @@
-/**
+﻿/**
  * FieldMapService.gs
  * Centralized field mapping service for G2N System.
- * Reads field definitions from LU_FieldMap sheet in G2N_Lookups workbook,
- * replacing hardcoded FIELD_DISPLAY_MAP, COL_* constants, getIntakeFieldMapping(),
- * and getAMFieldGroups() groupDefs with a single sheet-driven source of truth.
+ * Reads field definitions from LU_FieldMap sheet in G2N_Lookups workbook.
  *
- * v1.0 - Initial implementation:
- *         loadFieldMap() — reads LU_FieldMap sheet, caches per execution.
- *         getFieldDisplayLabel() — replaces GrantsReportService FIELD_DISPLAY_MAP lookup.
- *         getFieldRawHeader() — reverse lookup: display label → raw header.
- *         getFieldsByGroup() — replaces hardcoded groupDefs in getAMFieldGroups().
- *         getIntakeFieldMapping() — replaces hardcoded mapping in IntakeService.
- *         getSearchableFields() — returns fields marked Searchable=Y.
- *         getRequiredFields() — returns fields marked Required=Y.
- *         getFieldsByPortal() — returns fields visible in a given portal.
- *         getFieldDataType() — returns data type for a field.
- *         getCOLConstant() — backward-compat lookup by legacy COL_ constant name.
- *         buildLabelToRawMap() — builds display-label-to-raw-header map for AI reports.
- *         buildDisplayLabels() — returns parallel array of display labels for field list.
- *         getComputedFields() — returns Computed group fields for AI report picker.
- *         getSummaryFields() — returns Summary group fields for AI report picker.
- * v1.1 - Migrated RequestService hardcoded arrays to sheet-driven sources.
- *         loadFieldMap() reads 3 new LU_FieldMap columns: Editable, Form Section,
- *         Lookup Source. entry object gains editable, formSection, lookupSource.
- *         Added STAFF_SECTION_CONFIG — canonical section label/readOnly map.
- *         Added getEditableFields() — resolves RequestService TODO #7.
- *         Added getStaffPortalSections() — resolves RequestService TODOs #6 and #7;
- *         returns { sections, fieldMap, editableFields, dropdownFields }.
- *         Added _normalizeInputType() — maps LU_FieldMap Data Type to HTML type.
- *         Updated _buildFallbackFieldMap() with new field defaults.
- * v1.2 - Added SV Field ID column support. loadFieldMap() reads svFieldId from
- *         'SV Field ID' column (distinct from Form Field ID which is intake-only).
- *         getStaffPortalSections() uses svFieldId as the HTML element key for
- *         fieldMap and dropdownFields — fixes incorrect formFieldId usage. entry
- *         object gains svFieldId. bySvFieldId lookup added to result.
- * v1.3 - Added Db Column Name column support. loadFieldMap() reads dbColumnName from
- *         optional 'Db Column Name' column (-1 safe if column not yet added to sheet).
- *         entry object gains dbColumnName. byDbColumnName lookup added to result.
- *         Provides exact MySQL column name when it differs from ToSnakeCase(tableFieldName).
- * v1.4 - getStaffPortalSections() logs a diagnostic warning when fieldMap is empty,
- *         clearly identifying whether the 'SV Field ID' column is absent from the sheet
- *         vs populated-but-empty, to aid troubleshooting SV portal blank-field issues.
+ * v1.2 - Added SV Field ID column support. bySvFieldId lookup added to result.
+ * v1.3 - Added Db Column Name column support. byDbColumnName lookup added.
+ * v1.4 - getStaffPortalSections() logs diagnostic warning when fieldMap is empty.
+ * v1.5 - loadFieldMap(): added previousHeaderName column support.
+ *         byPreviousHeaderName index { oldName → currentRawHeader } built for
+ *         Archive rename detection in syncArchiveHeaders_() (ReportService).
+ * v1.6 - Removed MySQL-only LU_FieldMap columns: Db Column Name, Db Table Name,
+ *         Table Field Name, Nullable, Index Type. Removed dbColumnName from ci,
+ *         entry object, byDbColumnName index, and _buildFallbackFieldMap().
+ *         LU_FieldMap sheet: remove those columns manually (MySQL path removed).
+ *         WorkbookSheet Name column also removed (unused by any service function).
  */
 
 // ============ CACHE ============
@@ -69,115 +42,115 @@ var _fieldMapCache = null;
  * }
  */
 function loadFieldMap() {
-  if (_fieldMapCache) return _fieldMapCache;
+    if (_fieldMapCache) return _fieldMapCache;
 
-  var wb = getLookupsWorkbook();
-  var sheet = wb.getSheetByName('LU_FieldMap');
-  if (!sheet || sheet.getLastRow() < 2) {
-    Logger.log('FieldMapService: LU_FieldMap sheet not found or empty — falling back to hardcoded map');
-    _fieldMapCache = _buildFallbackFieldMap();
-    return _fieldMapCache;
-  }
+    var wb = getLookupsWorkbook();
+    var sheet = wb.getSheetByName('LU_FieldMap');
+    if (!sheet || sheet.getLastRow() < 2) {
+        Logger.log('FieldMapService: LU_FieldMap sheet not found or empty — falling back to hardcoded map');
+        _fieldMapCache = _buildFallbackFieldMap();
+        return _fieldMapCache;
+    }
 
-  var data = sheet.getDataRange().getValues();
-  var headers = trimHeaders(data[0]);
+    var data = sheet.getDataRange().getValues();
+    var headers = trimHeaders(data[0]);
 
-  // Map column indices
-  var ci = {
-    rawHeader:        headers.indexOf('Raw Header'),
-    displayLabel:     headers.indexOf('Display Label'),
-    reportHeader:     headers.indexOf('Report Header'),
-    fieldGroup:       headers.indexOf('Field Group'),
-    dataType:         headers.indexOf('Data Type'),
-    formFieldId:      headers.indexOf('Form Field ID'),
-    svFieldId:        headers.indexOf('SV Field ID'),
-    dbColumnName:     headers.indexOf('Db Column Name'),
-    portalVisibility: headers.indexOf('Portal Visibility'),
-    searchable:       headers.indexOf('Searchable'),
-    required:         headers.indexOf('Required'),
-    colConstant:      headers.indexOf('COL Constant'),
-    notes:            headers.indexOf('Notes'),
-    editable:         headers.indexOf('Editable'),
-    formSection:      headers.indexOf('Form Section'),
-    lookupSource:     headers.indexOf('Lookup Source')
-  };
-
-  var result = {
-    byRawHeader:    {},
-    byDisplayLabel: {},
-    byFormFieldId:  {},
-    bySvFieldId:    {},
-    byDbColumnName: {},
-    byColConstant:  {},
-    byGroup:        {},
-    allFields:      []
-  };
-
-  for (var i = 1; i < data.length; i++) {
-    var row = data[i];
-    var rawHeader = (ci.rawHeader !== -1 ? (row[ci.rawHeader] || '').toString().trim() : '');
-    if (rawHeader === '') continue;
-
-    var entry = {
-      rawHeader:        rawHeader,
-      displayLabel:     ci.displayLabel !== -1 ? (row[ci.displayLabel] || '').toString().trim() : rawHeader,
-      reportHeader:     ci.reportHeader !== -1 ? (row[ci.reportHeader] || '').toString().trim() : '',
-      fieldGroup:       ci.fieldGroup !== -1 ? (row[ci.fieldGroup] || '').toString().trim() : 'Other',
-      dataType:         ci.dataType !== -1 ? (row[ci.dataType] || '').toString().trim() : 'text',
-      formFieldId:      ci.formFieldId !== -1 ? (row[ci.formFieldId] || '').toString().trim() : '',
-      svFieldId:        ci.svFieldId !== -1 ? (row[ci.svFieldId] || '').toString().trim() : '',
-      dbColumnName:     ci.dbColumnName !== -1 ? (row[ci.dbColumnName] || '').toString().trim() : '',
-      portalVisibility: ci.portalVisibility !== -1 ? (row[ci.portalVisibility] || '').toString().trim() : '',
-      searchable:       ci.searchable !== -1 ? (row[ci.searchable] || '').toString().trim().toUpperCase() === 'Y' : false,
-      required:         ci.required !== -1 ? (row[ci.required] || '').toString().trim().toUpperCase() === 'Y' : false,
-      colConstant:      ci.colConstant !== -1 ? (row[ci.colConstant] || '').toString().trim() : '',
-      notes:            ci.notes !== -1 ? (row[ci.notes] || '').toString().trim() : '',
-      editable:         ci.editable !== -1 ? (row[ci.editable] || '').toString().trim().toUpperCase() === 'Y' : false,
-      formSection:      ci.formSection !== -1 ? (row[ci.formSection] || '').toString().trim() : '',
-      lookupSource:     ci.lookupSource !== -1 ? (row[ci.lookupSource] || '').toString().trim() : ''
+    // Map column indices
+    var ci = {
+        rawHeader: headers.indexOf('Raw Header'),
+        displayLabel: headers.indexOf('Display Label'),
+        reportHeader: headers.indexOf('Report Header'),
+        fieldGroup: headers.indexOf('Field Group'),
+        dataType: headers.indexOf('Data Type'),
+        formFieldId: headers.indexOf('Form Field ID'),
+        svFieldId: headers.indexOf('SV Field ID'),
+        portalVisibility: headers.indexOf('Portal Visibility'),
+        searchable: headers.indexOf('Searchable'),
+        required: headers.indexOf('Required'),
+        colConstant: headers.indexOf('COL Constant'),
+        notes: headers.indexOf('Notes'),
+        editable: headers.indexOf('Editable'),
+        formSection: headers.indexOf('Form Section'),
+        lookupSource: headers.indexOf('Lookup Source'),
+        previousHeaderName: headers.indexOf('Previous Header Name')
     };
 
-    result.allFields.push(entry);
-    result.byRawHeader[rawHeader] = entry;
+    var result = {
+        byRawHeader: {},
+        byDisplayLabel: {},
+        byFormFieldId: {},
+        bySvFieldId: {},
+        byColConstant: {},
+        byPreviousHeaderName: {},
+        byGroup: {},
+        allFields: []
+    };
 
-    // Display label reverse lookup
-    if (entry.displayLabel && entry.displayLabel !== rawHeader) {
-      result.byDisplayLabel[entry.displayLabel] = rawHeader;
+    for (var i = 1; i < data.length; i++) {
+        var row = data[i];
+        var rawHeader = (ci.rawHeader !== -1 ? (row[ci.rawHeader] || '').toString().trim() : '');
+        if (rawHeader === '') continue;
+
+        var entry = {
+            rawHeader: rawHeader,
+            displayLabel: ci.displayLabel !== -1 ? (row[ci.displayLabel] || '').toString().trim() : rawHeader,
+            reportHeader: ci.reportHeader !== -1 ? (row[ci.reportHeader] || '').toString().trim() : '',
+            fieldGroup: ci.fieldGroup !== -1 ? (row[ci.fieldGroup] || '').toString().trim() : 'Other',
+            dataType: ci.dataType !== -1 ? (row[ci.dataType] || '').toString().trim() : 'text',
+            formFieldId: ci.formFieldId !== -1 ? (row[ci.formFieldId] || '').toString().trim() : '',
+            svFieldId: ci.svFieldId !== -1 ? (row[ci.svFieldId] || '').toString().trim() : '',
+            portalVisibility: ci.portalVisibility !== -1 ? (row[ci.portalVisibility] || '').toString().trim() : '',
+            searchable: ci.searchable !== -1 ? (row[ci.searchable] || '').toString().trim().toUpperCase() === 'Y' : false,
+            required: ci.required !== -1 ? (row[ci.required] || '').toString().trim().toUpperCase() === 'Y' : false,
+            colConstant: ci.colConstant !== -1 ? (row[ci.colConstant] || '').toString().trim() : '',
+            notes: ci.notes !== -1 ? (row[ci.notes] || '').toString().trim() : '',
+            editable: ci.editable !== -1 ? (row[ci.editable] || '').toString().trim().toUpperCase() === 'Y' : false,
+            formSection: ci.formSection !== -1 ? (row[ci.formSection] || '').toString().trim() : '',
+            lookupSource: ci.lookupSource !== -1 ? (row[ci.lookupSource] || '').toString().trim() : '',
+            previousHeaderName: ci.previousHeaderName !== -1 ? (row[ci.previousHeaderName] || '').toString().trim() : ''
+        };
+
+        result.allFields.push(entry);
+        result.byRawHeader[rawHeader] = entry;
+
+        // Display label reverse lookup
+        if (entry.displayLabel && entry.displayLabel !== rawHeader) {
+            result.byDisplayLabel[entry.displayLabel] = rawHeader;
+        }
+        // Also map raw header to itself for backward compatibility
+        result.byDisplayLabel[rawHeader] = rawHeader;
+
+        // Form field ID lookup (intake form)
+        if (entry.formFieldId) {
+            result.byFormFieldId[entry.formFieldId] = rawHeader;
+        }
+
+        // SV Field ID lookup (Staff/Volunteer Portal HTML element IDs)
+        if (entry.svFieldId) {
+            result.bySvFieldId[entry.svFieldId] = rawHeader;
+        }
+
+        // COL constant lookup
+        if (entry.colConstant) {
+            result.byColConstant[entry.colConstant] = rawHeader;
+        }
+
+        // Previous header name lookup — used by syncArchiveHeaders_ for rename detection
+        if (entry.previousHeaderName) {
+            result.byPreviousHeaderName[entry.previousHeaderName] = rawHeader;
+        }
+
+        // Group lookup
+        var group = entry.fieldGroup;
+        if (!result.byGroup[group]) {
+            result.byGroup[group] = [];
+        }
+        result.byGroup[group].push(entry);
     }
-    // Also map raw header to itself for backward compatibility
-    result.byDisplayLabel[rawHeader] = rawHeader;
 
-    // Form field ID lookup (intake form)
-    if (entry.formFieldId) {
-      result.byFormFieldId[entry.formFieldId] = rawHeader;
-    }
-
-    // SV Field ID lookup (Staff/Volunteer Portal HTML element IDs)
-    if (entry.svFieldId) {
-      result.bySvFieldId[entry.svFieldId] = rawHeader;
-    }
-
-    // Db Column Name lookup (exact MySQL column when differs from ToSnakeCase)
-    if (entry.dbColumnName) {
-      result.byDbColumnName[entry.dbColumnName] = rawHeader;
-    }
-
-    // COL constant lookup
-    if (entry.colConstant) {
-      result.byColConstant[entry.colConstant] = rawHeader;
-    }
-
-    // Group lookup
-    var group = entry.fieldGroup;
-    if (!result.byGroup[group]) {
-      result.byGroup[group] = [];
-    }
-    result.byGroup[group].push(entry);
-  }
-
-  _fieldMapCache = result;
-  Logger.log('FieldMapService: Loaded ' + result.allFields.length + ' field definitions from LU_FieldMap (v1.3 — Editable/FormSection/LookupSource/DbColumnName columns active)');
-  return result;
+    _fieldMapCache = result;
+    Logger.log('FieldMapService: Loaded ' + result.allFields.length + ' field definitions from LU_FieldMap (v1.3 — Editable/FormSection/LookupSource/DbColumnName columns active)');
+    return result;
 }
 
 
@@ -192,9 +165,9 @@ function loadFieldMap() {
  * @returns {string} Friendly display label
  */
 function getFieldDisplayLabelFromMap(fieldName) {
-  var map = loadFieldMap();
-  var entry = map.byRawHeader[fieldName];
-  return entry ? entry.displayLabel : fieldName;
+    var map = loadFieldMap();
+    var entry = map.byRawHeader[fieldName];
+    return entry ? entry.displayLabel : fieldName;
 }
 
 /**
@@ -206,8 +179,8 @@ function getFieldDisplayLabelFromMap(fieldName) {
  * @returns {string} Raw AM column header, or the input if no mapping found
  */
 function getFieldRawHeader(displayLabel) {
-  var map = loadFieldMap();
-  return map.byDisplayLabel[displayLabel] || displayLabel;
+    var map = loadFieldMap();
+    return map.byDisplayLabel[displayLabel] || displayLabel;
 }
 
 /**
@@ -218,10 +191,10 @@ function getFieldRawHeader(displayLabel) {
  * @returns {string} Report column header
  */
 function getFieldReportHeader(fieldName) {
-  var map = loadFieldMap();
-  var entry = map.byRawHeader[fieldName];
-  if (!entry) return fieldName;
-  return entry.reportHeader || entry.displayLabel || fieldName;
+    var map = loadFieldMap();
+    var entry = map.byRawHeader[fieldName];
+    if (!entry) return fieldName;
+    return entry.reportHeader || entry.displayLabel || fieldName;
 }
 
 /**
@@ -232,16 +205,16 @@ function getFieldReportHeader(fieldName) {
  * @returns {Object} { displayLabel: rawHeader, rawHeader: rawHeader }
  */
 function buildLabelToRawMap(fieldNames) {
-  var map = loadFieldMap();
-  var result = {};
-  for (var i = 0; i < fieldNames.length; i++) {
-    var raw = fieldNames[i];
-    var entry = map.byRawHeader[raw];
-    var label = entry ? entry.displayLabel : raw;
-    result[label] = raw;
-    result[raw] = raw; // self-reference for backward compat
-  }
-  return result;
+    var map = loadFieldMap();
+    var result = {};
+    for (var i = 0; i < fieldNames.length; i++) {
+        var raw = fieldNames[i];
+        var entry = map.byRawHeader[raw];
+        var label = entry ? entry.displayLabel : raw;
+        result[label] = raw;
+        result[raw] = raw; // self-reference for backward compat
+    }
+    return result;
 }
 
 /**
@@ -251,11 +224,11 @@ function buildLabelToRawMap(fieldNames) {
  * @returns {Array} Display labels in same order
  */
 function buildDisplayLabels(fieldNames) {
-  var map = loadFieldMap();
-  return fieldNames.map(function(raw) {
-    var entry = map.byRawHeader[raw];
-    return entry ? entry.displayLabel : raw;
-  });
+    var map = loadFieldMap();
+    return fieldNames.map(function (raw) {
+        var entry = map.byRawHeader[raw];
+        return entry ? entry.displayLabel : raw;
+    });
 }
 
 
@@ -270,54 +243,54 @@ function buildDisplayLabels(fieldNames) {
  * @returns {Array} [{name: groupName, fields: [{value: rawHeader, label: displayLabel}]}]
  */
 function getFieldsByGroup(amHeaders) {
-  var map = loadFieldMap();
-  var headerSet = {};
-  for (var h = 0; h < amHeaders.length; h++) {
-    headerSet[amHeaders[h]] = true;
-  }
-
-  // Ordered group names (non-computed groups only)
-  var groupOrder = ['Identity', 'Contact', 'Address', 'Demographics', 'Age Brackets',
-                    'Income', 'Service', 'Distribution', 'Referral', 'Testimonial', 'System'];
-
-  var groups = [];
-  for (var g = 0; g < groupOrder.length; g++) {
-    var groupName = groupOrder[g];
-    var entries = map.byGroup[groupName] || [];
-    var validFields = [];
-
-    for (var f = 0; f < entries.length; f++) {
-      if (headerSet[entries[f].rawHeader]) {
-        validFields.push({
-          value: entries[f].rawHeader,
-          label: entries[f].displayLabel
-        });
-      }
+    var map = loadFieldMap();
+    var headerSet = {};
+    for (var h = 0; h < amHeaders.length; h++) {
+        headerSet[amHeaders[h]] = true;
     }
 
-    if (validFields.length > 0) {
-      groups.push({ name: groupName, fields: validFields });
-    }
-  }
+    // Ordered group names (non-computed groups only)
+    var groupOrder = ['Identity', 'Contact', 'Address', 'Demographics', 'Age Brackets',
+        'Income', 'Service', 'Distribution', 'Referral', 'Testimonial', 'System'];
 
-  // Collect any AM headers not in the map into "Other"
-  var mappedHeaders = {};
-  for (var key in map.byRawHeader) {
-    mappedHeaders[key] = true;
-  }
-  var otherFields = amHeaders.filter(function(h) {
-    return !mappedHeaders[h] && h !== 'Timestamp' && !h.match(/^\[(?:Males|Females)\s/);
-  });
-  if (otherFields.length > 0) {
-    groups.push({
-      name: 'Other',
-      fields: otherFields.map(function(f) {
-        return { value: f, label: f };
-      })
+    var groups = [];
+    for (var g = 0; g < groupOrder.length; g++) {
+        var groupName = groupOrder[g];
+        var entries = map.byGroup[groupName] || [];
+        var validFields = [];
+
+        for (var f = 0; f < entries.length; f++) {
+            if (headerSet[entries[f].rawHeader]) {
+                validFields.push({
+                    value: entries[f].rawHeader,
+                    label: entries[f].displayLabel
+                });
+            }
+        }
+
+        if (validFields.length > 0) {
+            groups.push({ name: groupName, fields: validFields });
+        }
+    }
+
+    // Collect any AM headers not in the map into "Other"
+    var mappedHeaders = {};
+    for (var key in map.byRawHeader) {
+        mappedHeaders[key] = true;
+    }
+    var otherFields = amHeaders.filter(function (h) {
+        return !mappedHeaders[h] && h !== 'Timestamp' && !h.match(/^\[(?:Males|Females)\s/);
     });
-  }
+    if (otherFields.length > 0) {
+        groups.push({
+            name: 'Other',
+            fields: otherFields.map(function (f) {
+                return { value: f, label: f };
+            })
+        });
+    }
 
-  return groups;
+    return groups;
 }
 
 /**
@@ -326,11 +299,11 @@ function getFieldsByGroup(amHeaders) {
  * @returns {Array} [{value: fieldName, label: fieldName}]
  */
 function getComputedFields() {
-  var map = loadFieldMap();
-  var entries = map.byGroup['Computed'] || [];
-  return entries.map(function(e) {
-    return { value: e.rawHeader, label: e.displayLabel };
-  });
+    var map = loadFieldMap();
+    var entries = map.byGroup['Computed'] || [];
+    return entries.map(function (e) {
+        return { value: e.rawHeader, label: e.displayLabel };
+    });
 }
 
 /**
@@ -339,11 +312,11 @@ function getComputedFields() {
  * @returns {Array} [{value: fieldName, label: fieldName}]
  */
 function getSummaryFields() {
-  var map = loadFieldMap();
-  var entries = map.byGroup['Summary'] || [];
-  return entries.map(function(e) {
-    return { value: e.rawHeader, label: e.displayLabel };
-  });
+    var map = loadFieldMap();
+    var entries = map.byGroup['Summary'] || [];
+    return entries.map(function (e) {
+        return { value: e.rawHeader, label: e.displayLabel };
+    });
 }
 
 
@@ -356,8 +329,8 @@ function getSummaryFields() {
  * @returns {Object} { formFieldId: rawAMHeader }
  */
 function getIntakeFieldMappingFromMap() {
-  var map = loadFieldMap();
-  return Object.assign({}, map.byFormFieldId);
+    var map = loadFieldMap();
+    return Object.assign({}, map.byFormFieldId);
 }
 
 
@@ -370,11 +343,11 @@ function getIntakeFieldMappingFromMap() {
  * @returns {Array} [{rawHeader, displayLabel, dataType, ...}]
  */
 function getFieldsByPortal(portalCode) {
-  var map = loadFieldMap();
-  var code = portalCode.toUpperCase();
-  return map.allFields.filter(function(entry) {
-    return entry.portalVisibility.toUpperCase().indexOf(code) !== -1;
-  });
+    var map = loadFieldMap();
+    var code = portalCode.toUpperCase();
+    return map.allFields.filter(function (entry) {
+        return entry.portalVisibility.toUpperCase().indexOf(code) !== -1;
+    });
 }
 
 /**
@@ -383,9 +356,9 @@ function getFieldsByPortal(portalCode) {
  * @returns {Array} Array of raw header names
  */
 function getSearchableFields() {
-  var map = loadFieldMap();
-  return map.allFields.filter(function(e) { return e.searchable; })
-    .map(function(e) { return e.rawHeader; });
+    var map = loadFieldMap();
+    return map.allFields.filter(function (e) { return e.searchable; })
+        .map(function (e) { return e.rawHeader; });
 }
 
 /**
@@ -394,9 +367,9 @@ function getSearchableFields() {
  * @returns {Array} Array of raw header names
  */
 function getRequiredFields() {
-  var map = loadFieldMap();
-  return map.allFields.filter(function(e) { return e.required; })
-    .map(function(e) { return e.rawHeader; });
+    var map = loadFieldMap();
+    return map.allFields.filter(function (e) { return e.required; })
+        .map(function (e) { return e.rawHeader; });
 }
 
 /**
@@ -406,9 +379,9 @@ function getRequiredFields() {
  * @returns {string} Data type (text, date, number, dropdown, multiselect, textarea)
  */
 function getFieldDataType(fieldName) {
-  var map = loadFieldMap();
-  var entry = map.byRawHeader[fieldName];
-  return entry ? entry.dataType : 'text';
+    var map = loadFieldMap();
+    var entry = map.byRawHeader[fieldName];
+    return entry ? entry.dataType : 'text';
 }
 
 
@@ -420,12 +393,12 @@ function getFieldDataType(fieldName) {
  * @type {Object}
  */
 var STAFF_SECTION_CONFIG = {
-  clientInfo: { label: 'Client Information (Read Only)', readOnly: true  },
-  staffEntry: { label: 'Staff Entry',                   readOnly: false },
-  scheduling: { label: 'Distribution Scheduling',       readOnly: false },
-  completion: { label: 'Distribution Completion',       readOnly: false },
-  approvals:  { label: 'Approvals',                     readOnly: false },
-  adminNotes: { label: 'Admin Notes',                   readOnly: false }
+    clientInfo: { label: 'Client Information (Read Only)', readOnly: true },
+    staffEntry: { label: 'Staff Entry', readOnly: false },
+    scheduling: { label: 'Distribution Scheduling', readOnly: false },
+    completion: { label: 'Distribution Completion', readOnly: false },
+    approvals: { label: 'Approvals', readOnly: false },
+    adminNotes: { label: 'Admin Notes', readOnly: false }
 };
 
 /**
@@ -436,10 +409,10 @@ var STAFF_SECTION_CONFIG = {
  * @returns {string[]} Array of raw AM column header names marked Editable=Y
  */
 function getEditableFields() {
-  var map = loadFieldMap();
-  return map.allFields
-    .filter(function(e) { return e.editable; })
-    .map(function(e) { return e.rawHeader; });
+    var map = loadFieldMap();
+    return map.allFields
+        .filter(function (e) { return e.editable; })
+        .map(function (e) { return e.rawHeader; });
 }
 
 /**
@@ -455,81 +428,81 @@ function getEditableFields() {
  * @returns {Object} { sections, fieldMap, editableFields, dropdownFields }
  */
 function getStaffPortalSections() {
-  var map = loadFieldMap();
+    var map = loadFieldMap();
 
-  var sectionFieldsMap = {};  // sectionKey → field entry array
-  var fieldMap         = {};  // svFieldId → rawHeader
-  var editableFields   = [];  // rawHeaders where Editable=Y
-  var dropdownFields   = {};  // svFieldId → lookupSource (selects only)
+    var sectionFieldsMap = {};  // sectionKey → field entry array
+    var fieldMap = {};  // svFieldId → rawHeader
+    var editableFields = [];  // rawHeaders where Editable=Y
+    var dropdownFields = {};  // svFieldId → lookupSource (selects only)
 
-  for (var i = 0; i < map.allFields.length; i++) {
-    var entry = map.allFields[i];
+    for (var i = 0; i < map.allFields.length; i++) {
+        var entry = map.allFields[i];
 
-    // Build editableFields list
-    if (entry.editable) {
-      editableFields.push(entry.rawHeader);
+        // Build editableFields list
+        if (entry.editable) {
+            editableFields.push(entry.rawHeader);
+        }
+
+        // Build fieldMap and dropdownFields from SV Field ID (HTML element IDs)
+        // svFieldId is distinct from formFieldId which is intake-form-only
+        if (entry.svFieldId) {
+            fieldMap[entry.svFieldId] = entry.rawHeader;
+            var inputType = _normalizeInputType(entry.dataType);
+            if (inputType === 'select' && entry.lookupSource) {
+                dropdownFields[entry.svFieldId] = entry.lookupSource;
+            }
+        }
+
+        // Group fields by Form Section
+        if (entry.formSection) {
+            if (!sectionFieldsMap[entry.formSection]) {
+                sectionFieldsMap[entry.formSection] = [];
+            }
+            sectionFieldsMap[entry.formSection].push({
+                name: entry.rawHeader,
+                label: entry.displayLabel || entry.rawHeader,
+                type: _normalizeInputType(entry.dataType),
+                lookup: entry.lookupSource || '',
+                svFieldId: entry.svFieldId || ''
+            });
+        }
     }
 
-    // Build fieldMap and dropdownFields from SV Field ID (HTML element IDs)
-    // svFieldId is distinct from formFieldId which is intake-form-only
-    if (entry.svFieldId) {
-      fieldMap[entry.svFieldId] = entry.rawHeader;
-      var inputType = _normalizeInputType(entry.dataType);
-      if (inputType === 'select' && entry.lookupSource) {
-        dropdownFields[entry.svFieldId] = entry.lookupSource;
-      }
+    // Build ordered sections array
+    var sectionOrder = ['clientInfo', 'staffEntry', 'scheduling', 'completion', 'approvals', 'adminNotes'];
+    var sections = [];
+    for (var s = 0; s < sectionOrder.length; s++) {
+        var key = sectionOrder[s];
+        if (sectionFieldsMap[key]) {
+            var cfg = STAFF_SECTION_CONFIG[key] || { label: key, readOnly: false };
+            sections.push({
+                sectionKey: key,
+                label: cfg.label,
+                readOnly: cfg.readOnly || false,
+                fields: sectionFieldsMap[key]
+            });
+        }
     }
 
-    // Group fields by Form Section
-    if (entry.formSection) {
-      if (!sectionFieldsMap[entry.formSection]) {
-        sectionFieldsMap[entry.formSection] = [];
-      }
-      sectionFieldsMap[entry.formSection].push({
-        name:       entry.rawHeader,
-        label:      entry.displayLabel || entry.rawHeader,
-        type:       _normalizeInputType(entry.dataType),
-        lookup:     entry.lookupSource || '',
-        svFieldId:  entry.svFieldId   || ''
-      });
+    // Diagnostic: warn if fieldMap came up empty so the cause is visible in Logs
+    if (Object.keys(fieldMap).length === 0) {
+        var svColPresent = (loadFieldMap().allFields.some(function (e) { return e.svFieldId !== ''; }));
+        if (!svColPresent) {
+            Logger.log('FieldMapService WARNING: getStaffPortalSections() produced an empty fieldMap. ' +
+                'The "SV Field ID" column appears to be absent or unpopulated in LU_FieldMap. ' +
+                'All editable SV portal fields will be blank until SV Field ID values are added.');
+        } else {
+            Logger.log('FieldMapService WARNING: getStaffPortalSections() produced an empty fieldMap. ' +
+                'SV Field ID values exist but no fields matched. Check Form Section column values.');
+        }
     }
-  }
 
-  // Build ordered sections array
-  var sectionOrder = ['clientInfo', 'staffEntry', 'scheduling', 'completion', 'approvals', 'adminNotes'];
-  var sections = [];
-  for (var s = 0; s < sectionOrder.length; s++) {
-    var key = sectionOrder[s];
-    if (sectionFieldsMap[key]) {
-      var cfg = STAFF_SECTION_CONFIG[key] || { label: key, readOnly: false };
-      sections.push({
-        sectionKey: key,
-        label:      cfg.label,
-        readOnly:   cfg.readOnly || false,
-        fields:     sectionFieldsMap[key]
-      });
-    }
-  }
-
-  // Diagnostic: warn if fieldMap came up empty so the cause is visible in Logs
-  if (Object.keys(fieldMap).length === 0) {
-    var svColPresent = (loadFieldMap().allFields.some(function(e) { return e.svFieldId !== ''; }));
-    if (!svColPresent) {
-      Logger.log('FieldMapService WARNING: getStaffPortalSections() produced an empty fieldMap. ' +
-        'The "SV Field ID" column appears to be absent or unpopulated in LU_FieldMap. ' +
-        'All editable SV portal fields will be blank until SV Field ID values are added.');
-    } else {
-      Logger.log('FieldMapService WARNING: getStaffPortalSections() produced an empty fieldMap. ' +
-        'SV Field ID values exist but no fields matched. Check Form Section column values.');
-    }
-  }
-
-  return {
-    sections:       sections,
-    fieldMap:       fieldMap,
-    editableFields: editableFields,
-    dropdownFields: dropdownFields
-  };
+    return {
+        sections: sections,
+        fieldMap: fieldMap,
+        editableFields: editableFields,
+        dropdownFields: dropdownFields
+    };
 }
 
 /**
@@ -542,12 +515,12 @@ function getStaffPortalSections() {
  * @returns {string} Normalized HTML input type string
  */
 function _normalizeInputType(dataType) {
-  var dt = (dataType || '').toLowerCase().trim();
-  if (dt === 'dropdown' || dt === 'select' || dt === 'multiselect') return 'select';
-  if (dt === 'textarea') return 'textarea';
-  if (dt === 'date')     return 'date';
-  if (dt === 'number')   return 'number';
-  return 'text';
+    var dt = (dataType || '').toLowerCase().trim();
+    if (dt === 'dropdown' || dt === 'select' || dt === 'multiselect') return 'select';
+    if (dt === 'textarea') return 'textarea';
+    if (dt === 'date') return 'date';
+    if (dt === 'number') return 'number';
+    return 'text';
 }
 
 
@@ -561,8 +534,8 @@ function _normalizeInputType(dataType) {
  * @returns {string} Raw AM column header, or empty string if not found
  */
 function getCOLConstant(constantName) {
-  var map = loadFieldMap();
-  return map.byColConstant[constantName] || '';
+    var map = loadFieldMap();
+    return map.byColConstant[constantName] || '';
 }
 
 /**
@@ -570,8 +543,8 @@ function getCOLConstant(constantName) {
  * Typically invoked by the onEdit trigger for G2N_Lookups.
  */
 function clearFieldMapCache() {
-  _fieldMapCache = null;
-  Logger.log('FieldMapService: Cache cleared');
+    _fieldMapCache = null;
+    Logger.log('FieldMapService: Cache cleared');
 }
 
 
@@ -584,47 +557,47 @@ function clearFieldMapCache() {
  * @returns {Object} Same structure as loadFieldMap()
  */
 function _buildFallbackFieldMap() {
-  // Use existing FIELD_DISPLAY_MAP if available
-  var hardcoded = {};
-  if (typeof FIELD_DISPLAY_MAP !== 'undefined') {
-    hardcoded = FIELD_DISPLAY_MAP;
-  }
+    // Use existing FIELD_DISPLAY_MAP if available
+    var hardcoded = {};
+    if (typeof FIELD_DISPLAY_MAP !== 'undefined') {
+        hardcoded = FIELD_DISPLAY_MAP;
+    }
 
-  var result = {
-    byRawHeader: {},
-    byDisplayLabel: {},
-    byFormFieldId: {},
-    byColConstant: {},
-    byGroup: {},
-    allFields: []
-  };
-
-  for (var rawHeader in hardcoded) {
-    var displayLabel = hardcoded[rawHeader];
-    var entry = {
-      rawHeader: rawHeader,
-      displayLabel: displayLabel,
-      reportHeader: '',
-      fieldGroup: 'Other',
-      dataType: 'text',
-      formFieldId: '',
-      portalVisibility: 'AI,SV,AP',
-      searchable: false,
-      required: false,
-      colConstant: '',
-      notes: 'Fallback from hardcoded FIELD_DISPLAY_MAP',
-      editable: false,
-      formSection: '',
-      lookupSource: '',
-      svFieldId: '',
-      dbColumnName: ''
+    var result = {
+        byRawHeader: {},
+        byDisplayLabel: {},
+        byFormFieldId: {},
+        byColConstant: {},
+        byGroup: {},
+        allFields: []
     };
-    result.allFields.push(entry);
-    result.byRawHeader[rawHeader] = entry;
-    result.byDisplayLabel[displayLabel] = rawHeader;
-    result.byDisplayLabel[rawHeader] = rawHeader;
-  }
 
-  Logger.log('FieldMapService: Using fallback hardcoded map (' + result.allFields.length + ' entries)');
-  return result;
+    for (var rawHeader in hardcoded) {
+        var displayLabel = hardcoded[rawHeader];
+        var entry = {
+            rawHeader: rawHeader,
+            displayLabel: displayLabel,
+            reportHeader: '',
+            fieldGroup: 'Other',
+            dataType: 'text',
+            formFieldId: '',
+            portalVisibility: 'AI,SV,AP',
+            searchable: false,
+            required: false,
+            colConstant: '',
+            notes: 'Fallback from hardcoded FIELD_DISPLAY_MAP',
+            editable: false,
+            formSection: '',
+            lookupSource: '',
+            svFieldId: '',
+            previousHeaderName: ''
+        };
+        result.allFields.push(entry);
+        result.byRawHeader[rawHeader] = entry;
+        result.byDisplayLabel[displayLabel] = rawHeader;
+        result.byDisplayLabel[rawHeader] = rawHeader;
+    }
+
+    Logger.log('FieldMapService: Using fallback hardcoded map (' + result.allFields.length + ' entries)');
+    return result;
 }
