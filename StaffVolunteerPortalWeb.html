@@ -18,6 +18,11 @@
            but its SV Field ID in LU_FieldMap may be absent, which causes the
            FIELD_MAP loop to skip it and leave the dropdown blank even though
            the record carries the correct Service Status value.
+  v4.35 - sv_ae_open(): replaced inline demographic modal with full AI launch.
+           Opens ApplicantIntake.html with ?mode=staff&recordId=XXX so all fields
+           are pre-populated and editable. 'intakeUpdated' postMessage listener
+           auto-refreshes the SV record display after save. Button label updated
+           to "Edit Full Intake Form".
 -->
 
 <!DOCTYPE html>
@@ -557,7 +562,7 @@
                         <strong>⚠ Incomplete Intake Data</strong><br>
                         <small id="demographicsWarningText" style="color:#5d4037;"></small><br>
                         <button type="button" onclick="sv_ae_open()" style="margin-top:8px;padding:5px 14px;background:#1a73e8;color:white;border:none;border-radius:4px;cursor:pointer;font-size:13px;">
-                            ✏ Complete Intake Form
+                            ✏ Edit Full Intake Form
                         </button>
                     </div>
 
@@ -1875,40 +1880,40 @@
         }
 
         /**
-         * Opens the intake edit modal for the currently loaded record.
-         * Lazy-loads lookups + field mapping on first open.
-         * v4.34 - New function.
+         * Opens the full Applicant Intake form in a new tab for the currently loaded record.
+         * Passes ?mode=staff&recordId=XXX&archiveSource=XXX so AI pre-populates all fields.
+         * On save AI posts 'intakeUpdated' back; SV listener refreshes the record display.
+         * v4.35 - Replaced inline demographic modal with full AI launch.
          */
         function sv_ae_open() {
             var recId = document.getElementById('recordId').value;
-            var rowIdx = document.getElementById('rowIndex').value;
+            var archSrc = document.getElementById('archiveSource').value || '';
             if (!recId) return;
-            document.getElementById('sv_ae_rowIndex').value = rowIdx || '';
-            document.getElementById('sv_ae_message').classList.add('hidden');
 
-            // Populate dropdowns if not yet loaded
-            if (!sv_ae_lookups) {
-                google.script.run
-                    .withSuccessHandler(function (data) {
-                        sv_ae_lookups = data.lookups || {};
-                        sv_ae_reverseMap = {};
-                        for (var fid in (data.fieldMapping || {})) {
-                            sv_ae_reverseMap[data.fieldMapping[fid]] = fid;
-                        }
-                        sv_ae_populateDropdowns(data.dropdownFields || {}, sv_ae_lookups);
-                        sv_ae_fillFromRecord();
-                    })
-                    .withFailureHandler(function (e) {
-                        document.getElementById('sv_ae_message').textContent = 'Error loading form: ' + e.message;
-                        document.getElementById('sv_ae_message').className = 'alert alert-error';
-                        document.getElementById('sv_ae_message').classList.remove('hidden');
-                    })
-                    .getApplicantEditData();
-            } else {
-                sv_ae_fillFromRecord();
-            }
-            document.getElementById('sv_ae_modal').classList.remove('hidden');
+            var baseUrl = '<?= serverWebAppUrl ?>';
+            var url = baseUrl + '?mode=staff&recordId=' + encodeURIComponent(recId);
+            if (archSrc) url += '&archiveSource=' + encodeURIComponent(archSrc);
+            window.open(url, '_blank');
         }
+
+        // v4.35: Listen for 'intakeUpdated' message posted by AI after a successful edit.
+        // Re-searches the record by ID so the SV display reflects the saved changes.
+        window.addEventListener('message', function (event) {
+            if (!event.data || event.data.type !== 'intakeUpdated') return;
+            var updatedId = String(event.data.recordId || '');
+            var currentId = document.getElementById('recordId').value;
+            if (!updatedId || updatedId !== currentId) return;
+            showMessage('saveMessage', 'Intake form updated — refreshing record…', 'success');
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result && result.success && result.results && result.results.length > 0) {
+                        var hit = result.results[0];
+                        openRecord(hit.record, hit.rowIndex);
+                    }
+                })
+                .withFailureHandler(function () { /* non-fatal — user can re-search manually */ })
+                .searchRecords({ searchType: 'id', recordId: updatedId });
+        });
 
         /** Populates dropdowns in the modal from lookups data. */
         function sv_ae_populateDropdowns(dropdownFields, lookups) {

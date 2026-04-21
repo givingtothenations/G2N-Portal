@@ -338,6 +338,8 @@ function doGet(e) {
             intakeTemplate.serverMode = e.parameter.mode || '';
             intakeTemplate.serverReturnPage = e.parameter.returnPage || '';
             intakeTemplate.serverWebAppUrl = CONFIG.WEB_APP_URL;
+            intakeTemplate.serverRecordId = e.parameter.recordId || '';
+            intakeTemplate.serverArchiveSource = e.parameter.archiveSource || '';
             return intakeTemplate.evaluate()
                 .setTitle('G2N Applicant Intake')
                 .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);

@@ -29,6 +29,10 @@
          found, isEventMode=true, form shows event UI, and the session is logged
          as 'event'. Required fields are always removed in staff mode regardless.
          Previously staff mode hard-coded currentEventInfo = { isActive: false }.
+  v3.12 - Edit mode: when opened with ?recordId=XXX from SV or AP, pre-populates
+          all fields from the existing AM record via getApplicantForIntake().
+          Submit calls updateIntakeRecord() instead of submitIntakeForm().
+          Triggered from SV "Complete Intake Form" button and AP "Edit Applicant" tab.
 -->
 
 <!DOCTYPE html>
@@ -442,73 +446,6 @@
         </div>
 
         <div class="form-body">
-            <!-- v3.8: Staff Event Inquiry Panel — shown in staff mode before the main form.
-                 Asks whether this intake is for an event; if yes, looks up the event by date. -->
-            <div id="staffEventPanel" class="hidden" style="
-                background:#fff; border:1px solid #dadce0; border-radius:10px;
-                padding:28px 32px; max-width:460px; margin:0 auto;">
-                <h3 style="margin:0 0 6px; color:#1a73e8; font-size:18px;">Staff Intake</h3>
-                <p style="margin:0 0 20px; color:#555; font-size:14px;">
-                    Is this intake for a <strong>G2N Event</strong>?
-                </p>
-
-                <!-- Step 1: Yes / No -->
-                <div id="staffEventStep1" style="display:flex; gap:12px;">
-                    <button type="button" onclick="staffEventAnswer(true)"
-                            style="flex:1; padding:12px; background:#1a73e8; color:#fff;
-                               border:none; border-radius:6px; font-size:15px;
-                               font-weight:600; cursor:pointer;">
-                        Yes — Event
-                    </button>
-                    <button type="button" onclick="staffEventAnswer(false)"
-                            style="flex:1; padding:12px; background:#5f6368; color:#fff;
-                               border:none; border-radius:6px; font-size:15px;
-                               font-weight:600; cursor:pointer;">
-                        No — Regular
-                    </button>
-                </div>
-
-                <!-- Step 2: Date lookup (shown after Yes) -->
-                <div id="staffEventStep2" class="hidden" style="margin-top:18px;">
-                    <label style="font-weight:600; font-size:13px; color:#333;">Event Date:</label>
-                    <div style="display:flex; gap:8px; margin-top:6px;">
-                        <input type="date" id="staffEventDate"
-                               style="flex:1; padding:9px 10px; border:1px solid #ccc;
-                                   border-radius:5px; font-size:14px;">
-                        <button type="button" onclick="staffEventLookup()"
-                                style="padding:9px 16px; background:#1a73e8; color:#fff;
-                                   border:none; border-radius:5px; font-size:13px;
-                                   font-weight:600; cursor:pointer;">
-                            Look Up
-                        </button>
-                    </div>
-                    <div id="staffEventLookupMsg" style="margin-top:10px; font-size:13px;"></div>
-
-                    <!-- Event found confirmation -->
-                    <div id="staffEventFound" class="hidden"
-                         style="margin-top:14px; background:#e8f5e9; border:1px solid #a5d6a7;
-                                border-radius:6px; padding:12px;">
-                        <p style="margin:0 0 4px; font-weight:600; color:#2e7d32;
-                                   font-size:14px;">✓ Event Found</p>
-                        <p id="staffEventDetails" style="margin:0 0 12px; font-size:13px; color:#333;"></p>
-                        <div style="display:flex; gap:8px;">
-                            <button type="button" onclick="staffEventConfirm()"
-                                    style="flex:1; padding:9px; background:#34a853; color:#fff;
-                                       border:none; border-radius:5px; font-weight:600;
-                                       cursor:pointer;">
-                                Confirm &amp; Continue
-                            </button>
-                            <button type="button" onclick="staffEventRetry()"
-                                    style="padding:9px 14px; background:#fff; color:#555;
-                                       border:1px solid #ccc; border-radius:5px;
-                                       cursor:pointer;">
-                                Different Date
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <div id="loadingState" class="loading">
                 <div class="loading-spinner"></div>
                 <p>Loading form...</p>
@@ -861,12 +798,18 @@
         let lookups = {};
         let isEventMode = false;
         let isStaffMode = false;
-        let staffPendingEventInfo = null;  // v3.8: holds event found during staff lookup
         let enforceRequired = true;
         let currentEventInfo = null;
         let returnPage = '';
         let webAppUrl = '';
         let staffCode = '';  // v3.11: staff member's code, passed from SV via URL param
+
+        // v3.12 edit mode — set when AI is opened with ?recordId= from SV or AP
+        let isEditMode = false;
+        let editRowIndex = null;
+        let editRecordId = '';
+        let editArchiveSource = '';
+        let editIsArchived = false;
 
         let addressVerified = false;   // true after successful verification
         let addrFailCount = 0;         // count of failed verification attempts
@@ -879,8 +822,21 @@
             var serverMode = '<?= serverMode ?>' || '';
             returnPage = '<?= serverReturnPage ?>' || '';
             webAppUrl = '<?= serverWebAppUrl ?>' || '';
+            editRecordId = '<?= serverRecordId ?>' || '';
+            editArchiveSource = '<?= serverArchiveSource ?>' || '';
 
-            isStaffMode = (serverMode === 'staff');
+            // v3.12: edit mode — AI opened from SV/AP with an existing record ID
+            isEditMode = !!(editRecordId);
+            if (isEditMode) {
+                isStaffMode = true;   // inherit all staff-mode behaviours (no required fields, bypass addr)
+                serverMode = 'staff'; // ensure downstream checks treat this as staff
+                document.querySelector('.header h1').textContent = 'Update Applicant Record';
+                document.querySelector('.header p').textContent = 'Record ID: ' + editRecordId;
+                document.getElementById('cancelBtn').classList.remove('hidden');
+                document.getElementById('submitBtn').textContent = 'Update Record';
+            }
+
+            isStaffMode = (serverMode === 'staff') || isEditMode;
 
             try {
                 var urlParams = new URLSearchParams(window.location.search);
@@ -888,36 +844,43 @@
             } catch (e) { staffCode = ''; }
 
             if (isStaffMode) {
-                // Authorized user mode — show Cancel button, change Submit text
+                // Authorized user mode - show Cancel button, change Submit text
                 document.getElementById('cancelBtn').classList.remove('hidden');
-                document.getElementById('submitBtn').textContent = 'Save & Return';
+                // v3.12: edit mode keeps 'Update Record'; normal staff mode uses 'Save & Return'
+                document.getElementById('submitBtn').textContent = isEditMode ? 'Update Record' : 'Save & Return';
 
-                // v3.8: Show the event inquiry panel instead of loading the form immediately.
-                // Staff may be entering data for a past event so current date cannot be used.
-                // The panel asks "Is this for an event?" and, if yes, accepts a date and
-                // looks up the matching LU_EventInfo row before loading the main form.
-                document.getElementById('loadingState').classList.add('hidden');
-                document.getElementById('staffEventPanel').classList.remove('hidden');
+                // v3.8: Staff mode now checks for an active event just like public mode.
+                // Required fields are always removed in staff mode regardless of event status.
+                removeRequiredFields();
+                google.script.run
+                    .withSuccessHandler(function (eventInfo) {
+                        currentEventInfo = eventInfo || { isActive: false };
+                        isEventMode = currentEventInfo.isActive;
+                        if (isEventMode) {
+                            document.getElementById('outdoorEvent').value = 'Yes';
+                        }
+                        setDefaultDate();
+                        loadLookups();
+                        logIntakeSessionToAudit(isEventMode ? 'event' : 'staff');
+                    })
+                    .withFailureHandler(function () {
+                        currentEventInfo = { isActive: false };
+                        setDefaultDate();
+                        loadLookups();
+                        logIntakeSessionToAudit('staff');
+                    })
+                    .getEventInfo();
 
-                // Pre-fill date input with today as a convenience starting point
-                var dateInput = document.getElementById('staffEventDate');
-                if (dateInput) {
-                    var now = new Date();
-                    var mm = String(now.getMonth() + 1).padStart(2, '0');
-                    var dd = String(now.getDate()).padStart(2, '0');
-                    dateInput.value = now.getFullYear() + '-' + mm + '-' + dd;
-                }
-
-                // Clear contact fields that may auto-fill with staff member's own info
+                // Clear any auto-populated contact fields that may belong to the
+                // logged-in staff member rather than the applicant.
                 setTimeout(function () {
                     var emailEl = document.getElementById('email');
                     var phoneEl = document.getElementById('phoneNumber');
                     if (emailEl) emailEl.value = '';
                     if (phoneEl) phoneEl.value = '';
                 }, 300);
-
             } else {
-                // Normal public mode — check event info against current date/time
+                // Normal public mode - check event info
                 loadFormData();
             }
 
@@ -934,99 +897,6 @@
             google.script.run
                 .withFailureHandler(function (e) { console.log('Session log failed: ' + e.message); })
                 .logIntakeSession({ mode: mode, userAgent: navigator.userAgent });
-        }
-
-        // ── Staff Event Inquiry Handlers (v3.8) ──────────────────────────────
-
-        /**
-         * Step 1 response: staff answered Yes or No to the event question.
-         * Yes → show date lookup. No → proceed as regular non-event staff intake.
-         * @param {boolean} isEvent
-         */
-        function staffEventAnswer(isEvent) {
-            if (isEvent) {
-                document.getElementById('staffEventStep1').classList.add('hidden');
-                document.getElementById('staffEventStep2').classList.remove('hidden');
-            } else {
-                // Non-event staff intake — load form with no event auto-fills
-                currentEventInfo = { isActive: false };
-                isEventMode = false;
-                _staffEventProceed_();
-                logIntakeSessionToAudit('staff');
-            }
-        }
-
-        /**
-         * Step 2: Look up the entered event date in LU_EventInfo.
-         * Shows confirmation panel if event found, error if not.
-         */
-        function staffEventLookup() {
-            var dateVal = document.getElementById('staffEventDate').value;
-            if (!dateVal) {
-                document.getElementById('staffEventLookupMsg').innerHTML =
-                    '<span style="color:#d93025;">Please enter a date.</span>';
-                return;
-            }
-            var msgEl = document.getElementById('staffEventLookupMsg');
-            msgEl.innerHTML = '<span style="color:#555;">Looking up event...</span>';
-            document.getElementById('staffEventFound').classList.add('hidden');
-
-            google.script.run
-                .withSuccessHandler(function (eventInfo) {
-                    if (eventInfo && eventInfo.isActive) {
-                        msgEl.innerHTML = '';
-                        document.getElementById('staffEventDetails').textContent =
-                            'Box Code: ' + (eventInfo.boxCode || '—') +
-                            '  |  Funding: ' + (eventInfo.fundingSourceDescription || eventInfo.fundingSource || '—');
-                        document.getElementById('staffEventFound').classList.remove('hidden');
-                        // Store for use on Confirm
-                        staffPendingEventInfo = eventInfo;
-                    } else {
-                        msgEl.innerHTML =
-                            '<span style="color:#d93025;">No active event found for ' + dateVal +
-                            '. Check LU_EventInfo or try a different date.</span>';
-                        document.getElementById('staffEventFound').classList.add('hidden');
-                    }
-                })
-                .withFailureHandler(function (err) {
-                    msgEl.innerHTML =
-                        '<span style="color:#d93025;">Lookup failed: ' + (err.message || err) + '</span>';
-                })
-                .getEventInfoForDate(dateVal, '');
-        }
-
-        /**
-         * Step 3a: Staff confirmed the found event — apply event mode and load form.
-         */
-        function staffEventConfirm() {
-            currentEventInfo = staffPendingEventInfo || { isActive: false };
-            isEventMode = currentEventInfo.isActive;
-            if (isEventMode) {
-                document.getElementById('outdoorEvent').value = 'Yes';
-            }
-            _staffEventProceed_();
-            logIntakeSessionToAudit('event');
-        }
-
-        /**
-         * Step 3b: Staff wants to try a different date — reset to date input.
-         */
-        function staffEventRetry() {
-            document.getElementById('staffEventFound').classList.add('hidden');
-            document.getElementById('staffEventLookupMsg').innerHTML = '';
-            staffPendingEventInfo = null;
-        }
-
-        /**
-         * Common: hide inquiry panel, show loading spinner, load form.
-         * @private
-         */
-        function _staffEventProceed_() {
-            document.getElementById('staffEventPanel').classList.add('hidden');
-            document.getElementById('loadingState').classList.remove('hidden');
-            removeRequiredFields();
-            setDefaultDate();
-            loadLookups();
         }
 
         /**
@@ -1139,6 +1009,45 @@
                     populateDropdowns(data.dropdownFields || {});
                     document.getElementById('loadingState').classList.add('hidden');
                     document.getElementById('intakeForm').classList.remove('hidden');
+
+                    // v3.12: edit mode — fetch existing record data and pre-fill all fields
+                    if (isEditMode) {
+                        var loadMsg = document.getElementById('submitMessage');
+                        loadMsg.textContent = 'Loading record data…';
+                        loadMsg.className = 'alert';
+                        loadMsg.style.background = '#e8f0fe';
+                        loadMsg.style.color = '#1a73e8';
+                        loadMsg.classList.remove('hidden');
+                        google.script.run
+                            .withSuccessHandler(function (result) {
+                                loadMsg.classList.add('hidden');
+                                loadMsg.style.background = '';
+                                loadMsg.style.color = '';
+                                if (result.success) {
+                                    editRowIndex = result.rowIndex;
+                                    editArchiveSource = result.archiveSource || '';
+                                    editIsArchived = result.isArchived || false;
+                                    prefillFromRecord(result.formData);
+                                    if (editIsArchived) {
+                                        loadMsg.textContent = '📦 Archived record — changes will be saved back to the archive workbook.';
+                                        loadMsg.className = 'alert';
+                                        loadMsg.style.background = '#fff3cd';
+                                        loadMsg.style.color = '#856404';
+                                        loadMsg.classList.remove('hidden');
+                                    }
+                                } else {
+                                    loadMsg.textContent = 'Error loading record: ' + (result.error || 'Unknown error');
+                                    loadMsg.className = 'alert alert-error';
+                                    loadMsg.classList.remove('hidden');
+                                }
+                            })
+                            .withFailureHandler(function (e) {
+                                loadMsg.textContent = 'Failed to load record: ' + e.message;
+                                loadMsg.className = 'alert alert-error';
+                                loadMsg.classList.remove('hidden');
+                            })
+                            .getApplicantForIntake(editRecordId, editArchiveSource);
+                    }
                 })
                 .withFailureHandler(function (error) {
                     document.getElementById('loadingState').innerHTML =
@@ -1600,11 +1509,140 @@
         // ============================================================
 
         /**
+         * Pre-fills all form fields from a formData object returned by getApplicantForIntake().
+         * Handles text inputs, selects, textareas, radio buttons, and checkboxes.
+         * assistanceReceiving is stored as a comma-separated string in AM → splits to check each box.
+         * v3.12 - New function for edit mode.
+         * @param {Object} formData - { formFieldId: value } from getApplicantForIntake()
+         */
+        function prefillFromRecord(formData) {
+            if (!formData) return;
+            for (var fieldId in formData) {
+                var value = (formData[fieldId] !== null && formData[fieldId] !== undefined)
+                    ? formData[fieldId].toString() : '';
+
+                // Skip assistanceReceiving here — handled below as checkboxes
+                if (fieldId === 'assistanceReceiving') continue;
+
+                var el = document.getElementById(fieldId);
+                if (el) {
+                    el.value = value;
+                } else {
+                    // Try radio buttons (name=fieldId)
+                    var radios = document.querySelectorAll('input[type="radio"][name="' + fieldId + '"]');
+                    radios.forEach(function (r) { r.checked = (r.value === value); });
+                }
+            }
+
+            // assistanceReceiving: AM stores comma-separated list; check matching boxes
+            if (formData.assistanceReceiving) {
+                var selected = formData.assistanceReceiving.split(',').map(function (s) { return s.trim(); });
+                document.querySelectorAll('input[name="assistanceReceiving"]').forEach(function (cb) {
+                    cb.checked = selected.indexOf(cb.value) !== -1;
+                });
+            }
+        }
+
+        /**
+         * Saves edits back to the existing record via updateIntakeRecord().
+         * Called by submitForm() when isEditMode is true.
+         * Collects all form field values, sends to server with rowIndex.
+         * On success posts 'intakeUpdated' message to opener and closes the tab.
+         * v3.12 - New function for edit mode.
+         */
+        function submitEditRecord() {
+            if (!editRowIndex) {
+                var msg = document.getElementById('submitMessage');
+                msg.textContent = 'Cannot save: record row index is missing. Please close and re-open the form.';
+                msg.className = 'alert alert-error';
+                msg.classList.remove('hidden');
+                return;
+            }
+
+            var form = document.getElementById('intakeForm');
+            var submitBtn = document.getElementById('submitBtn');
+            var submitMessage = document.getElementById('submitMessage');
+            var formData = {};
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Saving…';
+            submitMessage.classList.add('hidden');
+
+            // Collect all form values (same pattern as submitForm)
+            form.querySelectorAll('input, select, textarea').forEach(function (input) {
+                if (!input.name) return;
+                if (input.type === 'radio') {
+                    if (input.checked) formData[input.name] = input.value;
+                } else if (input.type === 'checkbox') {
+                    if (!formData[input.name]) formData[input.name] = [];
+                    if (input.checked) formData[input.name].push(input.value);
+                } else {
+                    formData[input.name] = input.value;
+                }
+            });
+
+            // Strip phone formatting before saving
+            if (formData.phoneNumber) {
+                formData.phoneNumber = formData.phoneNumber.replace(/\D/g, '');
+            }
+
+            var updatedBy = staffCode || '';
+
+            google.script.run
+                .withSuccessHandler(function (result) {
+                    if (result.success) {
+                        // Notify opener so SV/AP can refresh the displayed record
+                        if (window.opener && !window.opener.closed) {
+                            window.opener.postMessage(
+                                { type: 'intakeUpdated', recordId: editRecordId },
+                                '*'
+                            );
+                        }
+                        window.close();
+                        // Fallback if window.close() is blocked
+                        setTimeout(function () {
+                            if (!window.closed) {
+                                form.classList.add('hidden');
+                                var ss = document.getElementById('successState');
+                                ss.classList.remove('hidden');
+                                document.getElementById('confirmationId').textContent =
+                                    'Record ' + editRecordId + ' updated — ' +
+                                    result.changesCount + ' field(s) changed.';
+                                var lastP = ss.querySelector('p:last-child');
+                                if (lastP) lastP.textContent = 'Please close this window to return.';
+                            }
+                        }, 300);
+                    } else {
+                        submitMessage.textContent = result.error || 'Update failed.';
+                        submitMessage.className = 'alert alert-error';
+                        submitMessage.classList.remove('hidden');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Update Record';
+                    }
+                })
+                .withFailureHandler(function (error) {
+                    submitMessage.textContent = 'Update failed: ' + error.message;
+                    submitMessage.className = 'alert alert-error';
+                    submitMessage.classList.remove('hidden');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Update Record';
+                })
+                .updateIntakeRecord(editRowIndex, formData, updatedBy);
+        }
+
+        /**
          * Validates the form and submits to server via google.script.run.
          * Checks: adult requirement (non-event), address verification gate (v3.4),
          * then collects form data and calls submitIntakeForm().
+         * v3.12: In edit mode, delegates to submitEditRecord() instead.
          */
         function submitForm() {
+            // v3.12: edit mode — update existing record instead of creating new one
+            if (isEditMode) {
+                submitEditRecord();
+                return;
+            }
+
             const form = document.getElementById('intakeForm');
             const formData = {};
             const submitBtn = document.getElementById('submitBtn');

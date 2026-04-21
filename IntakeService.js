@@ -18,6 +18,10 @@
  * v3.8 - Non-event intake now defaults Service Status to "Open". Applies to
  *         public AI submissions and SV staff-mode submissions. Event mode
  *         continues to set "Picked Up" as before.
+ * v3.9 - Added getApplicantForIntake(recordId, archiveSource): loads an existing
+ *         AM record mapped to AI form field IDs for edit-mode pre-population.
+ *         AI detects ?recordId= param, pre-fills all fields, and calls
+ *         updateIntakeRecord() on save instead of submitIntakeForm().
  */
 
 /**
@@ -451,5 +455,95 @@ function logIntakeSession(sessionInfo) {
     } catch (e) {
         Logger.log('logIntakeSession error: ' + e.message);
         return { success: false, error: e.message };
+    }
+}
+
+/**
+ * Loads an existing AM record mapped to AI form field IDs for edit-mode pre-population.
+ * Called by ApplicantIntake.html when opened with ?recordId=XXX from SV or AP.
+ * Uses SearchService.searchRecords() so archive fall-through works automatically.
+ * Returns formData keyed by AI HTML element IDs so the form can set each field directly.
+ * v3.9 - New function.
+ * @param {string} recordId - The numeric record ID to load
+ * @param {string} archiveSource - Archive workbook name if record is archived (optional)
+ * @returns {Object} { success, formData, rowIndex, recordId, archiveSource, isArchived }
+ */
+function getApplicantForIntake(recordId, archiveSource) {
+    try {
+        if (!recordId) {
+            return { success: false, error: 'No record ID provided.' };
+        }
+
+        // Search finds the record in AM or any archive, returns rowIndex and _archiveSource
+        var searchResult = searchRecords({ searchType: 'id', recordId: String(recordId) });
+        if (!searchResult.success || !searchResult.results || searchResult.results.length === 0) {
+            return { success: false, error: 'Record not found: ' + recordId };
+        }
+
+        var hit = searchResult.results[0];
+        var record = hit.record;
+        var rowIndex = hit.rowIndex;
+        var foundArchSrc = (record['_archiveSource'] || '').toString();
+        var isArchived = !!(foundArchSrc);
+
+        // Build reverse map: AM raw header → AI form field ID
+        var fieldMapping = getIntakeFieldMapping();   // { formFieldId: amHeader }
+        var reverseMap = {};
+        for (var fid in fieldMapping) {
+            reverseMap[fieldMapping[fid]] = fid;
+        }
+
+        // Build formData: { formFieldId: value } for every field the mapping covers
+        var formData = {};
+        for (var amHeader in record) {
+            // Skip internal keys
+            if (amHeader.charAt(0) === '_') continue;
+
+            var formFieldId = reverseMap[amHeader];
+            if (!formFieldId) continue;
+
+            var value = record[amHeader];
+            if (value === null || value === undefined) {
+                value = '';
+            } else if (value instanceof Date) {
+                // Convert Date → YYYY-MM-DD for HTML date inputs
+                try {
+                    value = Utilities.formatDate(value, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+                } catch (e) { value = ''; }
+            } else {
+                value = value.toString();
+            }
+
+            // Special field transformations
+            if (formFieldId === 'childrenNewbornTo2') {
+                // AM stores 'X' for yes, '' for no
+                value = (value === 'X') ? 'Yes' : 'No';
+            }
+
+            // M/D/YYYY date strings → YYYY-MM-DD for date inputs
+            if ((formFieldId === 'formDate' || formFieldId === 'signatureDate') && value) {
+                var parts = value.split('/');
+                if (parts.length === 3) {
+                    value = parts[2] + '-' +
+                        (parts[0].length === 1 ? '0' : '') + parts[0] + '-' +
+                        (parts[1].length === 1 ? '0' : '') + parts[1];
+                }
+            }
+
+            formData[formFieldId] = value;
+        }
+
+        return {
+            success: true,
+            formData: formData,
+            rowIndex: rowIndex,
+            recordId: recordId,
+            archiveSource: foundArchSrc,
+            isArchived: isArchived
+        };
+
+    } catch (e) {
+        Logger.log('getApplicantForIntake error: ' + e.message);
+        return { success: false, error: 'Failed to load record: ' + e.message };
     }
 }

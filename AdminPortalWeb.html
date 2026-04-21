@@ -29,6 +29,10 @@
   v4.6 - Edit Applicant moved from Maintain System sub-tab to its own main tab,
          positioned to the right of Maintain System. showMainTab() updated to
          handle it as a standalone tab (no sub-nav, shows editApplicantTab directly).
+  v7.14 - ae_loadRecord(): replaced inline edit form with full Applicant Intake
+          form launch. Opens AI URL with ?mode=staff&recordId=XXX via getWebAppUrl()
+          so all fields are pre-populated from the existing record and editable.
+          Works for both active (AM) and archived records.
 -->
 
 <!DOCTYPE html>
@@ -4743,57 +4747,36 @@
         }
 
         /**
-         * Populates the edit form from the selected applicant record.
-         * Uses ae_reverseMap to translate AM column headers → form element IDs.
-         * Handles text/select/textarea, date inputs, and radio buttons.
-         * Assistance Receiving is set on the dropdown (single value stored in AM).
-         * v6.10 - Shows archive banner and disables Save for archived records.
+         * Opens the full Applicant Intake form in a new tab for the selected record.
+         * Replaces inline edit panel — calls getWebAppUrl() for dev/prod correctness,
+         * then opens AI with ?mode=staff&recordId=XXX so all fields are pre-populated.
+         * v6.11 - Replaced inline form population with full AI form launch.
          * @param {Object} rec    - Record object keyed by AM column header
-         * @param {number} rowIdx - 1-based sheet row index (null for archive records)
+         * @param {number} rowIdx - 1-based sheet row index (kept for call-site compat)
          */
         function ae_loadRecord(rec, rowIdx) {
-            ae_currentRecord = rec;
-            ae_currentRowIndex = rowIdx;
-            document.getElementById('ae_rowIndex').value = rowIdx || '';
-            document.getElementById('ae_recordId').value = rec['ID'] || '';
-
-            for (var amHeader in rec) {
-                var aiId = ae_reverseMap[amHeader];
-                if (!aiId) continue;
-                var val = (rec[amHeader] !== null && rec[amHeader] !== undefined) ? rec[amHeader].toString() : '';
-
-                // Named input / select / textarea with ae_ prefix
-                var el = document.getElementById('ae_' + aiId);
-                if (el) {
-                    if (el.type === 'date') {
-                        el.value = ae_toDateInput(val);
-                    } else if (aiId === 'phoneNumber') {
-                        el.value = ae_formatPhone(val);
-                    } else {
-                        el.value = val;
-                    }
-                    continue;
-                }
-
-                // Radio buttons (grouped by name, no ae_ prefix on individual inputs)
-                var radios = document.querySelectorAll('#ae_editPanel input[type="radio"][name="' + aiId + '"]');
-                if (radios.length > 0) {
-                    radios.forEach(function (r) { r.checked = (r.value === val); });
-                }
+            var recId = rec['ID'] || '';
+            var archSrc = rec['_archiveSource'] || '';
+            if (!recId) {
+                showMessage('ae_searchMessage', 'Record ID missing — cannot open form.', 'error');
+                document.getElementById('ae_searchMessage').classList.remove('hidden');
+                return;
             }
 
-            var isArchived = !!(rec['_archived']);
-            document.getElementById('ae_archiveBanner').classList.toggle('hidden', !isArchived);
-            document.getElementById('ae_archiveSourceLabel').textContent = rec['_archiveSource'] || '';
-            document.getElementById('ae_saveBtn').disabled = isArchived;
-            // Also hide the bottom Save button in Section 6 if archived
-            var bottomSave = document.querySelector('#ae_editPanel button.btn-primary:last-of-type');
-            if (bottomSave) bottomSave.disabled = isArchived;
+            showMessage('ae_searchMessage', 'Opening full intake form for Record ' + recId + '…', 'success');
+            document.getElementById('ae_searchMessage').classList.remove('hidden');
 
-            document.getElementById('ae_searchPanel').classList.add('hidden');
-            document.getElementById('ae_resultsPanel').classList.add('hidden');
-            document.getElementById('ae_editPanel').classList.remove('hidden');
-            document.getElementById('ae_editPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+            google.script.run
+                .withSuccessHandler(function (baseUrl) {
+                    var url = baseUrl + '?mode=staff&recordId=' + encodeURIComponent(recId);
+                    if (archSrc) url += '&archiveSource=' + encodeURIComponent(archSrc);
+                    window.open(url, '_blank');
+                })
+                .withFailureHandler(function (e) {
+                    showMessage('ae_searchMessage', 'Could not get portal URL: ' + e.message, 'error');
+                    document.getElementById('ae_searchMessage').classList.remove('hidden');
+                })
+                .getWebAppUrl();
         }
 
         /**
